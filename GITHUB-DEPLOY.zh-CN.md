@@ -12,11 +12,10 @@ sudo apt-get update
 sudo apt-get install -y curl ca-certificates
 ```
 
-选择含 `deploy-db.sh` 的分支或已验证的 commit。当前部署代码位于
-`codex/deploy-db` 分支；`main` 在合并前只有原安装脚本。下载命令：
+部署脚本与安装器均已合入 `main`。下载命令：
 
 ```bash
-DEPLOY_REF=codex/deploy-db
+DEPLOY_REF=main
 curl --fail --show-error --location --proto '=https' --proto-redir '=https' \
   "https://api.github.com/repos/jhchong0405/perodua-server-dependencies/tarball/${DEPLOY_REF}" \
   --output perodua-server-dependencies.tar.gz

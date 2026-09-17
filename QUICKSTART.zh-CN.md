@@ -75,4 +75,4 @@ sudo bash deploy-db.sh --config deploy.conf
 测试连接。`SUCCESS` 表示数据库本机检查通过，不代表外部网络或 Odoo 已验收。
 
 如果失败，先查看对应日志再重跑。不要用删除现有数据库的方式强行继续。
-完整限制、备份制作方法和故障恢复说明见 `README.md`。
+完整限制、备份制作方法和故障恢复说明见 `DEPLOYMENT.md`。
