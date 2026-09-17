@@ -145,10 +145,13 @@ database owner. Required extension binaries must already be installed. Extension
 requiring superuser privileges fail closed; prepare a reviewed extension-specific
 migration instead of making the application account a superuser.
 
-Access rules are prepended for this database only: local application connections
+Access rules are prepended for the target database: local application connections
 and the specified App Server source use SCRAM; other TCP sources/users are
-rejected for this database. Unix-socket administration and other databases' HBA
-rules are preserved. Existing listener addresses are preserved and the requested
+rejected for this database. When `APP_CIDR` is configured, the same `DB_USER` and
+source also receive SCRAM access to the `postgres` maintenance database, which
+the App preflight and Odoo entrypoint require before startup. This does not grant
+database-creation or superuser privileges. Unix-socket administration and existing
+HBA rules are preserved. Existing listener addresses are preserved and the requested
 address is added. Adding a listener may restart this PostgreSQL cluster, briefly
 disconnecting its other sessions; deploy on the intended DB server during its
 setup/maintenance window. Configuration snapshots are retained; failed network

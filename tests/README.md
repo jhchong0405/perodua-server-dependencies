@@ -1,4 +1,29 @@
-# Database deployment integration checks
+# Deployment checks
+
+App script and scoped database-access regressions (standard-library Python;
+temporary files and a fake Docker CLI, no real deployment):
+
+```bash
+python3 -m unittest discover -s tests -p 'test_*.py' -v
+```
+
+The App cases cover argument/configuration validation, literal value handling,
+hidden GHCR prompts, credential cleanup and registry error handling.
+See [the two-server acceptance record](TWO-SERVER-2026-09-18.md) for the real
+Ubuntu VM deployment, attachment persistence and separate reboot checks.
+
+## Database deployment integration checks
+
+The scoped App maintenance-database rule has a separate, non-destructive regression:
+
+```bash
+python3 -m unittest discover -s tests -p test_app_maintenance_hba.py -v
+```
+
+It executes the script's HBA writer against temporary files, checking the exact
+role/source/SCRAM scope, unchanged existing rules, repeat-run idempotence, source
+replacement and removal when `APP_CIDR` is cleared. It does not start PostgreSQL
+or establish network connectivity; verify those from the App Server separately.
 
 These tests install **real PostgreSQL 16 on Ubuntu 24.04** in a disposable Docker
 image, generate custom-format fixture backups, and invoke `deploy-db.sh` with the
