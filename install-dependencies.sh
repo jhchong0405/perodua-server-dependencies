@@ -77,8 +77,10 @@ if [[ $role == app ]]; then
     docker buildx version
 else
     update_packages
-    install_packages postgresql-16
-    packages=(postgresql-16)
+    # Native restore uses the client tools, trusted extensions, Python standard
+    # library, HTTPS downloads, and source-database locales. No pip environment.
+    packages=(postgresql-16 postgresql-client-16 postgresql-contrib python3 curl ca-certificates locales)
+    install_packages "${packages[@]}"
     /usr/lib/postgresql/16/bin/postgres --version
 fi
 
