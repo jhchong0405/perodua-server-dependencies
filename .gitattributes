@@ -2,4 +2,5 @@
 *.py text eol=lf
 *.md text eol=lf
 *.conf.example text eol=lf
+*.env.example text eol=lf
 Dockerfile text eol=lf

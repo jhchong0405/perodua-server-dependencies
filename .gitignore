@@ -1,4 +1,6 @@
 /deploy.conf
+/app.env
+/filestore*.tar.gz
 /*.dump
 /*.zip
 /*.sql

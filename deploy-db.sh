@@ -318,8 +318,8 @@ if (( ! RESTORED )); then
 fi
 
 PHASE=network
-# Prepend a database-specific block: a later broad HBA rule must never bypass it.
-# Leave local Unix socket access and all other databases' rules untouched.
+# Prepend target-database rules and the App's scoped maintenance connection.
+# Preserve Unix socket access and existing rules for other databases/users.
 HBA=$(admin -c 'SHOW hba_file')
 [[ $HBA == "$CLUSTER_CONF/pg_hba.conf" && ! -L $HBA ]] || die 'Custom/symlink pg_hba.conf is not supported; configure access manually first.'
 [[ $(admin -c 'SELECT count(*) FROM pg_hba_file_rules WHERE error IS NOT NULL') == 0 ]] || die 'Existing HBA configuration has errors; repair it first.'
@@ -342,6 +342,9 @@ for line in lines:
         inside=False; continue
     if not inside: remaining.append(line)
 block=[begin]
+if cidr:
+    # The App preflight and pinned Odoo entrypoint query postgres before startup.
+    block.append(f'host "postgres" "{user}" {cidr} scram-sha-256')
 for name in filter(None, [db, stage]):
     block.append(f'host "{name}" "{user}" 127.0.0.1/32 scram-sha-256')
     if cidr and name==db: block.append(f'host "{name}" "{user}" {cidr} scram-sha-256')
