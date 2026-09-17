@@ -1,0 +1,6 @@
+/deploy.conf
+/*.dump
+/*.zip
+/*.sql
+*.password
+__pycache__/

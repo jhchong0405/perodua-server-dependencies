@@ -1,0 +1,29 @@
+# Copy to deploy.conf. KEY=value only; this file is NOT executed as shell code.
+# Do not store passwords here. Values are literal; no $VARIABLE expansion.
+DB_NAME=perodua
+DB_USER=odoo
+# Match the ORIGINAL database locales; these defaults suit a typical Odoo DB
+# on Ubuntu. Inspect the source pg_database.datcollate/datctype before delivery.
+DB_LC_COLLATE=C
+DB_LC_CTYPE=C.UTF-8
+PG_CLUSTER=main
+PG_PORT=5432
+
+# Set exactly one source. Relative files resolve against this configuration.
+BACKUP_FILE=database.dump
+BACKUP_URL=
+# Obtain this checksum from the person preparing the backup, independently of
+# the download. Example: sha256sum database.dump
+BACKUP_SHA256=REPLACE_WITH_64_DIGIT_SHA256
+# For HTTPS Basic authentication; password is prompted by curl. Empty = no auth.
+DOWNLOAD_USER=
+
+# Start locally, or set e.g. DB_LISTEN_IP=10.0.0.20 and APP_CIDR=10.0.0.10/32.
+# IPv4 only; existing cluster listeners are preserved.
+DB_LISTEN_IP=127.0.0.1
+APP_CIDR=
+
+# Minimum available MiB on BOTH the staging-download and PostgreSQL filesystems.
+# Size this for the uncompressed database, indexes, WAL, backup and headroom.
+MIN_FREE_MB=1024
+EXPECTED_TABLES=public.ir_module_module,public.res_users
