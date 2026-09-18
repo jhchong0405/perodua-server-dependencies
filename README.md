@@ -5,7 +5,8 @@ App runs Web + Odoo; DB runs PostgreSQL 16. Release: **Client Stable UIUX v1.0.0
 
 Before starting, get a matching `database.dump` (`pg_dump -Fc`), its SHA-256 and
 original database name/locales, plus the matching `filestore.tar.gz` containing
-`filestore/DB_NAME/...`. Use the same database name on both servers.
+`filestore/DB_NAME/...`. Replace `DB_NAME` with the actual database name: the
+archive directory and both servers' `DB_NAME` settings must match.
 Allow **App IP → DB IP:5432** and **browser → App IP:8110** in network/firewall rules.
 
 ## 1. On both servers: download
@@ -56,6 +57,15 @@ Enter the DB server's IP, port `5432`, and the same database name, user and pass
 If asked, enter your GitHub username and GHCR token (`read:packages` + package access).
 Passwords/tokens are hidden while typing.
 
+The script reuses a cached image when its exact pinned digest is present;
+otherwise it shows Odoo/Web pull progress. When authentication is needed,
+successful GHCR login is confirmed.
+Temporary network errors get at most **3 attempts**, **3 seconds apart**.
+Each image's pull attempts retain the exit code and original Docker error with
+credentials redacted in `/opt/perodua-app.logs/run-*` (or `<DEPLOY_DIR>.logs/run-*`
+for a custom deployment directory). Tokens are excluded from these diagnostics;
+temporary registry credentials are removed on exit.
+
 For a database with attachments, the first run stops at **`Filestore incomplete`**
 after creating the App configuration and volume. Only for that message, restore
 the matching archive below; resolve any other error first. Do not create the volume manually.
@@ -67,6 +77,12 @@ sudo docker compose -p perodua-client-uiux -f /opt/perodua-app/compose.yml \
   'test ! -d "/var/lib/odoo/filestore/$DB_NAME"; tar --no-same-owner -xzf /restore.tar.gz -C /var/lib/odoo; chown -R odoo:odoo "/var/lib/odoo/filestore/$DB_NAME"'
 sudo bash deploy-app.sh
 ```
+
+If `chown` reports a missing directory, stop and compare the DB server's
+`DB_NAME`, the App's `/opt/perodua-app/app.env` and the archive's
+`filestore/<actual-database-name>/` directory. Do not repeatedly extract the archive
+or delete existing data to bypass the error. Filestore restoration is a separate
+step from database restoration and App deployment.
 
 ## 4. Open and check
 
