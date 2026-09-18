@@ -65,6 +65,18 @@ class DeploymentSafetyTests(unittest.TestCase):
         self.fake = self.bin / "docker"
         self.fake.write_text(self.fake_docker_source(), encoding="utf-8")
         self.fake.chmod(0o755)
+        # Retry timing is tested by its calls; no test waits or invokes Docker.
+        self.sleep_log = self.base / "sleep-calls.jsonl"
+        self.env["FAKE_SLEEP_LOG"] = str(self.sleep_log)
+        fake_sleep = self.bin / "sleep"
+        fake_sleep.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, os, sys\n"
+            "with open(os.environ['FAKE_SLEEP_LOG'], 'a') as stream:\n"
+            "    stream.write(json.dumps(sys.argv[1:]) + '\\n')\n",
+            encoding="utf-8",
+        )
+        fake_sleep.chmod(0o755)
         self.write_config()
 
     @staticmethod
@@ -86,6 +98,8 @@ if os.environ.get('FAKE_DOCKER_MODE') in ('auth', 'network'):
     if len(args) > 1 and args[0] in ('volume', 'network') and args[1] == 'ls': sys.exit(0)
     if args[:2] == ['context', 'inspect']:
         print('unix:///var/run/docker.sock'); sys.exit(0)
+    if args[:2] == ['image', 'inspect']:
+        print('Error response from daemon: No such image', file=sys.stderr); sys.exit(1)
     if args and args[0] == 'pull':
         if os.environ.get('FAKE_DOCKER_MODE') == 'network':
             print('dial tcp: network is unreachable', file=sys.stderr); sys.exit(1)

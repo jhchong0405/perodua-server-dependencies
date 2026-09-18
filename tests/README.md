@@ -9,6 +9,13 @@ python3 -m unittest discover -s tests -p 'test_*.py' -v
 
 The App cases cover argument/configuration validation, literal value handling,
 hidden GHCR prompts, credential cleanup and registry error handling.
+For pull diagnostics, verify exact-digest cache reuse, visible Odoo/Web progress
+and login success, and temporary network failures with at most 3 total attempts
+and 3-second intervals. Each image/attempt must retain its exit code and the
+original Docker error with credentials redacted under `<DEPLOY_DIR>.logs/run-*`
+(`/opt/perodua-app.logs/run-*` by default). Check that tokens are absent and
+temporary Docker authentication is removed while diagnostic logs remain.
+Fake-Docker results establish script behavior, not real registry availability.
 See [the two-server acceptance record](TWO-SERVER-2026-09-18.md) for the real
 Ubuntu VM deployment, attachment persistence and separate reboot checks.
 

@@ -40,6 +40,34 @@ Sign in, open a business page and download an existing attachment.
 Send the failed check's output and the relevant log excerpt to support.
 Remove passwords, tokens and sensitive business data before sharing.
 
+**Image pull failures:** the deployment first reuses an exact pinned digest from
+the local cache. Downloads show Odoo/Web progress; a successful interactive
+GHCR login is confirmed. Temporary network failures allow at most 3 total
+attempts, with 3 seconds between attempts.
+The printed diagnostic directory contains each image/attempt's exit code and
+original Docker error with credentials redacted:
+
+```bash
+sudo ls -lt /opt/perodua-app.logs
+```
+
+Logs are retained under `run-*`; a custom `--dir` uses `<DEPLOY_DIR>.logs/run-*`.
+Share the failed attempt's log. Tokens are excluded from saved diagnostics and
+temporary registry credentials are cleared when deployment exits.
+
+**Missing filestore directory:** if restoration stops at `chown: cannot access`,
+compare `DB_NAME` in the DB server's `deploy.conf`, the App server's
+`/opt/perodua-app/app.env`, and the `filestore/<database-name>/` archive directory.
+All three names must match. Inspect the archive without extracting it:
+
+```bash
+tar -tzf /path/to/filestore.tar.gz | sed -n '1,10p'
+```
+
+Use the actual archive path. Keep existing data and stop repeated extraction
+attempts until the mismatch is resolved. Follow the separate filestore restore
+step in [README.md](README.md).
+
 **App Server:**
 
 ```bash

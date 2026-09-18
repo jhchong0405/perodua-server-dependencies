@@ -11,7 +11,7 @@ ODOO_IMAGE=ghcr.io/jhchong0405/perodua-odoo:client-stable-uiux-v1.0.0@sha256:c16
 WEB_IMAGE=ghcr.io/jhchong0405/perodua-odoo:client-stable-uiux-web-v1.0.0@sha256:6f7f7bc3700c6506ab43a9505940538893d75ef4a396e0cc8077f37106dcbdff
 INIT_MODULES=perodua_client_stable,perodua_demo_client,perodua_gateway,perodua_forecast_workbook,perodua_supplier_execution,perodua_uiux_api
 DEPLOY_DIR=/opt/perodua-app
-CONFIG='' NON_INTERACTIVE=0 INIT_DB=0 TEMP_DIR='' AUTH_DIR='' STARTED=0
+CONFIG='' NON_INTERACTIVE=0 INIT_DB=0 TEMP_DIR='' AUTH_DIR='' REGISTRY_LOG_DIR='' STARTED=0
 DB_HOST='' DB_PORT=5432 DB_NAME=perodua DB_USER=odoo DB_PASSWORD_FILE=''
 PROJECT_NAME=perodua-client-uiux HTTP_PORT=8110 BIND_IP=0.0.0.0
 STARTUP_TIMEOUT=600 INIT_TIMEOUT=3600
@@ -27,6 +27,9 @@ release's client demonstration dataset. It never upgrades an existing database.
 --dir defaults to /opt/perodua-app; existing configuration is reused there.
 --config accepts literal KEY=VALUE lines (see app.env.example), never shell code.
 HTTP only: default 0.0.0.0:8110. Odoo ports are private to the Compose network.
+Exact pinned images already present locally are reused. Transient pull failures
+get up to three attempts. Registry progress/errors are shown and logs are kept
+in <deployment-directory>.logs/run-*; temporary login credentials are removed.
 HELP
 }
 fail() { printf 'Error: %s\n' "$*" >&2; exit 1; }
@@ -35,6 +38,9 @@ cleanup() {
     trap - EXIT
     [[ -z $TEMP_DIR ]] || rm -rf -- "$TEMP_DIR"
     [[ -z $AUTH_DIR ]] || rm -rf -- "$AUTH_DIR"
+    if [[ -n $REGISTRY_LOG_DIR ]]; then
+        printf 'Registry logs retained: %s\n' "$REGISTRY_LOG_DIR" >&2
+    fi
     if (( status != 0 && STARTED )); then
         printf 'Deployment did not pass verification. Existing database and volumes were retained.\n' >&2
         printf 'Logs: docker compose --project-name %q --file %q logs --tail 100\n' "$PROJECT_NAME" "$DEPLOY_DIR/compose.yml" >&2
@@ -154,19 +160,73 @@ unset password
 # read its bind-mounted secret; Docker Compose file secrets do not remap modes.
 chmod 0444 "$TEMP_DIR/db_password"
 
-auth_error() { grep -Eiq 'unauthorized|authentication required|denied|forbidden|403|401|no basic auth' "$1"; }
-pull_image() {
-    local image=$1 username token attempts=0 context_endpoint
-    printf 'Pulling pinned image: %s (the first download can take several minutes)...\n' "${image%@*}"
-    while ! docker pull "$image" > "$TEMP_DIR/pull.log" 2>&1; do
-        if ! auth_error "$TEMP_DIR/pull.log"; then
-            if grep -Eiq 'manifest unknown|not found|manifest invalid' "$TEMP_DIR/pull.log"; then
-                fail 'The pinned image was not found in GHCR. Check the release with the publisher'
-            fi
-            fail 'GHCR pull failed due to network, registry, or Docker error. Check connectivity and available disk space'
+init_registry_logs() {
+    local root="${DEPLOY_DIR}.logs"
+    [[ ! -L $root && ( ! -e $root || ( -d $root && -O $root ) ) ]] || fail 'Registry log directory must be an owned directory, not a symbolic link'
+    mkdir -p -- "$root"
+    chmod 0700 "$root"
+    REGISTRY_LOG_DIR=$(mktemp -d "$root/run-$(date -u +%Y%m%dT%H%M%SZ)-XXXXXXXX")
+    printf 'Registry logs: %s\n' "$REGISTRY_LOG_DIR"
+}
+
+# Never write credentials or signed download URLs to the terminal or retained logs.
+# registry_secret is local to pull_image and inherited by this pipeline subshell.
+redact_registry_output() {
+    local line
+    while IFS= read -r line || [[ -n $line ]]; do
+        if [[ -n ${registry_secret:-} ]]; then
+            line=${line//"$registry_secret"/[REDACTED]}
         fi
-        ((NON_INTERACTIVE == 0)) || fail 'GHCR authentication is required. Login with docker login ghcr.io first, then retry'
-        ((attempts < 3)) || fail 'GHCR authentication failed after three attempts'
+        printf '%s\n' "$line"
+    done | sed -u -E \
+        -e 's/(gh[pousr]_[[:alnum:]_]+|github_pat_[[:alnum:]_]+)/[REDACTED]/g' \
+        -e 's#(https?://)[^/@[:space:]]+:[^/@[:space:]]+@#\1[REDACTED]@#g' \
+        -e 's#(https?://[^?[:space:]"<>]+)\?[^[:space:]"<>]+#\1?[REDACTED]#g' \
+        -e 's/(Authorization:[[:space:]]*(Basic|Bearer)[[:space:]]+)[^[:space:]]+/\1[REDACTED]/Ig'
+}
+
+auth_error() {
+    grep -Eiq 'unauthorized|authentication required|no basic auth|insufficient_scope|requested access.*denied|denied:[[:space:]]*(denied|permission_denied)|forbidden|HTTP(/[0-9.]+)?[[:space:]]+(401|403)([^0-9]|$)|status([[:space:]]+code)?[=:[:space:]]+(401|403)([^0-9]|$)|unexpected status.*[[:space:]](401|403)([^0-9]|$)' "$1"
+}
+
+transient_registry_error() {
+    grep -Eiq 'i/o timeout|TLS handshake timeout|context deadline exceeded|Client.Timeout|timed out|timeout awaiting|connection reset|connection refused|network is unreachable|no route to host|temporary failure in name resolution|no such host|unexpected EOF|(^|[[:space:]])EOF([[:space:]]|$)|too many requests|toomanyrequests|HTTP(/[0-9.]+)?[[:space:]]+(429|50[0-9])([^0-9]|$)|status([[:space:]]+code)?[=:[:space:]]+(429|50[0-9])([^0-9]|$)|unexpected status.*[[:space:]](429|50[0-9])([^0-9]|$)' "$1"
+}
+
+pull_image() {
+    local image=$1 label=$2 slug=$3 username token registry_secret='' context_endpoint
+    local auth_attempts=0 network_failures=0 pull_attempt=0 pull_log login_log docker_status
+    local -a statuses
+    if docker image inspect "$image" --format '{{.Id}}' >/dev/null 2>&1; then
+        printf 'Using cached pinned image: %s (%s)\n' "$image" "$label"
+        return
+    fi
+    while :; do
+        pull_attempt=$((pull_attempt + 1))
+        pull_log="$REGISTRY_LOG_DIR/$slug-pull-$pull_attempt.log"
+        printf 'Pulling pinned image: %s (%s, attempt %s)\n' "$image" "$label" "$pull_attempt"
+        if docker pull "$image" 2>&1 | redact_registry_output | tee "$pull_log"; then
+            printf 'Docker exit code: 0; image: %s\n' "$image" | tee -a "$pull_log" >/dev/null
+            printf 'Pulled pinned image: %s (%s)\n' "$image" "$label"
+            return
+        else
+            statuses=("${PIPESTATUS[@]}")
+        fi
+        docker_status=${statuses[0]}
+        (( statuses[1] == 0 && statuses[2] == 0 )) || fail "Could not record registry output for $label; Docker exit code $docker_status. Check log storage: $REGISTRY_LOG_DIR"
+        printf 'Docker exit code: %s; image: %s; log: %s\n' "$docker_status" "$image" "$pull_log" | tee -a "$pull_log" >&2
+        if transient_registry_error "$pull_log"; then
+            network_failures=$((network_failures + 1))
+            ((network_failures < 3)) || fail "GHCR pull failed for $label after three network attempts; Docker exit code $docker_status. Log: $pull_log"
+            printf 'Temporary registry/network failure for %s. Retrying in 3 seconds (%s/3 failed attempts).\n' "$label" "$network_failures"
+            sleep 3
+            continue
+        fi
+        if ! auth_error "$pull_log"; then
+            fail "GHCR pull failed for $label ($image); Docker exit code $docker_status. See the error above and log: $pull_log"
+        fi
+        ((NON_INTERACTIVE == 0)) || fail "GHCR authentication is required for $label. Login with docker login ghcr.io first, then retry. Log: $pull_log"
+        ((auth_attempts < 3)) || fail "GHCR authentication failed after three attempts for $label. Log: $pull_log"
         [[ -t 0 ]] || fail 'GHCR authentication requires a terminal'
         printf 'GHCR requires authentication. Token needs read:packages and access to this package.\n'
         read -r -p 'GitHub username (blank cancels): ' username || fail 'Login cancelled'
@@ -185,16 +245,28 @@ pull_image() {
             unset DOCKER_CONTEXT
             printf '{}\n' > "$AUTH_DIR/config.json"
         fi
-        attempts=$((attempts + 1))
-        if ! printf '%s' "$token" | docker login ghcr.io --username "$username" --password-stdin > "$TEMP_DIR/login.log" 2>&1; then
-            printf 'Login failed. Check the token, username and GHCR connection.\n' >&2
+        auth_attempts=$((auth_attempts + 1))
+        login_log="$REGISTRY_LOG_DIR/$slug-login-$auth_attempts.log"
+        registry_secret=$token
+        printf 'Logging in to GHCR for %s...\n' "$label"
+        if printf '%s' "$token" | docker login ghcr.io --username "$username" --password-stdin 2>&1 | redact_registry_output | tee "$login_log"; then
+            printf 'Docker login exit code: 0\n' | tee -a "$login_log" >/dev/null
+            printf 'GHCR login succeeded; continuing %s download.\n' "$label"
+        else
+            statuses=("${PIPESTATUS[@]}")
+            docker_status=${statuses[1]}
+            unset token registry_secret
+            (( statuses[2] == 0 && statuses[3] == 0 )) || fail "Could not record GHCR login output; Docker exit code $docker_status. Check log storage: $REGISTRY_LOG_DIR"
+            printf 'Docker login exit code: %s; log: %s\n' "$docker_status" "$login_log" | tee -a "$login_log" >&2
+            auth_error "$login_log" || fail "GHCR login failed due to a registry, network or Docker error. Log: $login_log"
+            printf 'Login failed. Check the token, username and package access.\n' >&2
         fi
-        unset token
+        unset token registry_secret
     done
-    printf 'Pulled pinned image: %s\n' "${image%@*}"
 }
-pull_image "$ODOO_IMAGE"
-pull_image "$WEB_IMAGE"
+init_registry_logs
+pull_image "$ODOO_IMAGE" 'Odoo backend' odoo
+pull_image "$WEB_IMAGE" 'Web frontend' web
 
 cat > "$TEMP_DIR/preflight.py" <<'PY'
 import hashlib, os, pathlib, sys
