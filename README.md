@@ -81,4 +81,4 @@ Expect only **web** and **odoo**, both healthy. The DB lives on the other server
 attachments live in the App's persistent filestore volume. Back up both.
 Services start automatically after reboot. This guide uses HTTP; add HTTPS for production.
 
-[Configuration reference](DEPLOYMENT.md) · [Verification](tests/README.md)
+[Client self-check](RUNBOOK.md) · [Configuration reference](DEPLOYMENT.md) · [Verification](tests/README.md)

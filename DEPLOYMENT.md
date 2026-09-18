@@ -36,7 +36,8 @@ certificates are needed for HTTPS downloads; a local backup works offline once
 the other packages are installed.
 
 For the GitHub-only script delivery path, with a backup transferred separately
-to any local directory, follow [GITHUB-DEPLOY.zh-CN.md](GITHUB-DEPLOY.zh-CN.md).
+to any local directory, follow [README.md](README.md). For a backup outside the
+downloaded setup directory, set `BACKUP_FILE` to its absolute path.
 The repository contains deployment code and example configuration only. Database
 archives, real configuration and passwords are never required in GitHub.
 
