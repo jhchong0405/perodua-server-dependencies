@@ -67,7 +67,8 @@ deployment acceptance checks.
 
 ## GitHub delivery with a separately transferred backup
 
-Follow `GITHUB-DEPLOY.zh-CN.md` in a fresh Ubuntu 24.04 environment. Retrieve the
+Follow the download and DB Server steps in [README.md](../README.md) in a fresh
+Ubuntu 24.04 environment. Retrieve the
 repository from GitHub at the exact commit under test, run that downloaded
 `install-dependencies.sh --role db`, and transfer the backup separately to a path
 outside the repository. Do not mount a local checkout or use this suite's
