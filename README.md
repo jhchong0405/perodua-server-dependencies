@@ -13,10 +13,12 @@ To restore an existing database instead, see [From a backup](#from-a-backup).
 ## 1. Download (both servers)
 
 ```bash
-sudo apt-get update && sudo apt-get install -y curl ca-certificates nano
 curl -fL https://api.github.com/repos/jhchong0405/perodua-server-dependencies/tarball/main -o setup.tar.gz
 mkdir -p setup && tar -xzf setup.tar.gz -C setup --strip-components=1 && cd setup
 ```
+
+Standard Ubuntu servers include `curl`. On a minimal image without it, first run
+`sudo apt-get update && sudo apt-get install -y curl ca-certificates`.
 
 ## 2. DB server
 

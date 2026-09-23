@@ -81,7 +81,8 @@ else
     update_packages
     # Native restore uses the client tools, trusted extensions, Python standard
     # library, HTTPS downloads, and source-database locales. No pip environment.
-    packages=(postgresql-16 postgresql-client-16 postgresql-contrib python3 curl ca-certificates locales)
+    # nano is for editing deploy.conf, the next step in the README.
+    packages=(postgresql-16 postgresql-client-16 postgresql-contrib python3 curl ca-certificates locales nano)
     install_packages "${packages[@]}"
     /usr/lib/postgresql/16/bin/postgres --version
 fi
