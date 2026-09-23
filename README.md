@@ -30,12 +30,12 @@ sudo bash deploy-db.sh
 The script asks:
 
 1. What to set up: press Enter for a fresh UAT system.
-2. Where the App server runs: press Enter for another server, or enter `2` if it
-   runs on this server in Docker (then questions 3 and 4 are skipped).
-3. This server's internal IP: it lists the addresses it found; press Enter to use
+2. This server's internal IP: it lists the addresses it found; press Enter to use
    the suggested one.
-4. The App server's IP.
-5. A new database password (at least 12 characters), twice. Keep it for the App server.
+3. The App server's IP, as this server sees it: its private IP if both servers
+   share a private network, otherwise its public IP (`curl -4 -s ifconfig.me`
+   on the App server shows it).
+4. A new database password (at least 12 characters), twice. Keep it for the App server.
 
 If an answer cannot be used, the script says why and asks again. Wait for
 `SUCCESS`; it ends by printing the `DB_HOST` for the App server. A fresh UAT

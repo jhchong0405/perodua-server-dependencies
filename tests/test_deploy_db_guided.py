@@ -2,8 +2,8 @@
 
 The real script runs on a pseudo-terminal with --check-config, so nothing is
 deployed and PostgreSQL is not needed (pg_conftool is a stub). Docker is a stub
-too: FAKE_GATEWAY, when set, is reported as this server's Docker bridge address.
-The internal-IP question needs one real non-loopback IPv4 address on the host.
+too: FAKE_GATEWAY, when set, is reported as a Docker network address of this
+server. The internal-IP question needs one real non-loopback IPv4 address.
 """
 
 import os
@@ -20,10 +20,10 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SETUP = b"What do you want to set up? [1]: "
-WHERE = b"Where will the App server run? [1]: "
 LISTEN = b"which the App server connects to"
 APP = b"only it may connect): "
 SAVE = b"and continue? [Y/n]: "
+CTRL_C = b"\x03"
 
 
 def local_ipv4():
@@ -52,15 +52,14 @@ class GuidedSetupTests(unittest.TestCase):
         self.pg_conftool = stubs / "pg_conftool"
         self.pg_conftool.write_text('#!/bin/sh\necho "port = 5433"\n')
         self.pg_conftool.chmod(0o755)
-        docker = stubs / "docker"
         # Like Docker: one output line per network, and networks without an
         # address (host, none) print empty lines before the gateway.
+        docker = stubs / "docker"
         docker.write_text(
             '#!/bin/sh\n'
             '[ -n "$FAKE_GATEWAY" ] || exit 1\n'
             'case "$*" in\n'
             '  "network ls -q") printf "host-network\\nfixture-network\\n" ;;\n'
-            '  "network inspect bridge "*) echo "$FAKE_GATEWAY " ;;\n'
             '  "network inspect "*) printf "\\n%s \\n" "$FAKE_GATEWAY" ;;\n'
             '  *) exit 1 ;;\n'
             'esac\n')
@@ -92,7 +91,7 @@ class GuidedSetupTests(unittest.TestCase):
                     if time.monotonic() > deadline or not read_more():
                         self.fail(f"Expected prompt {prompt!r}; received {output.decode(errors='replace')}")
                 cursor = output.index(prompt, cursor) + len(prompt)
-                os.write(master, answer + b"\n")
+                os.write(master, answer if answer == CTRL_C else answer + b"\n")
             while status is None and time.monotonic() < deadline:
                 alive = read_more()
                 done, result = os.waitpid(pid, os.WNOHANG)
@@ -117,7 +116,6 @@ class GuidedSetupTests(unittest.TestCase):
         code, output = self.converse([
             (SETUP, b"3"),  # not an option: asked again
             (SETUP, b""),
-            (WHERE, b""),
             (LISTEN, b"192.0.2.10"),  # not an address of this host
             (LISTEN, b""),  # the offered default
             (APP, b"not-an-address"),
@@ -125,10 +123,11 @@ class GuidedSetupTests(unittest.TestCase):
             (SAVE, b""),
         ])
         self.assertEqual(code, 0, output)
+        self.assertNotIn("Where will the App server run", output)
         self.assertIn("Enter 1 or 2.", output)
         self.assertIn(LOCAL, output)
         self.assertIn("192.0.2.10 is not an address of this server", output)
-        self.assertIn("Enter the App server's IPv4 address", output)
+        self.assertIn("Enter the IPv4 address that the App server connects from", output)
         self.assertIn("Configuration valid", output)
         self.assertEqual(self.settings(), [
             "DB_MODE=empty", "DB_NAME=perodua", "DB_USER=odoo", "PG_PORT=5433",
@@ -145,50 +144,31 @@ class GuidedSetupTests(unittest.TestCase):
 
     def test_a_network_can_be_given_instead_of_one_app_address(self):
         code, output = self.converse([
-            (SETUP, b"1"), (WHERE, b"1"), (LISTEN, LOCAL.encode()),
-            (APP, b"10.0.0.0/24"), (SAVE, b"y"),
+            (SETUP, b"1"), (LISTEN, LOCAL.encode()), (APP, b"10.0.0.0/24"), (SAVE, b"y"),
         ])
         self.assertEqual(code, 0, output)
         self.assertIn("APP_CIDR=10.0.0.0/24", self.settings())
 
-    def test_an_app_on_this_server_uses_the_docker_networks(self):
-        self.env["FAKE_GATEWAY"] = LOCAL  # stands in for docker0 (it must be bindable)
-        code, output = self.converse([(SETUP, b""), (WHERE, b"2"), (SAVE, b"")])
-        self.assertEqual(code, 0, output)
-        self.assertIn(f"DB_LISTEN_IP={LOCAL}", self.settings())
-        self.assertIn("APP_CIDR=172.16.0.0/12", self.settings())
-
-    def test_without_docker_the_app_location_is_asked_again(self):
+    def test_this_server_as_the_app_address_is_asked_again(self):
         code, output = self.converse([
-            (SETUP, b""), (WHERE, b"2"), (WHERE, b"1"), (LISTEN, b""), (APP, b"10.0.0.10"), (SAVE, b""),
+            (SETUP, b""), (LISTEN, b""), (APP, LOCAL.encode()), (APP, b"10.0.0.10"), (SAVE, b""),
         ])
         self.assertEqual(code, 0, output)
-        self.assertIn("Docker is not running on this server", output)
+        self.assertIn(f"{LOCAL} is this server. Enter the IP of the App server.", output)
         self.assertIn("APP_CIDR=10.0.0.10/32", self.settings())
 
-    def test_this_server_as_the_app_address_leads_back_to_the_app_location(self):
-        code, output = self.converse([
-            (SETUP, b""), (WHERE, b""), (LISTEN, b""), (APP, LOCAL.encode()),
-            (WHERE, b"1"), (LISTEN, b""), (APP, b"10.0.0.10"), (SAVE, b""),
-        ])
-        self.assertEqual(code, 0, output)
-        self.assertIn(f"{LOCAL} is this server. If the App runs here in Docker, enter 2 below.", output)
-        self.assertIn("APP_CIDR=10.0.0.10/32", self.settings())
-
-    def test_a_docker_address_as_the_internal_ip_leads_back_to_the_app_location(self):
-        self.env["FAKE_GATEWAY"] = LOCAL
-        code, output = self.converse([
-            (SETUP, b""), (WHERE, b"1"), (LISTEN, LOCAL.encode()), (WHERE, b"2"), (SAVE, b""),
-        ])
-        self.assertEqual(code, 0, output)
+    def test_a_docker_address_is_neither_offered_nor_accepted_as_the_internal_ip(self):
+        self.env["FAKE_GATEWAY"] = LOCAL  # the only address here, so nothing usable is left
+        code, output = self.converse([(SETUP, b""), (LISTEN, LOCAL.encode()), (LISTEN, CTRL_C)])
+        self.assertNotEqual(code, 0)
+        self.assertNotIn("This server's addresses", output)
         self.assertIn(f"{LOCAL} is a Docker network address", output)
-        self.assertNotIn(f"This server's addresses: {LOCAL}", output)
-        self.assertIn("APP_CIDR=172.16.0.0/12", self.settings())
+        self.assertFalse(self.config.exists())
 
     def test_declining_the_summary_asks_again(self):
         code, output = self.converse([
-            (SETUP, b""), (WHERE, b""), (LISTEN, b""), (APP, b"10.0.0.10"), (SAVE, b"n"),
-            (WHERE, b""), (LISTEN, b""), (APP, b"10.0.0.20"), (SAVE, b""),
+            (SETUP, b""), (LISTEN, b""), (APP, b"10.0.0.10"), (SAVE, b"n"),
+            (LISTEN, b""), (APP, b"10.0.0.20"), (SAVE, b""),
         ])
         self.assertEqual(code, 0, output)
         self.assertIn("Answer again", output)
