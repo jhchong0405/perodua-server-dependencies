@@ -48,10 +48,35 @@ while (($#)); do
 done
 command -v python3 >/dev/null || die 'Install python3 (standard library only; no pip packages).'
 
-# Guided setup. With no deploy.conf, ask on the terminal for the two addresses a
-# fresh UAT system needs and save them as deploy.conf; everything below reads
-# that file exactly like a hand-written one. An explicit --config is not guided.
+# Guided setup. With no deploy.conf, ask on the terminal for what a fresh UAT
+# system needs, asking again whenever an answer cannot be used, and save it as
+# deploy.conf; everything below reads that file exactly like a hand-written one.
+# An explicit --config is not guided.
+DOCKER_NETWORKS=172.16.0.0/12
 ask() { IFS= read -r -p "$1" ANSWER </dev/tty || die 'Input cancelled.'; ANSWER=${ANSWER//[[:space:]]/}; }
+say() { printf '%s\n' "$@" >/dev/tty; }
+password_ok() { [[ ${#1} -ge 12 && ${#1} -le 1024 && $1 != *[!\ -\~]* ]]; }
+is_public_ipv4() {
+    python3 - "$1" <<'PY' 2>/dev/null
+import ipaddress, sys
+sys.exit(0 if ipaddress.IPv4Address(sys.argv[1]).is_global else 1)
+PY
+}
+docker_gateways() {
+    # Addresses of this server on Docker networks: only containers here reach them.
+    command -v docker >/dev/null || return 0
+    # shellcheck disable=SC2046 # one argument per network ID
+    docker network inspect $(docker network ls -q 2>/dev/null) \
+        --format '{{range .IPAM.Config}}{{.Gateway}} {{end}}' 2>/dev/null || true
+}
+docker_bridge_ipv4() {
+    local gateway
+    command -v docker >/dev/null || return 1
+    for gateway in $(docker network inspect bridge --format '{{range .IPAM.Config}}{{.Gateway}} {{end}}' 2>/dev/null); do
+        if is_local_ipv4 "$gateway"; then printf '%s\n' "$gateway"; return 0; fi
+    done
+    return 1
+}
 is_local_ipv4() {
     python3 - "$1" <<'PY' 2>/dev/null
 import ipaddress, socket, sys
@@ -70,37 +95,82 @@ sys.exit(network.prefixlen == 0 or network.is_multicast or network.is_loopback o
 PY
 }
 guided_setup() {
-    local port listen app address choices=()
+    local port listen app address bridge default choices=() private=() gateways=()
     { : </dev/tty; } 2>/dev/null || die "No configuration at $CONFIG. Copy deploy.conf.example to deploy.conf and edit it, or run on a terminal to be guided."
     port=$(pg_conftool 16 main show port 2>/dev/null | awk '{print $NF}') || true
     [[ $port =~ ^[1-9][0-9]{0,4}$ ]] || die 'PostgreSQL 16 is not installed yet. Run: sudo bash install-dependencies.sh --role db'
+    # One line per network: read every word, not just the first line.
+    read -r -d '' -a gateways < <(docker_gateways) || true
     for address in $(hostname -I 2>/dev/null); do
-        if is_local_ipv4 "$address"; then choices+=("$address"); fi
+        [[ " ${gateways[*]} " != *" $address "* ]] || continue
+        is_local_ipv4 "$address" || continue
+        choices+=("$address")
+        is_public_ipv4 "$address" || private+=("$address")
     done
-    printf 'No deploy.conf found. Your answers will be saved there.\n\n  1) Fresh UAT system (empty database)\n  2) Restore a database backup\n\n' >/dev/tty
-    ask 'Choose [1]: '
-    case ${ANSWER:-1} in
-        1) ;;
-        2) die 'A restore needs the backup details: copy deploy.conf.example to deploy.conf, fill in the backup settings (README, "From a backup"), then run this again.' ;;
-        *) die 'Choose 1 or 2.' ;;
-    esac
-    ((${#choices[@]} == 0)) || printf "\nThis server's addresses: %s\n" "${choices[*]}" >/dev/tty
+    default=${private[0]:-${choices[0]:-}}
+    say 'No deploy.conf found. Your answers will be saved there.' '' \
+        '  1) Fresh UAT system (empty database)' '  2) Restore a database backup' ''
     while :; do
-        ask "This server's internal IP, which the App server connects to [${choices[0]:-}]: "
-        listen=${ANSWER:-${choices[0]:-}}
-        if [[ -n $listen ]] && is_local_ipv4 "$listen"; then break; fi
-        printf '%s is not an address of this server.\n' "${listen:-(nothing entered)}" >/dev/tty
+        ask 'What do you want to set up? [1]: '
+        case ${ANSWER:-1} in
+            1) break ;;
+            2) die 'A restore needs the backup details: copy deploy.conf.example to deploy.conf, fill in the backup settings (README, "From a backup"), then run this again.' ;;
+            *) say 'Enter 1 or 2.' ;;
+        esac
     done
     while :; do
-        ask 'App server IP (only it may connect): '
-        app=$ANSWER
-        [[ -z $app || $app == */* ]] || app+=/32
-        if [[ -n $app ]] && is_app_network "$app"; then break; fi
-        printf 'Enter the IPv4 address of the App server, for example 10.0.0.10.\n' >/dev/tty
+        listen='' app=''
+        say '' '  1) On another server' '  2) On this server, in Docker' ''
+        while [[ -z $app ]]; do
+            ask 'Where will the App server run? [1]: '
+            case ${ANSWER:-1} in
+                1) break ;;
+                2) if bridge=$(docker_bridge_ipv4); then
+                       listen=$bridge app=$DOCKER_NETWORKS
+                   else
+                       say 'Docker is not running on this server. Install it first (sudo bash install-dependencies.sh --role app), or enter 1.'
+                   fi ;;
+                *) say 'Enter 1 or 2.' ;;
+            esac
+        done
+        if [[ -z $app ]]; then
+            ((${#choices[@]} == 0)) || say '' "This server's addresses: ${choices[*]}"
+            while :; do
+                ask "This server's internal IP, which the App server connects to [$default]: "
+                listen=${ANSWER:-$default}
+                if [[ -n $listen && " ${gateways[*]} " == *" $listen "* ]]; then
+                    say "$listen is a Docker network address that only this server reaches. If the App runs here in Docker, enter 2 below."
+                    continue 2
+                fi
+                if [[ -z $listen ]] || ! is_local_ipv4 "$listen"; then
+                    say "${listen:-(nothing entered)} is not an address of this server."
+                    continue
+                fi
+                is_public_ipv4 "$listen" || break
+                say "$listen is a public internet address: PostgreSQL would accept connections on it from anywhere, and only the App server could log in. A private network address is safer."
+                ask 'Use it anyway? [y/N]: '
+                [[ ${ANSWER:-n} != [Yy]* ]] || break
+            done
+            while :; do
+                ask 'App server IP (only it may connect): '
+                app=$ANSWER
+                [[ -z $app || $app == */* ]] || app+=/32
+                if [[ -z $app ]] || ! is_app_network "$app"; then
+                    say "Enter the App server's IPv4 address; 'hostname -I' on the App server shows it."
+                elif [[ $app == */32 ]] && is_local_ipv4 "${app%/32}"; then
+                    say "${app%/32} is this server. If the App runs here in Docker, enter 2 below."
+                    continue 2
+                else
+                    break
+                fi
+            done
+        fi
+        say '' "Fresh UAT database perodua for user odoo on PostgreSQL port $port." \
+            "Listen on $listen and accept connections only from $app."
+        ask "Save these settings to $CONFIG and continue? [Y/n]: "
+        [[ ${ANSWER:-y} != [Yy]* ]] || break
+        say 'Answer again (Ctrl-C stops without saving).'
     done
-    printf '\nFresh UAT database perodua for user odoo on PostgreSQL port %s.\nListen on %s and accept connections only from %s.\n' "$port" "$listen" "$app" >/dev/tty
-    ask "Save these settings to $CONFIG and continue? [Y/n]: "
-    [[ ${ANSWER:-y} == [Yy]* ]] || die 'Nothing was saved or changed.'
     {
         printf '# Created by deploy-db.sh from your answers. All settings: deploy.conf.example.\n'
         printf '%s\n' DB_MODE=empty DB_NAME=perodua DB_USER=odoo "PG_PORT=$port" "DB_LISTEN_IP=$listen" "APP_CIDR=$app"
@@ -208,7 +278,7 @@ if [[ -n $BACKUP_FILE ]]; then
     [[ -f $BACKUP_FILE ]] || die 'BACKUP_FILE does not exist or is not a regular file.'
     BACKUP_FILE=$(realpath -- "$BACKUP_FILE")
 fi
-if ((CHECK_ONLY)); then printf 'Configuration valid. No services, files or databases changed.\n'; exit 0; fi
+if ((CHECK_ONLY)); then printf 'Configuration valid. No services or databases changed.\n'; exit 0; fi
 
 [[ $EUID -eq 0 ]] || die 'Run with sudo or as root.'
 # shellcheck source=/dev/null
@@ -338,14 +408,21 @@ if [[ -n $PASSWORD_FILE ]]; then
     DB_PASSWORD=$(cat -- "$PASSWORD_FILE")
 else
     [[ -r /dev/tty ]] || die 'No terminal available; use --password-file with a protected file.'
-    IFS= read -r -s -p "Database password for $DB_USER: " DB_PASSWORD </dev/tty
-    printf '\n' >/dev/tty
-    IFS= read -r -s -p 'Confirm database password: ' confirmation </dev/tty
-    printf '\n' >/dev/tty
-    [[ $DB_PASSWORD == "$confirmation" ]] || die 'Passwords do not match.'
+    while :; do
+        IFS= read -r -s -p "Database password for $DB_USER (12 or more characters): " DB_PASSWORD </dev/tty || die 'Input cancelled.'
+        printf '\n' >/dev/tty
+        if ! password_ok "$DB_PASSWORD"; then
+            printf 'Use 12-1024 characters: English letters, digits, spaces and punctuation only. Please try again.\n' >&2
+            continue
+        fi
+        IFS= read -r -s -p 'Confirm database password: ' confirmation </dev/tty || die 'Input cancelled.'
+        printf '\n' >/dev/tty
+        [[ $DB_PASSWORD == "$confirmation" ]] && break
+        printf 'The two entries are different. Please try again.\n' >&2
+    done
     unset confirmation
 fi
-[[ ${#DB_PASSWORD} -ge 12 && ${#DB_PASSWORD} -le 1024 && $DB_PASSWORD != *[!\ -\~]* ]] || die 'Use a 12-1024 character printable ASCII password (spaces and punctuation are supported).'
+password_ok "$DB_PASSWORD" || die 'Use a 12-1024 character printable ASCII password (spaces and punctuation are supported).'
 escaped=${DB_PASSWORD//\\/\\\\}; escaped=${escaped//:/\\:}
 printf '127.0.0.1:%s:*:%s:%s\n' "$PG_PORT" "$DB_USER" "$escaped" > "$TMP_DIR/pgpass"
 unset escaped
