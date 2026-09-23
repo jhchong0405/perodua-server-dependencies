@@ -367,6 +367,46 @@ A missing database is created by the App only if `DB_USER` has `CREATEDB`. With
 the least-privileged role from `deploy-db.sh`, the App stops and asks for the
 database to be created on the DB server with `DB_MODE=empty` first.
 
+## Uninstall (`uninstall.sh`)
+
+`uninstall.sh` undoes `deploy-app.sh` (`--role app`) or `deploy-db.sh`
+(`--role db`). It lists what it will remove and changes nothing until the
+database or project name is typed. For unattended use, pass the name with
+`--confirm NAME`; any other value is refused.
+
+**App Server** (`sudo bash uninstall.sh --role app [--dir PATH] [--purge]`)
+removes the directory only if `deploy-app.sh` created it (it contains
+`.deployment-identity`). It runs `docker compose down --remove-orphans` for that
+project, then deletes the directory with its configuration, logs and copy of the
+database password. The attachments volume and the pinned images are kept. With
+`--purge` the volume is removed as well (`down --volumes`), and so is each image
+that no other container uses. The database is not touched.
+
+**DB Server** (`sudo bash uninstall.sh --role db [--config FILE | --database NAME] [--purge]`)
+takes the database from `deploy.conf` next to the script, `--config`,
+`--database`, or the only deployment recorded on the server. It removes a
+database only if `deploy-db.sh` recorded it and it still has the recorded OID
+and owner; it refuses a same-name database that the script did not create, or
+one replaced since. It also refuses while connections are open, so uninstall the
+App first. It then removes:
+
+- the database and any staging copy that a failed run left;
+- the login role and so its password, unless the role still owns another
+  database or another recorded deployment uses it;
+- the managed block of access rules in `pg_hba.conf`, validated before PostgreSQL
+  reloads it;
+- the listen address that the deployment added, unless another recorded
+  deployment uses it (PostgreSQL restarts; `127.0.0.1` stays);
+- the deployment records, and `deploy.conf` if the guided setup wrote it. A
+  hand-written `deploy.conf` is kept.
+
+PostgreSQL stays installed. With `--purge`, and a typed `PURGE` on a terminal,
+the script also uninstalls the PostgreSQL 16 packages and deletes all their data,
+configuration and logs, which removes every database on the server. It first
+checks that apt would remove only those packages, and refuses if another
+PostgreSQL version or a dependent package would go too. Libraries pulled in by
+the installation stay (`sudo apt autoremove` lists them).
+
 ## Isolated verification
 
 The integration suite uses real PostgreSQL 16 in a fresh Ubuntu 24.04 container.

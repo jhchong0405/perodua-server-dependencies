@@ -108,4 +108,29 @@ Sign in with the web login from the backup.
 Back up the database on the DB server and the filestore volume on the App server.
 Services start again after a reboot. This setup serves HTTP only; add HTTPS before production.
 
+## Uninstall
+
+Uninstall the App first; the DB server refuses while the App is still connected.
+
+On the App server:
+
+```bash
+sudo bash uninstall.sh --role app
+```
+
+It removes the containers and `/opt/perodua-app`. The attachments volume and the
+images stay unless you add `--purge`.
+
+On the DB server, in the directory of `deploy-db.sh`:
+
+```bash
+sudo bash uninstall.sh --role db
+```
+
+It removes the database, its login role (and so its password), its access rules,
+the listen address it added, its records and a guided `deploy.conf`. PostgreSQL
+stays installed; `--purge` also uninstalls it and deletes every database on the
+server. Both commands list what they will remove and ask you to type the
+database or project name first.
+
 [Self-check](RUNBOOK.md) · [Reference](DEPLOYMENT.md) · [Tests](tests/README.md)
