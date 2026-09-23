@@ -9,6 +9,28 @@ python3 -m unittest discover -s tests -p 'test_*.py' -v
 
 The App cases cover argument/configuration validation, literal value handling,
 hidden registry prompts, credential cleanup and registry error handling.
+
+`test_deploy_app_uat.py` drives `deploy-app.sh` against a scripted fake Docker
+and checks the order and absence of steps: an initialized (`READY`) database is
+never reinitialized, upgraded (`-u`) or given new UAT passwords, even with
+`--init-db`; a refused dependency guard stops before any module is installed; a
+missing database without `CREATEDB` points to `deploy-db.sh DB_MODE=empty`; an
+interrupted fresh initialization (`SETUP_PENDING` or `SETUP_UNMARKED`) finishes
+without reinstalling modules; a failed sign-in check leaves the database
+unstamped; the database password never appears on a command line; and the
+helper files are installed read-only and mounted into the container. It also
+checks static properties of `uat_admins.py` (ORM password writes, groups copied
+from `base.user_admin`, one commit after all checks).
+
+`test_uat_guard.py` runs `uat_guard.py` against temporary addon trees shaped
+like the pinned image (literal manifests, code shipped as bare `.pyc`): direct,
+transitive and `auto_install` dependencies on `perodua_demo_client`, XML IDs,
+imports, paths into its folder, the settings field that installs it, and its
+name in SQL, data files, spreadsheets and compiled code; `auto_install=True` and
+`auto_install=[]` (which Odoo 19 treats as "always install"); the module named in
+the requested list; prose mentions that are not references; reviewed references
+pinned to file hashes; addons-path shadowing; and inputs it cannot inspect,
+including an unexpected error, which must stop the initialization (exit 2).
 See [the two-server acceptance record](TWO-SERVER-2026-09-18.md) for the real
 Ubuntu VM deployment, attachment persistence and separate reboot checks.
 
@@ -59,6 +81,25 @@ refusal; a real listener update and restart; configuration rollback on a conflic
 with correct and incorrect passwords supplied through a pseudo-terminal. The
 HTTPS test generates a temporary certificate trusted only inside its disposable
 container and serves the backup over loopback.
+
+`DB_MODE=empty` coverage: configuration without backup, checksum or
+`EXPECTED_TABLES`, and refusal of leftover backup settings; database owner,
+encoding, locales, `PUBLIC` access and TCP/SCRAM login; a role that is not
+superuser, `CREATEDB` or `CREATEROLE`; a rerun after simulated App
+initialization that keeps the OID, tables and data; interrupted-publication
+recovery; refusal of a wrong password, different locales, a changed owner, an
+unrelated same-name database and a same-name database with matching owner and
+locales that the script did not create; cross-mode reruns in both directions;
+an existing `CREATEDB` role; and a failed verification that keeps staging and
+succeeds on retry.
+
+On the empty-mode database, `check_app_preflight.py` then runs the exact
+`preflight.py` text that `deploy-app.sh` generates, over TCP as the App role:
+`EMPTY`, `SETUP_UNMARKED`, `SETUP_PENDING` and `READY` states; the fresh-state
+marker is actually committed; an installed `perodua_demo_client`, records
+loaded under its name, demo data and modules from another release are refused;
+a stamped database is never marked or stamped again; and a restored database
+keeps its previous check, which requires the dataset module.
 
 The container has no systemd PID 1. This exercises the `pg_ctlcluster` startup
 fallback, **not** host reboot persistence, systemd unit enablement, external App

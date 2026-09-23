@@ -1,15 +1,25 @@
 # Copy to deploy.conf. KEY=value only; this file is NOT executed as shell code.
 # Do not store passwords here. Values are literal; no $VARIABLE expansion.
+
+# restore (default): restore a trusted pg_dump -Fc backup, using the backup
+#   settings below.
+# empty: create an empty database for a fresh UAT system. The App server then
+#   initializes it with "deploy-app.sh --init-db". Leave BACKUP_FILE,
+#   BACKUP_URL, BACKUP_SHA256 and DOWNLOAD_USER empty; EXPECTED_TABLES is not
+#   used in this mode.
+DB_MODE=restore
 DB_NAME=perodua
 DB_USER=odoo
 # Match the ORIGINAL database locales; these defaults suit a typical Odoo DB
 # on Ubuntu. Inspect the source pg_database.datcollate/datctype before delivery.
+# For DB_MODE=empty the defaults are fine unless the App needs other locales.
 DB_LC_COLLATE=C
 DB_LC_CTYPE=C.UTF-8
 PG_CLUSTER=main
 PG_PORT=5432
 
-# Set exactly one source. Relative files resolve against this configuration.
+# DB_MODE=restore only. Set exactly one source. Relative files resolve against
+# this configuration.
 BACKUP_FILE=database.dump
 BACKUP_URL=
 # Obtain this checksum from the person preparing the backup, independently of
@@ -26,4 +36,5 @@ APP_CIDR=
 # Minimum available MiB on BOTH the staging-download and PostgreSQL filesystems.
 # Size this for the uncompressed database, indexes, WAL, backup and headroom.
 MIN_FREE_MB=1024
+# DB_MODE=restore only: tables that must exist after the restore.
 EXPECTED_TABLES=public.ir_module_module,public.res_users

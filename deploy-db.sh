@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Native PostgreSQL 16 bootstrap. Restore only trusted pg_dump -Fc archives.
+# Native PostgreSQL 16 bootstrap. DB_MODE=restore restores only trusted
+# pg_dump -Fc archives; DB_MODE=empty creates an empty database for the App.
 set +x +v
 set -Eeuo pipefail
 umask 077
@@ -18,8 +19,10 @@ Passwords are prompted on the terminal. --password-file accepts a root-owned
 regular file with no group/other permissions (for controlled automation).
 Requires Ubuntu 24.04, PostgreSQL 16 already installed, python3, curl and CA
 certificates. Local BACKUP_FILE deployments do not require curl.
-Only PostgreSQL custom-format archives (pg_dump -Fc) are accepted.
-Existing databases are never overwritten, dropped or reimported.
+DB_MODE=restore (default): only PostgreSQL custom-format archives (pg_dump -Fc)
+are accepted. DB_MODE=empty: no backup; creates an empty database owned by
+DB_USER for the App server to initialize (deploy-app.sh --init-db).
+Existing databases are never overwritten, dropped, emptied or reimported.
 EOF
 }
 
@@ -45,6 +48,7 @@ command -v python3 >/dev/null || die 'Install python3 (standard library only; no
 (( (8#$(stat -c %a "$CONFIG") & 8#022) == 0 )) || die 'Configuration must not be group/world writable.'
 CONFIG=$(realpath -- "$CONFIG")
 
+DB_MODE=restore
 DB_NAME=perodua
 DB_USER=odoo
 DB_LC_COLLATE=C
@@ -71,7 +75,7 @@ while IFS= read -r line || [[ -n $line ]]; do
     trim "${line%%=*}"; key=$REPLY
     trim "${line#*=}"; value=$REPLY
     case "$key" in
-        DB_NAME|DB_USER|DB_LC_COLLATE|DB_LC_CTYPE|PG_CLUSTER|PG_PORT|BACKUP_FILE|BACKUP_URL|BACKUP_SHA256|DOWNLOAD_USER|DB_LISTEN_IP|APP_CIDR|MIN_FREE_MB|EXPECTED_TABLES) ;;
+        DB_MODE|DB_NAME|DB_USER|DB_LC_COLLATE|DB_LC_CTYPE|PG_CLUSTER|PG_PORT|BACKUP_FILE|BACKUP_URL|BACKUP_SHA256|DOWNLOAD_USER|DB_LISTEN_IP|APP_CIDR|MIN_FREE_MB|EXPECTED_TABLES) ;;
         *) die "Unknown configuration key: $key" ;;
     esac
     [[ ! ${seen[$key]+yes} ]] || die "Duplicate configuration key: $key"
@@ -89,17 +93,31 @@ done
 [[ $PG_PORT =~ ^[1-9][0-9]{0,4}$ ]] || die 'Invalid PG_PORT.'
 ((PG_PORT <= 65535)) || die 'Invalid PG_PORT.'
 [[ $MIN_FREE_MB =~ ^[1-9][0-9]{0,8}$ ]] || die 'MIN_FREE_MB must be a positive integer.'
-[[ $BACKUP_SHA256 =~ ^[[:xdigit:]]{64}$ ]] || die 'Set BACKUP_SHA256 to the trusted 64-digit SHA-256 of the archive.'
-BACKUP_SHA256=${BACKUP_SHA256,,}
-if [[ -n $BACKUP_FILE && -n $BACKUP_URL || -z $BACKUP_FILE && -z $BACKUP_URL ]]; then
-    die 'Set exactly one of BACKUP_FILE and BACKUP_URL.'
-fi
-[[ $DOWNLOAD_USER != *:* && $DOWNLOAD_USER != *$'\n'* && $DOWNLOAD_USER != *$'\r'* ]] || die 'Invalid DOWNLOAD_USER.'
-IFS=, read -r -a TABLES <<< "$EXPECTED_TABLES"
-[[ -n $EXPECTED_TABLES && $EXPECTED_TABLES != *, ]] || die 'EXPECTED_TABLES must not be empty.'
-for table in "${TABLES[@]}"; do
-    [[ $table =~ ^[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*$ ]] || die "Invalid schema.table in EXPECTED_TABLES: $table"
-done
+case $DB_MODE in
+    restore)
+        [[ $BACKUP_SHA256 =~ ^[[:xdigit:]]{64}$ ]] || die 'Set BACKUP_SHA256 to the trusted 64-digit SHA-256 of the archive.'
+        BACKUP_SHA256=${BACKUP_SHA256,,}
+        if [[ -n $BACKUP_FILE && -n $BACKUP_URL || -z $BACKUP_FILE && -z $BACKUP_URL ]]; then
+            die 'Set exactly one of BACKUP_FILE and BACKUP_URL.'
+        fi
+        [[ $DOWNLOAD_USER != *:* && $DOWNLOAD_USER != *$'\n'* && $DOWNLOAD_USER != *$'\r'* ]] || die 'Invalid DOWNLOAD_USER.'
+        IFS=, read -r -a TABLES <<< "$EXPECTED_TABLES"
+        [[ -n $EXPECTED_TABLES && $EXPECTED_TABLES != *, ]] || die 'EXPECTED_TABLES must not be empty.'
+        for table in "${TABLES[@]}"; do
+            [[ $table =~ ^[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*$ ]] || die "Invalid schema.table in EXPECTED_TABLES: $table"
+        done
+        # A restored database is identified by the archive it came from.
+        IDENTITY_KEY=$BACKUP_SHA256 ;;
+    empty)
+        # Nothing is downloaded or restored, so a leftover backup source would
+        # only suggest otherwise. EXPECTED_TABLES is not used: the App server
+        # creates the tables later.
+        [[ -z $BACKUP_FILE && -z $BACKUP_URL && -z $BACKUP_SHA256 && -z $DOWNLOAD_USER ]] || die 'DB_MODE=empty restores no backup: leave BACKUP_FILE, BACKUP_URL, BACKUP_SHA256 and DOWNLOAD_USER empty.'
+        # Never a 64-digit checksum, so a restore-mode and an empty-mode
+        # deployment of the same name can never be mistaken for one another.
+        IDENTITY_KEY=empty ;;
+    *) die 'DB_MODE must be restore or empty.' ;;
+esac
 python3 - "$DB_LISTEN_IP" "$APP_CIDR" "$BACKUP_URL" <<'PY'
 import ipaddress, sys, urllib.parse
 try:
@@ -229,18 +247,19 @@ start_cluster
 [[ $(admin -c 'SHOW config_file') == "$CLUSTER_CONF/postgresql.conf" ]] || die 'Connected to an unexpected cluster.'
 
 TARGET_OID=$(admin -c "SELECT oid FROM pg_database WHERE datname='$DB_NAME'")
-RESTORED=0
+DEPLOYED=0
 if [[ -n $TARGET_OID ]]; then
-    # An OID plus checksum and owner prevents interpreting an unrelated database
-    # as a previous deployment merely because its name matches.
-    identity="$BACKUP_SHA256|$TARGET_OID|$DB_USER"
+    # An OID plus source identity (archive checksum, or "empty") and owner
+    # prevents interpreting an unrelated database, or one deployed in the other
+    # DB_MODE, as a previous deployment merely because its name matches.
+    identity="$IDENTITY_KEY|$TARGET_OID|$DB_USER"
     if [[ -f $STATE_DIR/success && $(cat "$STATE_DIR/success") == "$identity" ]]; then
-        RESTORED=1
+        DEPLOYED=1
     elif [[ -f $STATE_DIR/pending && $(cat "$STATE_DIR/pending") == "$identity" ]]; then
-        RESTORED=1
+        DEPLOYED=1
         log 'Recovering a previously validated rename interrupted before completion marking.'
     else
-        die "Database $DB_NAME already exists and does not match this deployment. Nothing will be overwritten."
+        die "Database $DB_NAME already exists and does not match this DB_MODE=$DB_MODE deployment. Nothing will be overwritten."
     fi
     [[ $(admin -c "SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname='$DB_NAME'") == "$DB_USER" ]] || die 'Existing database ownership changed.'
     [[ $(admin -c "SELECT datcollate || '|' || datctype FROM pg_database WHERE datname='$DB_NAME'") == "$DB_LC_COLLATE|$DB_LC_CTYPE" ]] || die 'Configured locales differ from the existing database; changing locales requires a separate migration.'
@@ -266,7 +285,7 @@ printf '127.0.0.1:%s:*:%s:%s\n' "$PG_PORT" "$DB_USER" "$escaped" > "$TMP_DIR/pgp
 unset escaped
 app() { local db=$1; shift; PGPASSFILE="$TMP_DIR/pgpass" "$PG_BIN/psql" -X -w -h 127.0.0.1 -p "$PG_PORT" -U "$DB_USER" -d "$db" -v ON_ERROR_STOP=1 -At "$@"; }
 
-if (( ! RESTORED )); then
+if (( ! DEPLOYED )) && [[ $DB_MODE == restore ]]; then
     PHASE=download
     free_mb=$(df -Pm "$TMP_DIR" | awk 'NR==2 {print $4}')
     ((free_mb >= MIN_FREE_MB)) || die 'Insufficient free space for backup download.'
@@ -291,11 +310,22 @@ if (( ! RESTORED )); then
     ((free_mb >= MIN_FREE_MB)) || die 'Insufficient free space on the PostgreSQL data filesystem.'
     STAGING="${DB_NAME}__restore_$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"
 fi
+if (( ! DEPLOYED )) && [[ $DB_MODE == empty ]]; then
+    PHASE=create
+    data_dir=$(admin -c 'SHOW data_directory')
+    free_mb=$(df -Pm "$data_dir" | awk 'NR==2 {print $4}')
+    ((free_mb >= MIN_FREE_MB)) || die 'Insufficient free space on the PostgreSQL data filesystem.'
+    # Created under a staging name and published by rename, exactly like a
+    # restore: an interruption before the identity marker is written leaves no
+    # target behind, so a rerun is never refused by a half-recorded database.
+    STAGING="${DB_NAME}__empty_$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"
+fi
 
 PHASE=role
-role_state=$(admin -c "SELECT rolcanlogin AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolreplication AND NOT rolbypassrls AND NOT EXISTS (SELECT 1 FROM pg_auth_members WHERE member=pg_roles.oid) FROM pg_roles WHERE rolname='$DB_USER'")
+ROLE_STATE_SQL="SELECT rolcanlogin AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolreplication AND NOT rolbypassrls AND NOT EXISTS (SELECT 1 FROM pg_auth_members WHERE member=pg_roles.oid) FROM pg_roles WHERE rolname='$DB_USER'"
+role_state=$(admin -c "$ROLE_STATE_SQL")
 if [[ -z $role_state ]]; then
-    (( ! RESTORED )) || die 'Previously deployed database role is missing.'
+    (( ! DEPLOYED )) || die 'Previously deployed database role is missing.'
     # Generate the SCRAM verifier locally. Plaintext is never SQL, argv or env.
     # shellcheck disable=SC2016 # Python f-string dollars are literal, not shell variables.
     VERIFIER=$(printf '%s' "$DB_PASSWORD" | python3 -c '
@@ -313,7 +343,7 @@ elif [[ $role_state != t ]]; then
 fi
 unset DB_PASSWORD
 
-if (( ! RESTORED )); then
+if (( ! DEPLOYED )); then
     printf "CREATE DATABASE \"%s\" OWNER \"%s\" TEMPLATE template0 ENCODING 'UTF8' LC_COLLATE '%s' LC_CTYPE '%s';\nREVOKE ALL ON DATABASE \"%s\" FROM PUBLIC;\n" "$STAGING" "$DB_USER" "$DB_LC_COLLATE" "$DB_LC_CTYPE" "$STAGING" | admin >/dev/null
 fi
 
@@ -401,8 +431,19 @@ verify_db() {
         app "$db" -c "SELECT 1 FROM $relation LIMIT 1" >/dev/null
     done
 }
+# DB_MODE=empty: the App server fills this database, so its content is never
+# inspected -- a rerun after Odoo created its tables must still pass. Only who
+# owns it, how it was created and who may reach it are verified.
+verify_access() {
+    local db=$1
+    [[ $(app "$db" -c 'SELECT current_user') == "$DB_USER" ]] || die 'Application password authentication failed.'
+    [[ $(admin -c "SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname='$db'") == "$DB_USER" ]] || die 'Database owner is not the application role.'
+    [[ $(admin -c "SELECT pg_encoding_to_char(encoding) || '|' || datcollate || '|' || datctype FROM pg_database WHERE datname='$db'") == "UTF8|$DB_LC_COLLATE|$DB_LC_CTYPE" ]] || die 'Database encoding or locales do not match the configuration.'
+    [[ $(admin -c "SELECT NOT has_database_privilege('public', '$db', 'CONNECT')") == t ]] || die 'Database is open to PUBLIC; only the application role may connect.'
+    [[ $(admin -c "$ROLE_STATE_SQL") == t ]] || die 'Application role is no longer a least-privileged login role.'
+}
 
-if (( ! RESTORED )); then
+if (( ! DEPLOYED )) && [[ $DB_MODE == restore ]]; then
     PHASE=restore
     # Authenticate BEFORE import, including when reusing an existing role.
     [[ $(app "$STAGING" -c 'SELECT current_user') == "$DB_USER" ]] || die 'Application password authentication failed.'
@@ -418,9 +459,15 @@ if (( ! RESTORED )); then
     PHASE=verification
     verify_db "$STAGING"
     app "$STAGING" -c 'ANALYZE' >/dev/null
+fi
+if (( ! DEPLOYED )) && [[ $DB_MODE == empty ]]; then
+    PHASE=verification
+    verify_access "$STAGING"
+fi
+if (( ! DEPLOYED )); then
     stage_oid=$(admin -c "SELECT oid FROM pg_database WHERE datname='$STAGING'")
     # Write identity before rename to recover the rename/marker crash window.
-    printf '%s|%s|%s\n' "$BACKUP_SHA256" "$stage_oid" "$DB_USER" > "$STATE_DIR/pending.tmp"
+    printf '%s|%s|%s\n' "$IDENTITY_KEY" "$stage_oid" "$DB_USER" > "$STATE_DIR/pending.tmp"
     mv -- "$STATE_DIR/pending.tmp" "$STATE_DIR/pending"
     PHASE=publish
     # ALTER DATABASE refuses if a conflicting target appeared. Never terminate
@@ -428,17 +475,23 @@ if (( ! RESTORED )); then
     admin -c "ALTER DATABASE \"$STAGING\" RENAME TO \"$DB_NAME\"" >/dev/null
     TARGET_OID=$stage_oid
     STAGING=''
-else
+elif [[ $DB_MODE == restore ]]; then
     log 'Matching database already deployed; skipping download and restore.'
+else
+    log 'Matching empty-mode database already deployed; its current contents are kept unchanged.'
 fi
 
 PHASE=final-verification
-verify_db "$DB_NAME"
+if [[ $DB_MODE == restore ]]; then verify_db "$DB_NAME"; else verify_access "$DB_NAME"; fi
 [[ $(admin -c "SELECT oid FROM pg_database WHERE datname='$DB_NAME'") == "$TARGET_OID" ]] || die 'Database identity changed during verification.'
-printf '%s|%s|%s\n' "$BACKUP_SHA256" "$TARGET_OID" "$DB_USER" > "$STATE_DIR/success.tmp"
+printf '%s|%s|%s\n' "$IDENTITY_KEY" "$TARGET_OID" "$DB_USER" > "$STATE_DIR/success.tmp"
 mv -- "$STATE_DIR/success.tmp" "$STATE_DIR/success"
 printf 'DB_HOST=%s\nDB_PORT=%s\nDB_NAME=%s\nDB_USER=%s\n' "$DB_LISTEN_IP" "$PG_PORT" "$DB_NAME" "$DB_USER" > "$STATE_DIR/connection.txt"
-log 'SUCCESS: database restored/verified and PostgreSQL is running.'
+if [[ $DB_MODE == restore ]]; then
+    log 'SUCCESS: database restored/verified and PostgreSQL is running.'
+else
+    log 'SUCCESS: empty-mode database created/verified and PostgreSQL is running.'
+fi
 cat "$STATE_DIR/connection.txt"
 printf 'Log: %s\nConnection summary: %s/connection.txt\n' "$LOG_FILE" "$STATE_DIR"
 if [[ -n $APP_CIDR ]]; then
@@ -447,3 +500,6 @@ else
     printf 'Database is restricted to local TCP access. Set DB_LISTEN_IP and APP_CIDR, then rerun to enable App Server access.\n'
 fi
 printf 'This verifies PostgreSQL only; Odoo startup and filestore restoration run on App Server.\n'
+if [[ $DB_MODE == empty ]]; then
+    printf 'Next, on App Server: sudo bash deploy-app.sh --init-db (initializes Odoo, its modules and the UAT administrators).\n'
+fi

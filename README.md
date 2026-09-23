@@ -3,9 +3,16 @@
 Two fresh **Ubuntu 24.04 amd64** servers with sudo and internet access.
 App runs Web + Odoo; DB runs PostgreSQL 16. Release: **Client Stable UIUX v1.0.0**.
 
-Before starting, get a matching `database.dump` (`pg_dump -Fc`), its SHA-256 and
-original database name/locales, plus the matching `filestore.tar.gz` containing
-`filestore/DB_NAME/...`. Use the same database name on both servers.
+Two ways to set it up:
+
+- **From a backup** (sections 1-4): restores an existing database and filestore.
+- **Fresh UAT system** ([section 5](#5-fresh-uat-system-without-a-backup)): an
+  empty database that the App server initializes, with fixed UAT logins.
+
+Before starting from a backup, get a matching `database.dump` (`pg_dump -Fc`),
+its SHA-256 and original database name/locales, plus the matching
+`filestore.tar.gz` containing `filestore/DB_NAME/...`. Use the same database
+name on both servers.
 Allow **App IP → DB IP:5432** and **browser → App IP:8110** in network/firewall rules.
 
 ## 1. On both servers: download
@@ -81,5 +88,66 @@ sudo docker compose -p perodua-client-uiux -f /opt/perodua-app/compose.yml ps
 Expect only **web** and **odoo**, both healthy. The DB lives on the other server;
 attachments live in the App's persistent filestore volume. Back up both.
 Services start automatically after reboot. This guide uses HTTP; add HTTPS for production.
+
+## 5. Fresh UAT system without a backup
+
+Download on both servers as in section 1. No backup or filestore is needed.
+
+On the **DB Server**:
+
+```bash
+sudo bash install-dependencies.sh --role db
+cp deploy.conf.example deploy.conf
+chmod 600 deploy.conf
+nano deploy.conf
+```
+
+Set `DB_MODE=empty` and leave the backup settings empty:
+
+```
+DB_MODE=empty
+BACKUP_FILE=
+BACKUP_URL=
+BACKUP_SHA256=
+```
+
+Set `DB_NAME`, `DB_USER`, `DB_LISTEN_IP` (this server's LAN IP) and `APP_CIDR`
+(the App server's `IP/32`) as in section 2, then:
+
+```bash
+sudo bash deploy-db.sh --config deploy.conf
+```
+
+Enter a new database password when prompted and keep it for the App server.
+Wait for `SUCCESS`.
+
+On the **App Server**:
+
+```bash
+sudo bash install-dependencies.sh --role app
+sudo systemctl enable --now docker
+sudo bash deploy-app.sh --init-db
+```
+
+Enter the DB server's IP, port, database name, user and password as in
+section 3. The first run installs the release modules without the client
+demonstration dataset and without Odoo demo data; this can take a while.
+
+Then open **`http://APP_SERVER_IP:8110/app/`** and sign in with one of these
+**UAT-only** accounts. The password is fixed for UAT; do not use this setup for
+production or expose it to the public internet.
+
+| Login | Password |
+| --- | --- |
+| `whadmin` | `perodua` |
+| `admin1` | `perodua` |
+| `admin2` | `perodua` |
+
+All three have the same administrator rights. The release also seeds five
+non-administrator role users (`planner`, `whouse`, `sop`, `op`, `finance`) that
+use the same UAT password. Running `deploy-app.sh` again later keeps the
+database and does not reset these passwords. See
+[DEPLOYMENT.md](DEPLOYMENT.md#initialize-a-fresh-uat-system-on-the-app-server)
+for what the initialization checks and what to do if it stops part-way.
 
 [Client self-check](RUNBOOK.md) · [Configuration reference](DEPLOYMENT.md) · [Verification](tests/README.md)

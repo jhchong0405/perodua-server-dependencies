@@ -44,6 +44,24 @@ EXPECTED_TABLES=public.ir_module_module,public.res_users
 EOF
     chmod 600 "$TEST_DIR/$name.conf"
 }
+write_empty_conf() {
+    local name=$1 user=$2
+    cat > "$TEST_DIR/$name.conf" <<EOF
+DB_MODE=empty
+DB_NAME=$name
+DB_USER=$user
+PG_CLUSTER=main
+PG_PORT=5432
+BACKUP_FILE=
+BACKUP_URL=
+BACKUP_SHA256=
+DOWNLOAD_USER=
+DB_LISTEN_IP=127.0.0.1
+APP_CIDR=
+MIN_FREE_MB=1
+EOF
+    chmod 600 "$TEST_DIR/$name.conf"
+}
 deploy_ok() {
     local name=$1 password_file=${2:-"$TEST_DIR/app.password"}
     if ! bash "$DEPLOY_SCRIPT" --config "$TEST_DIR/$name.conf" --password-file "$password_file" > "$TEST_DIR/$name.log" 2>&1; then
@@ -219,12 +237,14 @@ for name, payload in {
     'backtick_injection': 'DB_NAME=`touch /tmp/deploy-db-test-injected`',
     'extra_command': 'touch /tmp/deploy-db-test-injected',
     'unknown_key': 'SHELLOPTS=xtrace',
+    'mode_injection': 'DB_MODE=$(touch /tmp/deploy-db-test-injected)',
+    'unknown_mode': 'DB_MODE=snapshot',
 }.items():
     path = directory / (name + '.conf')
     path.write_text(base + '\n' + payload + '\n')
     path.chmod(0o600)
 PY
-for name in dollar_injection backtick_injection extra_command unknown_key; do
+for name in dollar_injection backtick_injection extra_command unknown_key mode_injection unknown_mode; do
     if bash "$DEPLOY_SCRIPT" --config "$TEST_DIR/$name.conf" --check-config > "$TEST_DIR/$name.log" 2>&1; then
         die "unsafe config accepted: $name"
     fi
@@ -289,6 +309,125 @@ assert_absent overridden_listener
 [[ $(hash_file /etc/postgresql/16/main/pg_hba.conf) == "$hba_before" ]] || die 'failed network setup did not restore pg_hba.conf'
 admin_sql -d postgres -c 'ALTER SYSTEM RESET listen_addresses'
 pass 'auto.conf listener override refused with original PostgreSQL and HBA configuration restored'
+
+# ── DB_MODE=empty ────────────────────────────────────────────────────────────
+STATE_ROOT=/var/lib/perodua-db-deploy/16-main
+write_empty_conf empty_check app_empty_check
+bash "$DEPLOY_SCRIPT" --config "$TEST_DIR/empty_check.conf" --check-config > "$TEST_DIR/empty-check-config.log" 2>&1 || die 'empty mode without a backup should validate'
+printf 'EXPECTED_TABLES=\n' >> "$TEST_DIR/empty_check.conf"
+bash "$DEPLOY_SCRIPT" --config "$TEST_DIR/empty_check.conf" --check-config >> "$TEST_DIR/empty-check-config.log" 2>&1 || die 'empty mode must not require EXPECTED_TABLES'
+assert_absent empty_check
+for leftover in BACKUP_FILE=database.dump BACKUP_URL=https://backup.invalid/database.dump "BACKUP_SHA256=$(hash_file "$TEST_DIR/fixture.dump")" DOWNLOAD_USER=cloud; do
+    write_empty_conf empty_leftover app_empty_leftover
+    sed -i "s|^${leftover%%=*}=.*|$leftover|" "$TEST_DIR/empty_leftover.conf"
+    if bash "$DEPLOY_SCRIPT" --config "$TEST_DIR/empty_leftover.conf" --check-config > "$TEST_DIR/empty-leftover.log" 2>&1; then
+        die "empty mode accepted a backup setting: ${leftover%%=*}"
+    fi
+    grep -q 'DB_MODE=empty restores no backup' "$TEST_DIR/empty-leftover.log" || die "empty mode refused ${leftover%%=*} for the wrong reason"
+done
+assert_absent empty_leftover
+pass 'empty mode validates without backup, checksum or EXPECTED_TABLES; leftover backup settings are refused'
+
+write_empty_conf uat app_uat
+deploy_ok uat
+uat_oid=$(admin_sql -d postgres -c "SELECT oid FROM pg_database WHERE datname='uat'")
+assert_sql postgres "SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname='uat'" app_uat
+assert_sql postgres "SELECT pg_encoding_to_char(encoding) || ',' || datcollate || ',' || datctype FROM pg_database WHERE datname='uat'" 'UTF8,C,C.UTF-8'
+assert_sql postgres "SELECT concat_ws(',', rolcanlogin, rolsuper, rolcreatedb, rolcreaterole, rolreplication, rolbypassrls) FROM pg_roles WHERE rolname='app_uat'" 't,f,f,f,f,f'
+assert_sql postgres "SELECT count(*) FROM pg_auth_members WHERE member=(SELECT oid FROM pg_roles WHERE rolname='app_uat')" 0
+assert_sql postgres "SELECT has_database_privilege('public', 'uat', 'CONNECT')" f
+assert_sql uat "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public'" 0
+assert_sql postgres "SELECT count(*) FROM pg_database WHERE datname LIKE 'uat\_\_%'" 0
+PGPASSWORD=$(cat "$TEST_DIR/app.password") psql -X -h 127.0.0.1 -U app_uat -d uat -v ON_ERROR_STOP=1 -At -c 'SELECT current_user' > "$TEST_DIR/uat-login.log"
+[[ $(cat "$TEST_DIR/uat-login.log") == app_uat ]] || die 'empty-mode application TCP/SCRAM login failed'
+[[ $(cat "$STATE_ROOT/uat/success") == "empty|$uat_oid|app_uat" ]] || die 'empty-mode identity marker missing or wrong'
+if grep -q 'Restoring into staging' "$TEST_DIR/uat.log"; then die 'empty mode ran a restore'; fi
+pass 'empty mode creates a UTF8 database with the configured locales, owned by a least-privileged login role, closed to PUBLIC, without a backup'
+
+# Simulate the App server initializing Odoo, then rerun the DB deployment.
+PGPASSWORD=$(cat "$TEST_DIR/app.password") psql -X -q -h 127.0.0.1 -U app_uat -d uat -v ON_ERROR_STOP=1 -c "
+CREATE TABLE public.ir_module_module (id serial PRIMARY KEY, name text NOT NULL, state text NOT NULL);
+INSERT INTO public.ir_module_module (name, state) VALUES ('base', 'installed'), ('perodua_client_stable', 'installed');
+CREATE TABLE public.uat_probe (value text NOT NULL);
+INSERT INTO public.uat_probe VALUES ('written by the App after the first run');"
+deploy_ok uat
+assert_sql postgres "SELECT oid FROM pg_database WHERE datname='uat'" "$uat_oid"
+assert_sql uat 'SELECT value FROM public.uat_probe' 'written by the App after the first run'
+assert_sql uat 'SELECT count(*) FROM public.ir_module_module' 2
+grep -q 'Matching empty-mode database already deployed' "$TEST_DIR/uat.log" || die 'empty-mode rerun did not recognize its own deployment'
+pass 'empty-mode rerun after App initialization keeps the database OID, tables and data'
+
+mv "$STATE_ROOT/uat/success" "$STATE_ROOT/uat/pending"
+deploy_ok uat
+[[ -f $STATE_ROOT/uat/success ]] || die 'empty-mode interrupted publication did not recreate the success marker'
+assert_sql postgres "SELECT oid FROM pg_database WHERE datname='uat'" "$uat_oid"
+assert_sql uat 'SELECT count(*) FROM public.uat_probe' 1
+pass 'empty mode recovers an interrupted publication from its pending marker without recreating the database'
+
+deploy_fails uat "$TEST_DIR/wrong.password"
+cp "$TEST_DIR/uat.conf" "$TEST_DIR/uat_locale.conf"
+printf 'DB_LC_COLLATE=C.UTF-8\nDB_LC_CTYPE=C.UTF-8\n' >> "$TEST_DIR/uat_locale.conf"
+deploy_fails uat_locale
+assert_sql postgres "SELECT oid || ',' || datcollate FROM pg_database WHERE datname='uat'" "$uat_oid,C"
+assert_sql uat 'SELECT count(*) FROM public.uat_probe' 1
+pass 'empty-mode reruns with a wrong password or different locales are refused without changing the database'
+
+write_empty_conf owner_changed app_owner_changed
+deploy_ok owner_changed
+admin_sql -d postgres -c 'CREATE ROLE intruder' -c 'ALTER DATABASE owner_changed OWNER TO intruder'
+deploy_fails owner_changed
+assert_sql postgres "SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname='owner_changed'" intruder
+pass 'empty-mode rerun refuses a database whose owner changed, leaving the owner untouched'
+
+admin_sql -d postgres -c 'CREATE DATABASE empty_unrelated'
+admin_sql -d empty_unrelated -c "CREATE TABLE keep_me(value text); INSERT INTO keep_me VALUES ('untouched')"
+write_empty_conf empty_unrelated app_empty_unrelated
+deploy_fails empty_unrelated
+assert_sql empty_unrelated 'SELECT value FROM keep_me' untouched
+admin_sql -d postgres -c 'CREATE ROLE app_manual LOGIN' -c "CREATE DATABASE empty_manual OWNER app_manual TEMPLATE template0 ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C.UTF-8'"
+manual_oid=$(admin_sql -d postgres -c "SELECT oid FROM pg_database WHERE datname='empty_manual'")
+write_empty_conf empty_manual app_manual
+deploy_fails empty_manual
+assert_sql postgres "SELECT oid FROM pg_database WHERE datname='empty_manual'" "$manual_oid"
+pass 'empty mode never takes over a same-name database it did not create, even with matching owner and locales'
+
+write_empty_conf restored app_restored
+deploy_fails restored
+assert_sql restored "SELECT count(*) FROM public.business_records WHERE reference='AFTER-DEPLOY'" 1
+cp "$TEST_DIR/uat.conf" "$TEST_DIR/uat_as_restore.conf"
+python3 - "$TEST_DIR/uat_as_restore.conf" "$(hash_file "$TEST_DIR/fixture.dump")" "$TEST_DIR/fixture.dump" <<'PY'
+import pathlib
+import sys
+path, digest, archive = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+text = path.read_text().replace('DB_MODE=empty', 'DB_MODE=restore')
+text = text.replace('BACKUP_FILE=\n', f'BACKUP_FILE={archive}\n').replace('BACKUP_SHA256=\n', f'BACKUP_SHA256={digest}\n')
+path.write_text(text)
+PY
+deploy_fails uat_as_restore
+assert_sql postgres "SELECT oid FROM pg_database WHERE datname='uat'" "$uat_oid"
+assert_sql uat 'SELECT count(*) FROM public.uat_probe' 1
+pass 'restore and empty deployment identities never match: cross-mode reruns are refused without changes'
+
+admin_sql -d postgres -c 'CREATE ROLE app_empty_createdb LOGIN CREATEDB'
+write_empty_conf empty_createdb app_empty_createdb
+deploy_fails empty_createdb
+assert_absent empty_createdb
+assert_sql postgres "SELECT rolcreatedb FROM pg_roles WHERE rolname='app_empty_createdb'" t
+pass 'empty mode refuses an existing CREATEDB role instead of using or altering it'
+
+admin_sql -d postgres -c "CREATE ROLE app_empty_retry LOGIN PASSWORD 'different-password'"
+write_empty_conf empty_retry app_empty_retry
+deploy_fails empty_retry
+assert_absent empty_retry
+assert_sql postgres "SELECT count(*) FROM pg_database WHERE datname LIKE 'empty\_retry\_\_empty\_%'" 1
+deploy_ok empty_retry "$TEST_DIR/wrong.password"
+assert_sql postgres "SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname='empty_retry'" app_empty_retry
+pass 'failed empty-mode verification never publishes the target, keeps staging for inspection, and a retry succeeds'
+
+write_empty_conf preflight_fixture app_preflight
+deploy_ok preflight_fixture
+python3 "$SOURCE_DIR/tests/check_app_preflight.py" "$SOURCE_DIR" "$TEST_DIR" preflight_fixture app_preflight "$TEST_DIR/app.password"
+pass "deploy-app.sh preflight on a DB_MODE=empty database: EMPTY, SETUP_UNMARKED, persisted SETUP_PENDING marker, post-init assertions, READY stamp, restored-database test unchanged"
 
 python3 "$SOURCE_DIR/tests/check-https-download.py" "$SOURCE_DIR" "$TEST_DIR"
 assert_sql https_restored 'SELECT count(*) FROM public.res_users' 2
