@@ -296,7 +296,7 @@ with connect(db) as cn:
             # Odoo commits each module as it installs it, so a killed -i
             # (timeout, Ctrl-C, lost session) leaves the rest 'to install'.
             if 'perodua.runtime_profile' not in stored:
-                fail('database contains module changes left by an interrupted installation. If an earlier --init-db stopped part-way, recreate the empty database on the DB server; see DEPLOYMENT.md')
+                fail('database contains module changes left by an interrupted installation. If an earlier --init-db stopped part-way, recreate the empty database on the DB server; see docs/DEPLOYMENT.md')
             fail('database contains pending module changes; finish them separately')
         def excluded_records():
             cur.execute('SELECT count(*) FROM ir_model_data WHERE module=%s', (excluded,))
@@ -335,7 +335,7 @@ with connect(db) as cn:
             if mode != 'check': fail(mode + ' applies only to a fresh initialization that is awaiting its UAT setup')
             problem = fresh_problem()
             if problem:
-                fail('database is initialized but has no release stamp and is not a complete fresh UAT initialization (' + problem + '). If an earlier --init-db failed part-way, recreate the empty database on the DB server; see DEPLOYMENT.md')
+                fail('database is initialized but has no release stamp and is not a complete fresh UAT initialization (' + problem + '). If an earlier --init-db failed part-way, recreate the empty database on the DB server; see docs/DEPLOYMENT.md')
             print('SETUP_UNMARKED')
             sys.exit(0)
         if uat == 'pending':
@@ -475,7 +475,7 @@ case $state in
         STARTED=1
         timeout --foreground "$INIT_TIMEOUT" docker compose --project-name "$PROJECT_NAME" --file "$DEPLOY_DIR/compose.yml" run --rm --no-deps -T odoo \
             odoo -c /etc/odoo/odoo.conf -d "$DB_NAME" -i "$INIT_MODULES" "$demo_flag" --stop-after-init \
-            > "$DEPLOY_DIR/initialization.log" 2>&1 || fail 'Initialization failed or timed out; inspect initialization.log. Rerun with --init-db: it finishes the setup if every module was installed, and otherwise stops with the recovery steps in DEPLOYMENT.md'
+            > "$DEPLOY_DIR/initialization.log" 2>&1 || fail 'Initialization failed or timed out; inspect initialization.log. Rerun with --init-db: it finishes the setup if every module was installed, and otherwise stops with the recovery steps in docs/DEPLOYMENT.md'
         [[ $(preflight mark-pending) == PENDING ]] || fail 'Initialized database failed the fresh UAT checks'
         uat_setup
         FRESH=1 ;;

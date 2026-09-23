@@ -17,8 +17,8 @@ import time
 import unittest
 
 
-ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = ROOT / "deploy-app.sh"
+SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
+SCRIPT = SCRIPTS / "deploy-app.sh"
 
 
 class DeploymentSafetyTests(unittest.TestCase):
@@ -195,7 +195,7 @@ sys.exit(93)
         self.assert_original_auth_unchanged()
 
     def test_scripts_have_valid_bash_syntax(self):
-        for path in (SCRIPT, ROOT / "install-dependencies.sh"):
+        for path in (SCRIPT, SCRIPTS / "install-dependencies.sh"):
             with self.subTest(script=path.name):
                 result = subprocess.run(["bash", "-n", str(path)], text=True,
                                         capture_output=True, timeout=10)

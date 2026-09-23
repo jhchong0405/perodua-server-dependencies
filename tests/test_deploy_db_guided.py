@@ -18,7 +18,7 @@ import time
 import unittest
 
 
-ROOT = Path(__file__).resolve().parents[1]
+SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 SETUP = b"What do you want to set up? [1]: "
 LISTEN = b"which the App server connects to"
 APP = b"only it may connect): "
@@ -45,7 +45,7 @@ class GuidedSetupTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         base = Path(self.temp.name)
         self.script = base / "deploy-db.sh"
-        shutil.copy(ROOT / "deploy-db.sh", self.script)
+        shutil.copy(SCRIPTS / "deploy-db.sh", self.script)
         self.config = base / "deploy.conf"
         stubs = base / "bin"
         stubs.mkdir()

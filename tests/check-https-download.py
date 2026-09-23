@@ -21,7 +21,7 @@ import time
 if os.environ.get("DEPLOY_DB_TEST_ISOLATED") != "1" or not Path("/.dockerenv").is_file():
     raise SystemExit("This check must run inside the disposable integration container")
 
-source_dir, test_dir = map(Path, sys.argv[1:])
+scripts_dir, test_dir = map(Path, sys.argv[1:])
 download_password = "Cloud:fixture'\"!password"
 download_user = "download_user"
 auth_header = "Basic " + base64.b64encode(
@@ -93,7 +93,7 @@ def deployment(name, cloud_password):
     child, terminal = pty.fork()
     if child == 0:
         os.execv("/usr/bin/bash", [
-            "bash", str(source_dir / "deploy-db.sh"), "--config", str(config),
+            "bash", str(scripts_dir / "deploy-db.sh"), "--config", str(config),
             "--password-file", str(test_dir / "app.password"),
         ])
 

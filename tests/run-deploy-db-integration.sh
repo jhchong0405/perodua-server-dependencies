@@ -8,7 +8,7 @@ if [[ ${DEPLOY_DB_TEST_ISOLATED:-} != 1 || ! -f /.dockerenv || $EUID != 0 ]]; th
 fi
 
 SOURCE_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-DEPLOY_SCRIPT="$SOURCE_DIR/deploy-db.sh"
+DEPLOY_SCRIPT="$SOURCE_DIR/scripts/deploy-db.sh"
 TEST_DIR=$(mktemp -d /tmp/deploy-db-integration.XXXXXX)
 chmod 755 "$TEST_DIR"
 PASS_COUNT=0
@@ -426,18 +426,86 @@ pass 'failed empty-mode verification never publishes the target, keeps staging f
 
 write_empty_conf preflight_fixture app_preflight
 deploy_ok preflight_fixture
-python3 "$SOURCE_DIR/tests/check_app_preflight.py" "$SOURCE_DIR" "$TEST_DIR" preflight_fixture app_preflight "$TEST_DIR/app.password"
+python3 "$SOURCE_DIR/tests/check_app_preflight.py" "$SOURCE_DIR/scripts" "$TEST_DIR" preflight_fixture app_preflight "$TEST_DIR/app.password"
 pass "deploy-app.sh preflight on a DB_MODE=empty database: EMPTY, SETUP_UNMARKED, persisted SETUP_PENDING marker, post-init assertions, READY stamp, restored-database test unchanged"
 
-python3 "$SOURCE_DIR/tests/check-https-download.py" "$SOURCE_DIR" "$TEST_DIR"
+python3 "$SOURCE_DIR/tests/check-https-download.py" "$SOURCE_DIR/scripts" "$TEST_DIR"
 assert_sql https_restored 'SELECT count(*) FROM public.res_users' 2
 assert_absent https_refused
 pass 'real HTTPS Basic-auth download prompts securely; wrong cloud password prevents restore'
 
 write_empty_conf password_prompt app_password_prompt
-python3 "$SOURCE_DIR/tests/check-password-prompt.py" "$SOURCE_DIR" "$TEST_DIR/password_prompt.conf"
+python3 "$SOURCE_DIR/tests/check-password-prompt.py" "$SOURCE_DIR/scripts" "$TEST_DIR/password_prompt.conf"
 assert_sql password_prompt 'SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = current_database()' app_password_prompt
 pass 'interactive password entry asks again after a short password or two different entries, never echoes, then deploys'
+
+# ── uninstall.sh --role db ─────────────────────────────────────────────────────
+UNINSTALL="$SOURCE_DIR/scripts/uninstall.sh"
+HBA_FILE=$(admin_sql -d postgres -c 'SHOW hba_file')
+uninstall_ok() {
+    local log=$1; shift
+    bash "$UNINSTALL" --role db "$@" > "$TEST_DIR/$log.log" 2>&1 || { cat "$TEST_DIR/$log.log" >&2; die "uninstall should succeed: $log"; }
+}
+uninstall_fails() {
+    local log=$1; shift
+    if bash "$UNINSTALL" --role db "$@" > "$TEST_DIR/$log.log" 2>&1; then die "uninstall should have refused: $log"; fi
+}
+write_empty_conf uninst_a app_uninst_a
+sed -i 's/^DB_LISTEN_IP=.*/DB_LISTEN_IP=127.0.0.4/' "$TEST_DIR/uninst_a.conf"
+deploy_ok uninst_a
+uninstall_fails uninst-wrong --config "$TEST_DIR/uninst_a.conf" --confirm uninst_b
+runuser -u postgres -- psql -X -q -d uninst_a -c 'SELECT pg_sleep(60)' > /dev/null 2>&1 &
+sleeper=$!
+for _ in $(seq 1 100); do
+    [[ $(admin_sql -d postgres -c "SELECT count(*) FROM pg_stat_activity WHERE datname = 'uninst_a'") == 0 ]] || break
+    sleep 0.1
+done
+uninstall_fails uninst-busy --config "$TEST_DIR/uninst_a.conf" --confirm uninst_a
+kill "$sleeper" 2>/dev/null || true
+wait "$sleeper" 2>/dev/null || true
+grep -q 'connection(s) are open' "$TEST_DIR/uninst-busy.log" || die 'open connections were not reported'
+assert_sql postgres "SELECT count(*) FROM pg_database WHERE datname = 'uninst_a'" 1
+until [[ $(admin_sql -d postgres -c "SELECT count(*) FROM pg_stat_activity WHERE datname = 'uninst_a'") == 0 ]]; do sleep 0.1; done
+uninstall_ok uninst-a --config "$TEST_DIR/uninst_a.conf" --confirm uninst_a
+assert_absent uninst_a
+assert_sql postgres "SELECT count(*) FROM pg_roles WHERE rolname = 'app_uninst_a'" 0
+if grep -q 'perodua-db-deploy uninst_a' "$HBA_FILE"; then die 'uninstall left the access rules'; fi
+assert_sql postgres 'SELECT count(*) FROM pg_hba_file_rules WHERE error IS NOT NULL' 0
+[[ ",$(admin_sql -d postgres -c 'SHOW listen_addresses')," != *,127.0.0.4,* ]] || die 'uninstall left the listen address'
+pg_isready -h 127.0.0.2 -p 5432 > /dev/null || die 'another deployment lost its listen address'
+[[ ! -e /var/lib/perodua-db-deploy/16-main/uninst_a ]] || die 'uninstall left the deployment records'
+[[ -f $TEST_DIR/uninst_a.conf ]] || die 'uninstall deleted a hand-written configuration'
+assert_sql password_prompt 'SELECT current_database()' password_prompt
+grep -q 'perodua-db-deploy password_prompt' "$HBA_FILE" || die 'uninstall touched another deployment'
+printf '%s' 'Uninstall Fixture #2026' > "$TEST_DIR/new.password"
+chmod 600 "$TEST_DIR/new.password"
+deploy_ok uninst_a "$TEST_DIR/new.password"
+pass 'uninstall removes a deployment (database, role and its password, access rules, listen address, records) only after an exact confirmation and with no open connection; a fresh deploy with a new password then succeeds'
+
+write_empty_conf uninst_b app_uninst_a
+sed -i 's/^DB_LISTEN_IP=.*/DB_LISTEN_IP=127.0.0.2/' "$TEST_DIR/uninst_b.conf"
+sed -i '1i # Created by deploy-db.sh from your answers. All settings: deploy.conf.example.' "$TEST_DIR/uninst_b.conf"
+deploy_ok uninst_b "$TEST_DIR/new.password"
+uninstall_ok uninst-b --config "$TEST_DIR/uninst_b.conf" --confirm uninst_b
+assert_absent uninst_b
+assert_sql uninst_a 'SELECT current_user' postgres
+assert_sql postgres "SELECT count(*) FROM pg_roles WHERE rolname = 'app_uninst_a'" 1
+grep -q 'keep login role app_uninst_a' "$TEST_DIR/uninst-b.log" || die 'the shared role was not reported as kept'
+grep -q 'keep listening on 127.0.0.2' "$TEST_DIR/uninst-b.log" || die 'the shared listen address was not reported as kept'
+[[ ",$(admin_sql -d postgres -c 'SHOW listen_addresses')," == *,127.0.0.2,* ]] || die 'a listen address another deployment uses was removed'
+[[ ! -e $TEST_DIR/uninst_b.conf ]] || die 'the deploy.conf written by the guided setup was not deleted'
+pass 'uninstall keeps the login role and listen address another deployment uses, and deletes a guided deploy.conf'
+
+admin_sql -d postgres -c 'CREATE DATABASE uninst_manual'
+uninstall_fails uninst-manual --database uninst_manual --confirm uninst_manual
+admin_sql -d postgres -c 'DROP DATABASE uninst_a'
+admin_sql -d postgres -c 'CREATE DATABASE uninst_a OWNER app_uninst_a'
+uninstall_fails uninst-replaced --config "$TEST_DIR/uninst_a.conf" --confirm uninst_a
+for log in uninst-manual uninst-replaced; do
+    grep -q 'was not created by deploy-db.sh on this server, or was replaced since' "$TEST_DIR/$log.log" || die "$log refused for the wrong reason"
+done
+assert_sql postgres "SELECT count(*) FROM pg_database WHERE datname IN ('uninst_manual', 'uninst_a')" 2
+pass 'uninstall refuses a database it did not create, or one replaced since, and changes nothing'
 
 python3 - "$TEST_DIR" <<'PY'
 import pathlib
@@ -450,5 +518,9 @@ for log in logs:
         raise SystemExit(f'password leaked into {log.name}')
 PY
 pass 'deployment output does not contain the application password'
+
+# Last: this uninstalls PostgreSQL itself.
+python3 "$SOURCE_DIR/tests/check-uninstall-purge.py" "$SOURCE_DIR/scripts" "$TEST_DIR/password_prompt.conf" password_prompt
+pass 'uninstall --purge: a wrong answer changes nothing; PURGE removes the deployment, PostgreSQL 16 and its data'
 
 printf '\nALL %s INTEGRATION CHECKS PASSED\nLogs: %s\n' "$PASS_COUNT" "$TEST_DIR"

@@ -7,8 +7,8 @@ import tempfile
 import unittest
 
 
-ROOT = Path(__file__).resolve().parents[1]
-SOURCE = (ROOT / 'deploy-db.sh').read_text()
+SCRIPTS = Path(__file__).resolve().parents[1] / 'scripts'
+SOURCE = (SCRIPTS / 'deploy-db.sh').read_text()
 MARKER = 'python3 - "$HBA" "$DB_NAME" "$DB_USER" "$APP_CIDR" "$STAGING" <<\'PY\'\n'
 WRITER = SOURCE.split(MARKER, 1)[1].split('\nPY\n', 1)[0]
 EXISTING = (

@@ -1,8 +1,10 @@
-/deploy.conf
-/app.env
-/filestore*.tar.gz
-/*.dump
-/*.zip
-/*.sql
+# Local configuration, secrets and backups, wherever they are placed
+# (normally in scripts/, next to the scripts that read them).
+deploy.conf
+app.env
+filestore*.tar.gz
+*.dump
+*.zip
+*.sql
 *.password
 __pycache__/

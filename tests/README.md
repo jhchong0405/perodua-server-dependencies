@@ -40,6 +40,17 @@ without one (for example inside `docker run --network none`). `test_deploy_app.p
 checks that the first interactive `deploy-app.sh` run asks for the web port and
 saves it.
 
+`test_uninstall_app.py` runs `uninstall.sh --role app` against a fake Docker CLI
+and checks the exact Docker calls:
+- the default removes the containers, network and directory, and keeps the
+  attachments volume and images;
+- `--purge` adds `--volumes` and removes the images;
+- without a compose file, the labelled resources are removed;
+- nothing changes after a wrong confirmation, with no terminal and no
+  `--confirm`, or in a directory `deploy-app.sh` did not create.
+
+It needs root on Ubuntu 24.04, so run it in the test image.
+
 `test_uat_guard.py` runs `uat_guard.py` against temporary addon trees shaped
 like the pinned image (literal manifests, code shipped as bare `.pyc`): direct,
 transitive and `auto_install` dependencies on `perodua_demo_client`, XML IDs,
@@ -120,6 +131,19 @@ marker is actually committed; an installed `perodua_demo_client`, records
 loaded under its name, demo data and modules from another release are refused;
 a stamped database is never marked or stamped again; and a restored database
 keeps its previous check, which requires the dataset module.
+
+`uninstall.sh --role db` coverage:
+- removing a deployment only after an exact confirmation and with no open
+  connection: the database, the role and its password, the access rules
+  (validated), the listen address and the records. A hand-written config is
+  kept, and a fresh deploy with a new password succeeds afterwards;
+- keeping a role and a listen address that another deployment uses, and deleting
+  a guided `deploy.conf`;
+- refusing a database the script did not create, or one replaced since.
+
+The last check, `check-uninstall-purge.py`, runs `--purge` on a pseudo-terminal:
+a wrong answer changes nothing, and `PURGE` removes the PostgreSQL 16 packages,
+data and records. It uninstalls PostgreSQL, so nothing can run after it.
 
 The container has no systemd PID 1. This exercises the `pg_ctlcluster` startup
 fallback, **not** host reboot persistence, systemd unit enablement, external App
