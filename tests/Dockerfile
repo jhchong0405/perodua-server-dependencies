@@ -5,7 +5,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         postgresql-16 postgresql-client-16 postgresql-contrib \
-        python3 curl wget ca-certificates shellcheck \
+        python3 python3-psycopg2 curl wget ca-certificates shellcheck \
     && rm -rf /var/lib/apt/lists/*
 
 ENV DEPLOY_DB_TEST_ISOLATED=1

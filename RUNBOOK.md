@@ -20,6 +20,8 @@ sudo docker compose -p perodua-client-uiux -f /opt/perodua-app/compose.yml exec 
 
 **PASS:** output is `READY` followed by a number, e.g. `READY 692`.
 The number varies. `EMPTY`, `MISSING` or an error is not a pass.
+`SETUP_PENDING` or `SETUP_UNMARKED` means a fresh UAT initialization did not
+finish; rerun `sudo bash deploy-app.sh --init-db` to complete it.
 
 ## 3. DB Server: is PostgreSQL online?
 

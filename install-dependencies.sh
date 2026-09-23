@@ -47,7 +47,9 @@ if [[ $role == app ]]; then
 
     update_packages
     install_packages ca-certificates curl
-    candidate=$(apt-cache policy docker-ce | awk '/Candidate:/ {print $2; exit}')
+    # awk must read to the end: exiting early makes apt-cache die of SIGPIPE, which
+    # pipefail turns into a failure once Docker's repository is already configured.
+    candidate=$(apt-cache policy docker-ce | awk '/Candidate:/ && !seen {print $2; seen=1}')
     if [[ -z $candidate || $candidate == '(none)' ]]; then
         # Preserve an administrator's existing source file rather than replacing it.
         [[ ! -e /etc/apt/sources.list.d/docker.sources && ! -e /etc/apt/sources.list.d/docker.list ]] || fail 'Docker source exists but has no package candidate. Check its configuration.'
@@ -79,7 +81,8 @@ else
     update_packages
     # Native restore uses the client tools, trusted extensions, Python standard
     # library, HTTPS downloads, and source-database locales. No pip environment.
-    packages=(postgresql-16 postgresql-client-16 postgresql-contrib python3 curl ca-certificates locales)
+    # nano is for editing deploy.conf, the next step in the README.
+    packages=(postgresql-16 postgresql-client-16 postgresql-contrib python3 curl ca-certificates locales nano)
     install_packages "${packages[@]}"
     /usr/lib/postgresql/16/bin/postgres --version
 fi

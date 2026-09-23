@@ -13,7 +13,20 @@ sudo bash install-dependencies.sh --role db
 
 Requires access to APT repositories. Uses configured package versions, adding [Docker's official repository](https://docs.docker.com/engine/install/ubuntu/) when needed. Installed target packages are not upgraded. Dependencies only; application deployment and database access configuration are separate.
 
-## Restore an existing database on a native DB server
+## Two database workflows
+
+`deploy-db.sh` has two modes, chosen with `DB_MODE` in `deploy.conf`:
+
+| `DB_MODE` | Database it produces | App Server step |
+| --- | --- | --- |
+| `restore` (default) | A copy of a trusted `pg_dump -Fc` backup | `sudo bash deploy-app.sh`, plus the matching filestore |
+| `empty` | An empty database owned by `DB_USER`, for a fresh UAT system | `sudo bash deploy-app.sh --init-db` |
+
+Existing configurations without `DB_MODE` keep working as `restore`. The two
+modes record different deployment identities, so a database created in one
+mode is never accepted by a rerun in the other.
+
+## Restore an existing database on a native DB server (`DB_MODE=restore`)
 
 `deploy-db.sh` starts the installed PostgreSQL 16 cluster, restores a trusted
 custom-format backup, validates application-account access, and configures
@@ -75,6 +88,7 @@ Edit the file, especially these settings:
 
 | Setting | Meaning |
 | --- | --- |
+| `DB_MODE` | `restore` (default) or `empty`; see [Two database workflows](#two-database-workflows) |
 | `DB_NAME`, `DB_USER` | New target database and dedicated application login |
 | `BACKUP_FILE` | Local `.dump`; relative paths are relative to `deploy.conf` |
 | `BACKUP_URL` | Direct HTTPS download URL; leave `BACKUP_FILE` empty to use it |
@@ -183,6 +197,8 @@ This path allows isolated tests; the intended server deployment uses systemd.
 - For `out of shared memory` / `max_locks_per_transaction` during a large restore,
   have the DB administrator size that setting and restart the cluster before
   retrying. No partial restore is promoted.
+- A database deployed with `DB_MODE=empty` is not accepted by a `restore` rerun,
+  and a restored database is not accepted by an `empty` rerun.
 
 Logs, protected state, configuration snapshots and a password-free connection
 summary are in `/var/lib/perodua-db-deploy/16-main/DB_NAME/` (cluster-dependent).
@@ -191,6 +207,159 @@ After SIGKILL or a host crash, an abandoned root-only
 `/var/tmp/perodua-db-deploy.*` directory may remain; inspect and clean it manually.
 Keep these state files for safe reruns. Database upgrades, automatic backup
 scheduling and Odoo/filestore validation are separate tasks.
+
+## Create an empty database for a fresh UAT system (`DB_MODE=empty`)
+
+Use this when there is no backup to restore and the App Server should build a
+new UAT system. No backup is downloaded, copied or restored.
+
+The simplest way is `sudo bash deploy-db.sh` without a `deploy.conf`. On a
+terminal it asks for this server's internal IP (offering the addresses it finds
+and accepting only one that belongs to this server) and the App server's IP (or
+a network in CIDR form). It then shows the settings, and after confirmation
+saves them as `deploy.conf` next to the script: `DB_MODE=empty`, database
+`perodua`, user `odoo`, the installed cluster's port, `DB_LISTEN_IP` and
+`APP_CIDR` (`/32` for a single address). Choosing a restore instead, or
+declining the summary, saves nothing. Later runs read the saved file and ask
+no setup questions; an explicit `--config` is never guided.
+
+To choose other values, write `deploy.conf` yourself:
+
+```
+DB_MODE=empty
+BACKUP_FILE=
+BACKUP_URL=
+BACKUP_SHA256=
+DOWNLOAD_USER=
+```
+
+`EXPECTED_TABLES` is not used in this mode. Set `DB_NAME`, `DB_USER`, the
+locales, `DB_LISTEN_IP` and `APP_CIDR` as for a restore, then run the same
+commands:
+
+```sh
+bash deploy-db.sh --config deploy.conf --check-config
+sudo bash deploy-db.sh --config deploy.conf
+```
+
+The script then:
+
+1. Starts and checks the PostgreSQL 16 cluster, as for a restore.
+2. Creates or reuses the application role with the same password handling. The
+   role stays `LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION
+   NOBYPASSRLS` with no role memberships; an existing role with more privileges
+   is refused, not changed.
+3. Creates the database under a temporary staging name, owned by `DB_USER`,
+   from `template0` with `UTF8` encoding and the configured locales, and revokes
+   all database privileges from `PUBLIC`.
+4. Applies the same access rules and listener handling as a restore.
+5. Verifies TCP/SCRAM login as `DB_USER`, the owner, the encoding and locales,
+   that `PUBLIC` cannot connect, and that the role is still least-privileged.
+   Only then renames the staging database to `DB_NAME` and records the
+   deployment.
+
+The App Server account therefore does not need `CREATEDB`: the database already
+exists when the App Server initializes it.
+
+Rerunning `DB_MODE=empty` is safe after the App Server has initialized Odoo in
+the database. A database this script created, still owned by `DB_USER` with the
+configured locales, is kept as it is: it is not dropped, recreated or emptied,
+its contents are not inspected, and its OID does not change. A same-name
+database that this script did not create, or whose owner or locales changed, is
+refused, even if its owner and locales happen to match.
+
+## Initialize a fresh UAT system on the App Server
+
+After `deploy-db.sh` reports `SUCCESS` in `DB_MODE=empty`, run on the App Server:
+
+```sh
+sudo bash deploy-app.sh --init-db
+```
+
+The App preflight reports the database as `EMPTY`, and the script then:
+
+1. Checks the pinned Odoo image before anything is written to the database
+   (`uat_guard.py`). It computes the modules Odoo could install for the fresh
+   module list, following Odoo 19's own dependency and `auto_install` rules
+   (as a superset: country-specific modules are assumed to install too), and
+   refuses if `perodua_demo_client` would be among them, if its manifest has
+   any `auto_install`, or if an installed module refers to it without declaring
+   the dependency: XML IDs, imports, paths into its folder, the settings field
+   that installs it, or its name in code, SQL and data files, including the
+   compiled `.pyc` files and spreadsheet files the image ships. Mentions in
+   comments and descriptions do not count. One reference in
+   `perodua_demo/hooks.pyc` was reviewed and is accepted only while that file's
+   SHA-256 is unchanged. A file it cannot read also stops the initialization.
+2. Detects the image's Odoo version and uses the matching option to disable Odoo
+   demo data (`--without-demo=True` on Odoo 19), after checking with that
+   Odoo's own option parser that it does disable it. An unknown version stops
+   the initialization.
+3. Installs `perodua_client_stable`, `perodua_gateway`,
+   `perodua_forecast_workbook`, `perodua_supplier_execution` and
+   `perodua_uiux_api` with their dependencies.
+4. Checks the database: those modules are installed, `perodua_demo_client` is
+   not, no records were loaded under its name, no module has demo data, and
+   every installed Perodua module has the version this image ships.
+5. Sets up the UAT administrators through the Odoo ORM.
+6. Starts the App, signs in as each UAT administrator through the workbench
+   login, and checks that a wrong password is refused. Only then is the
+   database stamped `READY`.
+
+**UAT-only fixed credentials.** These are for a UAT system only and must not be
+used on a production system or one reachable from the public internet:
+
+| Login | Password | Account |
+| --- | --- | --- |
+| `whadmin` | `perodua` | Sumathi (Admin), seeded by the release |
+| `admin1` | `perodua` | Haziq (Admin 1), seeded by the release |
+| `admin2` | `perodua` | Nurul (Admin 2), seeded by the release |
+
+The release's `perodua_demo_ui` module already creates these three logins. The
+initialization keeps them, with their names, IDs and the seeded records that
+refer to them, and gives each exactly the groups and companies of Odoo's native
+Administrator (`base.user_admin`), to which every module grants its
+administrator rights. It then archives the native Administrator, which the seed
+data renamed to `admin@demo.perodua.my` and which still had Odoo's default
+password, so these three are the only active administrator logins. Odoo itself
+recommends archiving that user rather than deleting it. The technical superuser
+is not changed. If a later release stops seeding one of the three logins, it is
+created as a copy of the native Administrator instead.
+
+The same seed data also creates five role users that are not administrators:
+`planner`, `whouse`, `sop`, `op` and `finance`. They also sign in with
+`perodua`. The initialization does not change them.
+
+The accounts are set up only during this first initialization. Later runs of
+`deploy-app.sh` never reset their passwords.
+
+Note that `perodua_client_stable` depends on `perodua_demo_profile`, which
+depends on `perodua_demo_ui` and, through it, `perodua_demo`. Those modules are
+part of the release's module graph, so their own seed records are present in a
+fresh UAT system. Only the client demonstration dataset (`perodua_demo_client`)
+and Odoo's demo data are left out.
+
+If the initialization stops after the modules are installed, for example on a
+timeout, Ctrl-C, a lost SSH session or a failed sign-in check, the preflight
+reports `SETUP_PENDING` (or `SETUP_UNMARKED` if it stopped before it could
+record that). Rerun `sudo bash deploy-app.sh --init-db` to finish: it sets up
+the administrators and repeats the checks, and does not reinstall modules. An
+initialized (`READY`) database is never reinitialized or upgraded (`-u`), with
+or without `--init-db`.
+
+If the module installation itself failed part-way, the App refuses the database
+instead, because a partial installation cannot be finished safely. Start again
+from an empty database:
+
+1. On the DB Server, drop the unfinished database, for example
+   `sudo -u postgres dropdb perodua` (use your `DB_NAME`). Only do this for a
+   database that never reached `READY`.
+2. Run `sudo bash deploy-db.sh --config deploy.conf` again, with
+   `DB_MODE=empty` and the same password. It creates a new empty database.
+3. On the App Server, run `sudo bash deploy-app.sh --init-db` again.
+
+A missing database is created by the App only if `DB_USER` has `CREATEDB`. With
+the least-privileged role from `deploy-db.sh`, the App stops and asks for the
+database to be created on the DB server with `DB_MODE=empty` first.
 
 ## Isolated verification
 
