@@ -24,26 +24,18 @@ Standard Ubuntu servers include `curl`. On a minimal image without it, first run
 
 ```bash
 sudo bash install-dependencies.sh --role db
-cp deploy.conf.example deploy.conf && chmod 600 deploy.conf
-nano deploy.conf
+sudo bash deploy-db.sh
 ```
 
-Change these lines and keep the other defaults:
+The script asks:
 
-```
-DB_MODE=empty
-BACKUP_FILE=
-BACKUP_SHA256=
-DB_LISTEN_IP=<this server's LAN IP>
-APP_CIDR=<App server IP>/32
-```
+1. What to set up: press Enter for a fresh UAT system.
+2. This server's internal IP: it lists the addresses it found; press Enter to use the first.
+3. The App server's IP.
+4. A new database password (at least 12 characters), twice. Keep it for the App server.
 
-```bash
-sudo bash deploy-db.sh --config deploy.conf
-```
-
-Choose a database password (at least 12 characters) and keep it for the App server.
-Wait for `SUCCESS`.
+Wait for `SUCCESS`. A fresh UAT system needs no backup settings. The answers
+are saved in `deploy.conf` and reused by later runs.
 
 ## 3. App server
 
@@ -53,13 +45,14 @@ sudo systemctl enable --now docker
 sudo bash deploy-app.sh --init-db
 ```
 
-Enter the DB server's IP, press Enter to keep the default port, database name and
-user, then enter the database password. When asked, enter the registry username
-and password for `perodua-deploy.novutal.com`. The first run takes several minutes.
+Enter the DB server's IP. Press Enter to keep the defaults for the database port,
+name and user and the web port (8110), then enter the database password. When
+asked, enter the registry username and password for `perodua-deploy.novutal.com`.
+The first run takes several minutes.
 
 ## 4. Sign in and check
 
-Open `http://APP_SERVER_IP:8110/app/`.
+Open `http://APP_SERVER_IP:8110/app/` (or the web port you chose).
 
 | Login | Password | Access |
 | --- | --- | --- |
@@ -84,9 +77,12 @@ You need a `database.dump` (`pg_dump -Fc`) with its SHA-256 and original locales
 and the matching `filestore.tar.gz` (`filestore/DB_NAME/...`). Use the same
 database name on both servers.
 
-- **DB server:** copy `database.dump` into `setup/` and `chmod 600` it. In
-  `deploy.conf` keep `DB_MODE=restore` and set `BACKUP_FILE`, `BACKUP_SHA256`,
-  `DB_LC_COLLATE` and `DB_LC_CTYPE`. For `en_US.utf8` locales, first run
+- **DB server:** copy `database.dump` into `setup/` and `chmod 600` it. Before
+  running `deploy-db.sh`, run `cp deploy.conf.example deploy.conf && chmod 600 deploy.conf`
+  and edit it: keep `DB_MODE=restore`, set `BACKUP_FILE`, `BACKUP_SHA256`,
+  `DB_LC_COLLATE`, `DB_LC_CTYPE`, `DB_LISTEN_IP` (this server's internal IP) and
+  `APP_CIDR` (the App server's `IP/32`). With a `deploy.conf` present the script
+  asks no setup questions. For `en_US.utf8` locales, first run
   `sudo localedef -i en_US -f UTF-8 en_US.utf8`.
 - **App server:** copy `filestore.tar.gz` into `setup/`, `chmod 600` it and run
   `sudo bash deploy-app.sh` without `--init-db`. Only if it stops at

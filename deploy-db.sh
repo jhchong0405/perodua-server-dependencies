@@ -14,7 +14,9 @@ usage() {
 Usage: sudo bash deploy-db.sh [--config FILE] [--password-file FILE]
        bash deploy-db.sh --config FILE --check-config
 
-Default configuration: deploy.conf next to this script.
+Default configuration: deploy.conf next to this script. If it does not exist,
+the script asks on the terminal for this server's internal IP and the App
+server's IP, and saves the answers there as a fresh UAT (DB_MODE=empty) setup.
 Passwords are prompted on the terminal. --password-file accepts a root-owned
 regular file with no group/other permissions (for controlled automation).
 Requires Ubuntu 24.04, PostgreSQL 16 already installed, python3, curl and CA
@@ -30,13 +32,14 @@ die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 log() { printf '[%s] %s\n' "$(date -u +%FT%TZ)" "$*"; }
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 CONFIG="$SCRIPT_DIR/deploy.conf"
+CONFIG_GIVEN=0
 PASSWORD_FILE=''
 CHECK_ONLY=0
 while (($#)); do
     case "$1" in
         --config|--password-file)
             (($# >= 2)) || die "Missing value for $1"
-            if [[ $1 == --config ]]; then CONFIG=$2; else PASSWORD_FILE=$2; fi
+            if [[ $1 == --config ]]; then CONFIG=$2; CONFIG_GIVEN=1; else PASSWORD_FILE=$2; fi
             shift 2 ;;
         --check-config) CHECK_ONLY=1; shift ;;
         --help|-h) usage; exit 0 ;;
@@ -44,6 +47,69 @@ while (($#)); do
     esac
 done
 command -v python3 >/dev/null || die 'Install python3 (standard library only; no pip packages).'
+
+# Guided setup. With no deploy.conf, ask on the terminal for the two addresses a
+# fresh UAT system needs and save them as deploy.conf; everything below reads
+# that file exactly like a hand-written one. An explicit --config is not guided.
+ask() { IFS= read -r -p "$1" ANSWER </dev/tty || die 'Input cancelled.'; ANSWER=${ANSWER//[[:space:]]/}; }
+is_local_ipv4() {
+    python3 - "$1" <<'PY' 2>/dev/null
+import ipaddress, socket, sys
+address = ipaddress.IPv4Address(sys.argv[1])
+if address.is_loopback or address.is_unspecified or address.is_multicast or address.is_link_local:
+    sys.exit(1)
+with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+    sock.bind((str(address), 0))
+PY
+}
+is_app_network() {
+    python3 - "$1" <<'PY' 2>/dev/null
+import ipaddress, sys
+network = ipaddress.IPv4Network(sys.argv[1], strict=True)
+sys.exit(network.prefixlen == 0 or network.is_multicast or network.is_loopback or network.is_unspecified)
+PY
+}
+guided_setup() {
+    local port listen app address choices=()
+    { : </dev/tty; } 2>/dev/null || die "No configuration at $CONFIG. Copy deploy.conf.example to deploy.conf and edit it, or run on a terminal to be guided."
+    port=$(pg_conftool 16 main show port 2>/dev/null | awk '{print $NF}') || true
+    [[ $port =~ ^[1-9][0-9]{0,4}$ ]] || die 'PostgreSQL 16 is not installed yet. Run: sudo bash install-dependencies.sh --role db'
+    for address in $(hostname -I 2>/dev/null); do
+        if is_local_ipv4 "$address"; then choices+=("$address"); fi
+    done
+    printf 'No deploy.conf found. Your answers will be saved there.\n\n  1) Fresh UAT system (empty database)\n  2) Restore a database backup\n\n' >/dev/tty
+    ask 'Choose [1]: '
+    case ${ANSWER:-1} in
+        1) ;;
+        2) die 'A restore needs the backup details: copy deploy.conf.example to deploy.conf, fill in the backup settings (README, "From a backup"), then run this again.' ;;
+        *) die 'Choose 1 or 2.' ;;
+    esac
+    ((${#choices[@]} == 0)) || printf "\nThis server's addresses: %s\n" "${choices[*]}" >/dev/tty
+    while :; do
+        ask "This server's internal IP, which the App server connects to [${choices[0]:-}]: "
+        listen=${ANSWER:-${choices[0]:-}}
+        if [[ -n $listen ]] && is_local_ipv4 "$listen"; then break; fi
+        printf '%s is not an address of this server.\n' "${listen:-(nothing entered)}" >/dev/tty
+    done
+    while :; do
+        ask 'App server IP (only it may connect): '
+        app=$ANSWER
+        [[ -z $app || $app == */* ]] || app+=/32
+        if [[ -n $app ]] && is_app_network "$app"; then break; fi
+        printf 'Enter the IPv4 address of the App server, for example 10.0.0.10.\n' >/dev/tty
+    done
+    printf '\nFresh UAT database perodua for user odoo on PostgreSQL port %s.\nListen on %s and accept connections only from %s.\n' "$port" "$listen" "$app" >/dev/tty
+    ask "Save these settings to $CONFIG and continue? [Y/n]: "
+    [[ ${ANSWER:-y} == [Yy]* ]] || die 'Nothing was saved or changed.'
+    {
+        printf '# Created by deploy-db.sh from your answers. All settings: deploy.conf.example.\n'
+        printf '%s\n' DB_MODE=empty DB_NAME=perodua DB_USER=odoo "PG_PORT=$port" "DB_LISTEN_IP=$listen" "APP_CIDR=$app"
+    } > "$CONFIG.new"
+    mv -f -- "$CONFIG.new" "$CONFIG"
+    printf 'Saved %s.\n\n' "$CONFIG" >/dev/tty
+}
+if ((CONFIG_GIVEN == 0)) && [[ ! -e $CONFIG && ! -L $CONFIG ]]; then guided_setup; fi
+
 [[ -f $CONFIG && ! -L $CONFIG ]] || die "Configuration is not a regular, non-symlink file: $CONFIG"
 (( (8#$(stat -c %a "$CONFIG") & 8#022) == 0 )) || die 'Configuration must not be group/world writable.'
 CONFIG=$(realpath -- "$CONFIG")

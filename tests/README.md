@@ -22,6 +22,17 @@ helper files are installed read-only and mounted into the container. It also
 checks static properties of `uat_admins.py` (ORM password writes, groups copied
 from `base.user_admin`, one commit after all checks).
 
+`test_deploy_db_guided.py` answers the guided setup of `deploy-db.sh` on a
+pseudo-terminal with `--check-config`, so nothing is deployed: the saved
+`deploy.conf` and its permissions, re-asking for an address that is not on this
+host or is not an IPv4 address, a CIDR for the App side, a later run that asks
+nothing, and no file written when a restore is chosen, the summary is declined,
+no terminal is available, `--config` is given or PostgreSQL is not installed.
+It needs one non-loopback IPv4 address on the host and is skipped without one
+(for example inside `docker run --network none`). `test_deploy_app.py` also
+checks that the first interactive `deploy-app.sh` run asks for the web port and
+saves it.
+
 `test_uat_guard.py` runs `uat_guard.py` against temporary addon trees shaped
 like the pinned image (literal manifests, code shipped as bare `.pyc`): direct,
 transitive and `auto_install` dependencies on `perodua_demo_client`, XML IDs,

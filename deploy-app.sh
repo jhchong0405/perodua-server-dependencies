@@ -102,6 +102,7 @@ if [[ -z $CONFIG ]]; then
     prompt DB_PORT 'Database port'
     prompt DB_NAME 'Application database name'
     prompt DB_USER 'Database username'
+    prompt HTTP_PORT 'Web port that browsers open on this server'
 fi
 [[ $DB_HOST =~ ^[A-Za-z0-9][A-Za-z0-9_.:-]*$ ]] || fail 'DB_HOST must be an IP address or hostname (no URL or shell syntax)'
 for key in DB_NAME DB_USER; do

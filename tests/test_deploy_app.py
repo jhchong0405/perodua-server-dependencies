@@ -132,11 +132,11 @@ sys.exit(93)
             return []
         return [json.loads(line) for line in self.calls.read_text().splitlines()]
 
-    def terminal_exchange(self, responses):
+    def terminal_exchange(self, responses, command=None):
         """Drive real Bash reads on a PTY and check token prompts disable echo."""
         pid, master = pty.fork()
         if pid == 0:
-            os.execvpe("bash", self.command(), self.env)
+            os.execvpe("bash", command or self.command(), self.env)
         output = b""
         cursor = 0
         deadline = time.monotonic() + 20
@@ -301,6 +301,25 @@ sys.exit(93)
         self.assertEqual([json.loads(line) for line in received.read_text().splitlines()],
                          ["fixture-invalid-token", "fixture-valid-token"])
         self.assert_original_auth_unchanged()
+
+    def test_first_interactive_run_asks_for_the_web_port_and_saves_it(self):
+        self.env["FAKE_DOCKER_MODE"] = "auth"
+        (self.base / "fake-state").write_text("authenticated")  # pulls succeed without a login
+        code, output = self.terminal_exchange([
+            (b"Database server IP / hostname []: ", b"192.0.2.20", True),
+            (b"Database port [5432]: ", b"", True),
+            (b"Application database name [perodua]: ", b"", True),
+            (b"Database username [odoo]: ", b"", True),
+            (b"Web port that browsers open on this server [8110]: ", b"18111", True),
+            (b"Database password (hidden): ", b"fixture-password", False),
+        ], command=["bash", str(SCRIPT), "--dir", str(self.deploy_dir)])
+        self.assertNotEqual(code, 0, "Fake Docker must stop before database operations")
+        self.assertIn("Fixture stopped before", output)
+        self.assertNotIn("fixture-password", output)
+        saved = (self.deploy_dir / "app.env").read_text()
+        for line in ("DB_HOST=192.0.2.20", "DB_PORT=5432", "DB_NAME=perodua", "DB_USER=odoo", "HTTP_PORT=18111"):
+            self.assertIn(line + "\n", saved)
+        self.assertIn('"0.0.0.0:18111:80"', (self.deploy_dir / "compose.yml").read_text())
 
     def test_blank_hidden_token_cancels_without_login(self):
         self.env["FAKE_DOCKER_MODE"] = "auth"
