@@ -26,11 +26,10 @@ from `base.user_admin`, one commit after all checks).
 pseudo-terminal with `--check-config`, so nothing is deployed. It checks:
 - the saved `deploy.conf` and its permissions, and that a later run asks nothing;
 - asking again after an unknown menu choice, an address that is not on this host,
-  an address that is not IPv4, or a declined summary;
+  an address that is not IPv4, an App address that is this server, or a declined
+  summary;
 - a CIDR for the App side;
-- an App on this server in Docker, including going back to that question when
-  the App address is this server or the internal IP is a Docker address;
-- Docker not running;
+- Docker network addresses neither offered nor accepted as the internal IP;
 - no file written when a restore is chosen, no terminal is available,
   `--config` is given or PostgreSQL is not installed.
 

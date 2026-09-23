@@ -51,8 +51,7 @@ command -v python3 >/dev/null || die 'Install python3 (standard library only; no
 # Guided setup. With no deploy.conf, ask on the terminal for what a fresh UAT
 # system needs, asking again whenever an answer cannot be used, and save it as
 # deploy.conf; everything below reads that file exactly like a hand-written one.
-# An explicit --config is not guided.
-DOCKER_NETWORKS=172.16.0.0/12
+# An explicit --config is not guided. The App server is on another server.
 ask() { IFS= read -r -p "$1" ANSWER </dev/tty || die 'Input cancelled.'; ANSWER=${ANSWER//[[:space:]]/}; }
 say() { printf '%s\n' "$@" >/dev/tty; }
 password_ok() { [[ ${#1} -ge 12 && ${#1} -le 1024 && $1 != *[!\ -\~]* ]]; }
@@ -68,14 +67,6 @@ docker_gateways() {
     # shellcheck disable=SC2046 # one argument per network ID
     docker network inspect $(docker network ls -q 2>/dev/null) \
         --format '{{range .IPAM.Config}}{{.Gateway}} {{end}}' 2>/dev/null || true
-}
-docker_bridge_ipv4() {
-    local gateway
-    command -v docker >/dev/null || return 1
-    for gateway in $(docker network inspect bridge --format '{{range .IPAM.Config}}{{.Gateway}} {{end}}' 2>/dev/null); do
-        if is_local_ipv4 "$gateway"; then printf '%s\n' "$gateway"; return 0; fi
-    done
-    return 1
 }
 is_local_ipv4() {
     python3 - "$1" <<'PY' 2>/dev/null
@@ -95,7 +86,7 @@ sys.exit(network.prefixlen == 0 or network.is_multicast or network.is_loopback o
 PY
 }
 guided_setup() {
-    local port listen app address bridge default choices=() private=() gateways=()
+    local port listen app address default choices=() private=() gateways=()
     { : </dev/tty; } 2>/dev/null || die "No configuration at $CONFIG. Copy deploy.conf.example to deploy.conf and edit it, or run on a terminal to be guided."
     port=$(pg_conftool 16 main show port 2>/dev/null | awk '{print $NF}') || true
     [[ $port =~ ^[1-9][0-9]{0,4}$ ]] || die 'PostgreSQL 16 is not installed yet. Run: sudo bash install-dependencies.sh --role db'
@@ -119,52 +110,35 @@ guided_setup() {
         esac
     done
     while :; do
-        listen='' app=''
-        say '' '  1) On another server' '  2) On this server, in Docker' ''
-        while [[ -z $app ]]; do
-            ask 'Where will the App server run? [1]: '
-            case ${ANSWER:-1} in
-                1) break ;;
-                2) if bridge=$(docker_bridge_ipv4); then
-                       listen=$bridge app=$DOCKER_NETWORKS
-                   else
-                       say 'Docker is not running on this server. Install it first (sudo bash install-dependencies.sh --role app), or enter 1.'
-                   fi ;;
-                *) say 'Enter 1 or 2.' ;;
-            esac
+        ((${#choices[@]} == 0)) || say '' "This server's addresses: ${choices[*]}"
+        while :; do
+            ask "This server's internal IP, which the App server connects to [$default]: "
+            listen=${ANSWER:-$default}
+            if [[ -n $listen && " ${gateways[*]} " == *" $listen "* ]]; then
+                say "$listen is a Docker network address that only this server reaches; the App server cannot connect to it."
+                continue
+            fi
+            if [[ -z $listen ]] || ! is_local_ipv4 "$listen"; then
+                say "${listen:-(nothing entered)} is not an address of this server."
+                continue
+            fi
+            is_public_ipv4 "$listen" || break
+            say "$listen is a public internet address: PostgreSQL would accept connections on it from anywhere, and only the App server could log in. A private network address is safer."
+            ask 'Use it anyway? [y/N]: '
+            [[ ${ANSWER:-n} != [Yy]* ]] || break
         done
-        if [[ -z $app ]]; then
-            ((${#choices[@]} == 0)) || say '' "This server's addresses: ${choices[*]}"
-            while :; do
-                ask "This server's internal IP, which the App server connects to [$default]: "
-                listen=${ANSWER:-$default}
-                if [[ -n $listen && " ${gateways[*]} " == *" $listen "* ]]; then
-                    say "$listen is a Docker network address that only this server reaches. If the App runs here in Docker, enter 2 below."
-                    continue 2
-                fi
-                if [[ -z $listen ]] || ! is_local_ipv4 "$listen"; then
-                    say "${listen:-(nothing entered)} is not an address of this server."
-                    continue
-                fi
-                is_public_ipv4 "$listen" || break
-                say "$listen is a public internet address: PostgreSQL would accept connections on it from anywhere, and only the App server could log in. A private network address is safer."
-                ask 'Use it anyway? [y/N]: '
-                [[ ${ANSWER:-n} != [Yy]* ]] || break
-            done
-            while :; do
-                ask 'App server IP (only it may connect): '
-                app=$ANSWER
-                [[ -z $app || $app == */* ]] || app+=/32
-                if [[ -z $app ]] || ! is_app_network "$app"; then
-                    say "Enter the App server's IPv4 address; 'hostname -I' on the App server shows it."
-                elif [[ $app == */32 ]] && is_local_ipv4 "${app%/32}"; then
-                    say "${app%/32} is this server. If the App runs here in Docker, enter 2 below."
-                    continue 2
-                else
-                    break
-                fi
-            done
-        fi
+        while :; do
+            ask 'App server IP (only it may connect): '
+            app=$ANSWER
+            [[ -z $app || $app == */* ]] || app+=/32
+            if [[ -z $app ]] || ! is_app_network "$app"; then
+                say 'Enter the IPv4 address that the App server connects from.'
+            elif [[ $app == */32 ]] && is_local_ipv4 "${app%/32}"; then
+                say "${app%/32} is this server. Enter the IP of the App server."
+            else
+                break
+            fi
+        done
         say '' "Fresh UAT database perodua for user odoo on PostgreSQL port $port." \
             "Listen on $listen and accept connections only from $app."
         ask "Save these settings to $CONFIG and continue? [Y/n]: "
