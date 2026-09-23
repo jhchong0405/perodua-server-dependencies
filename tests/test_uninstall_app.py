@@ -7,14 +7,13 @@ these in the test image (tests/Dockerfile) or skip them elsewhere.
 import json
 import os
 from pathlib import Path
-import shutil
 import subprocess
 import tempfile
 import unittest
 
 
-ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = ROOT / "uninstall.sh"
+SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
+SCRIPT = SCRIPTS / "uninstall.sh"
 ODOO = "perodua-deploy.novutal.com/perodua-odoo:client-stable-uiux-v1.0.0@sha256:" + "c" * 64
 WEB = "perodua-deploy.novutal.com/perodua-odoo:client-stable-uiux-web-v1.0.0@sha256:" + "6" * 64
 

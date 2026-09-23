@@ -5,7 +5,7 @@ on a pseudo-terminal without --password-file: a too-short password and two
 different entries are each refused with a reason and asked again, then a valid
 password deploys.
 
-usage: check-password-prompt.py SOURCE_DIR CONFIG
+usage: check-password-prompt.py SCRIPTS_DIR CONFIG
 """
 
 import os
@@ -20,7 +20,7 @@ import time
 if os.environ.get("DEPLOY_DB_TEST_ISOLATED") != "1" or not Path("/.dockerenv").is_file():
     raise SystemExit("This check must run inside the disposable integration container")
 
-source_dir, config = map(Path, sys.argv[1:])
+scripts_dir, config = map(Path, sys.argv[1:])
 SHORT = b"Sh0rt!pw"
 VALID = b"Prompt Fixture #2026"
 OTHER = b"Different Fixture #2026"
@@ -30,7 +30,7 @@ answers = [(PASSWORD, SHORT), (PASSWORD, VALID), (CONFIRM, OTHER), (PASSWORD, VA
 
 child, terminal = pty.fork()
 if child == 0:
-    os.execv("/usr/bin/bash", ["bash", str(source_dir / "deploy-db.sh"), "--config", str(config)])
+    os.execv("/usr/bin/bash", ["bash", str(scripts_dir / "deploy-db.sh"), "--config", str(config)])
 
 output, cursor, status = b"", 0, None
 deadline = time.monotonic() + 120

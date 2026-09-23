@@ -18,8 +18,8 @@ import textwrap
 import unittest
 
 
-ROOT = Path(__file__).resolve().parents[1]
-GUARD = ROOT / 'uat_guard.py'
+SCRIPTS = Path(__file__).resolve().parents[1] / 'scripts'
+GUARD = SCRIPTS / 'uat_guard.py'
 SPEC = importlib.util.spec_from_file_location('uat_guard', GUARD)
 uat_guard = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(uat_guard)

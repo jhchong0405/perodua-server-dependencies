@@ -5,7 +5,7 @@ database that deploy-db.sh created with DB_MODE=empty. It executes the exact
 preflight.py text that deploy-app.sh writes, over TCP as the application role,
 through the fresh UAT state machine and the unchanged restored-database path.
 
-usage: check_app_preflight.py SOURCE_DIR TEST_DIR DB_NAME DB_USER PASSWORD_FILE
+usage: check_app_preflight.py SCRIPTS_DIR TEST_DIR DB_NAME DB_USER PASSWORD_FILE
 """
 import hashlib
 import os
@@ -15,8 +15,8 @@ import sys
 
 import psycopg2
 
-source_dir, test_dir, db_name, db_user, password_file = sys.argv[1:]
-script = (Path(source_dir) / 'deploy-app.sh').read_text()
+scripts_dir, test_dir, db_name, db_user, password_file = sys.argv[1:]
+script = (Path(scripts_dir) / 'deploy-app.sh').read_text()
 body = script.split('cat > "$TEMP_DIR/preflight.py" <<\'PY\'\n', 1)[1].split('\nPY\n', 1)[0]
 preflight = Path(test_dir) / 'preflight.py'
 preflight.write_text(body + '\n')

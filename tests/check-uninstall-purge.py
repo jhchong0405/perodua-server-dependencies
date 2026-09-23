@@ -4,7 +4,7 @@ Only used by the disposable-container integration harness, as its last check:
 it uninstalls PostgreSQL. A wrong answer to the PURGE question must change
 nothing; the right one removes the deployment, the packages and their data.
 
-usage: check-uninstall-purge.py SOURCE_DIR CONFIG DB_NAME
+usage: check-uninstall-purge.py SCRIPTS_DIR CONFIG DB_NAME
 """
 
 import os
@@ -20,14 +20,14 @@ import time
 if os.environ.get("DEPLOY_DB_TEST_ISOLATED") != "1" or not Path("/.dockerenv").is_file():
     raise SystemExit("This check must run inside the disposable integration container")
 
-source_dir, config, db_name = sys.argv[1:]
+scripts_dir, config, db_name = sys.argv[1:]
 PROMPT = b"Type PURGE to uninstall PostgreSQL 16"
 
 
 def run(answer):
     child, terminal = pty.fork()
     if child == 0:
-        os.execv("/usr/bin/bash", ["bash", f"{source_dir}/uninstall.sh", "--role", "db",
+        os.execv("/usr/bin/bash", ["bash", f"{scripts_dir}/uninstall.sh", "--role", "db",
                                     "--config", config, "--confirm", db_name, "--purge"])
     output, status = b"", None
     deadline = time.monotonic() + 180

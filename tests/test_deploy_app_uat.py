@@ -16,8 +16,8 @@ import tempfile
 import unittest
 
 
-ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = ROOT / 'deploy-app.sh'
+SCRIPTS = Path(__file__).resolve().parents[1] / 'scripts'
+SCRIPT = SCRIPTS / 'deploy-app.sh'
 FRESH_MODULES = ('perodua_client_stable,perodua_gateway,perodua_forecast_workbook,'
                  'perodua_supplier_execution,perodua_uiux_api')
 
@@ -250,7 +250,7 @@ class UatOrchestrationTests(unittest.TestCase):
         self.run_script('READY 0')
         for helper in ('uat_guard.py', 'uat_admins.py'):
             path = self.deploy_dir / helper
-            self.assertEqual(path.read_bytes(), (ROOT / helper).read_bytes())
+            self.assertEqual(path.read_bytes(), (SCRIPTS / helper).read_bytes())
             self.assertEqual(path.stat().st_mode & 0o777, 0o444)
         compose = (self.deploy_dir / 'compose.yml').read_text()
         self.assertIn('./uat_guard.py:/opt/deploy/uat_guard.py:ro', compose)
@@ -263,7 +263,7 @@ class UatOrchestrationTests(unittest.TestCase):
         partial = Path(self.temp.name) / 'partial-release'
         partial.mkdir()
         (partial / 'deploy-app.sh').write_bytes(SCRIPT.read_bytes())
-        (partial / 'uat_guard.py').write_bytes((ROOT / 'uat_guard.py').read_bytes())
+        (partial / 'uat_guard.py').write_bytes((SCRIPTS / 'uat_guard.py').read_bytes())
         self.env['FAKE_CHECK'] = 'READY 0'
         result = subprocess.run(['bash', str(partial / 'deploy-app.sh'), '--config', str(self.config),
                                  '--dir', str(self.deploy_dir), '--non-interactive'],
@@ -278,7 +278,7 @@ class UatAdminScriptTests(unittest.TestCase):
     """Static properties of the ORM script; its behaviour is proven on a real
     Odoo database by the acceptance run."""
 
-    source = (ROOT / 'uat_admins.py').read_text(encoding='utf-8')
+    source = (SCRIPTS / 'uat_admins.py').read_text(encoding='utf-8')
 
     def test_compiles(self):
         compile(self.source, 'uat_admins.py', 'exec')

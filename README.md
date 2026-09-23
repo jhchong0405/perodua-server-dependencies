@@ -10,12 +10,26 @@ Allow **App → DB port 5432** and **browser → App port 8110**.
 The steps below create a **fresh UAT system** with an empty database.
 To restore an existing database instead, see [From a backup](#from-a-backup).
 
+## Repository layout
+
+| Path | Contents |
+| --- | --- |
+| `scripts/` | `install-dependencies.sh`, `deploy-db.sh`, `deploy-app.sh`, `uninstall.sh`, the two helpers `deploy-app.sh` uses (`uat_guard.py`, `uat_admins.py`) and the configuration templates. Your `deploy.conf`, backups and filestore archive also go here. |
+| `docs/` | [DEPLOYMENT.md](docs/DEPLOYMENT.md) (full reference) and [RUNBOOK.md](docs/RUNBOOK.md) (self-check after deployment) |
+| `tests/` | Automated checks, see [tests/README.md](tests/README.md) |
+
 ## 1. Download (both servers)
 
 ```bash
 curl -fL https://api.github.com/repos/jhchong0405/perodua-server-dependencies/tarball/main -o setup.tar.gz
-mkdir -p setup && tar -xzf setup.tar.gz -C setup --strip-components=1 && cd setup
+mkdir -p setup && tar -xzf setup.tar.gz -C setup --strip-components=1 && cd setup/scripts
 ```
+
+Or, with git: `git clone https://github.com/jhchong0405/perodua-server-dependencies.git`,
+then `cd perodua-server-dependencies/scripts`; update later with `git pull`. Use one
+of the two, not both in the same place.
+
+**All commands below run in this `scripts` folder.**
 
 Standard Ubuntu servers include `curl`. On a minimal image without it, first run
 `sudo apt-get update && sudo apt-get install -y curl ca-certificates`.
@@ -39,8 +53,8 @@ The script asks:
 
 If an answer cannot be used, the script says why and asks again. Wait for
 `SUCCESS`; it ends by printing the `DB_HOST` for the App server. A fresh UAT
-system needs no backup settings. The answers are saved in `deploy.conf` and
-reused by later runs.
+system needs no backup settings. The answers are saved in `scripts/deploy.conf`
+and reused by later runs.
 
 ## 3. App server
 
@@ -74,7 +88,7 @@ sudo docker compose -p perodua-client-uiux -f /opt/perodua-app/compose.yml ps
 
 `web` and `odoo` should both be `healthy`. Running `deploy-app.sh` again keeps the
 database and passwords and does not reinstall or upgrade modules. If the first run
-stops part-way, see [DEPLOYMENT.md](DEPLOYMENT.md#initialize-a-fresh-uat-system-on-the-app-server).
+stops part-way, see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#initialize-a-fresh-uat-system-on-the-app-server).
 
 ## From a backup
 
@@ -82,14 +96,14 @@ You need a `database.dump` (`pg_dump -Fc`) with its SHA-256 and original locales
 and the matching `filestore.tar.gz` (`filestore/DB_NAME/...`). Use the same
 database name on both servers.
 
-- **DB server:** copy `database.dump` into `setup/` and `chmod 600` it. Before
+- **DB server:** copy `database.dump` into the `scripts` folder and `chmod 600` it. Before
   running `deploy-db.sh`, run `cp deploy.conf.example deploy.conf && chmod 600 deploy.conf`
   and edit it: keep `DB_MODE=restore`, set `BACKUP_FILE`, `BACKUP_SHA256`,
   `DB_LC_COLLATE`, `DB_LC_CTYPE`, `DB_LISTEN_IP` (this server's internal IP) and
   `APP_CIDR` (the App server's `IP/32`). With a `deploy.conf` present the script
   asks no setup questions. For `en_US.utf8` locales, first run
   `sudo localedef -i en_US -f UTF-8 en_US.utf8`.
-- **App server:** copy `filestore.tar.gz` into `setup/`, `chmod 600` it and run
+- **App server:** copy `filestore.tar.gz` into the `scripts` folder, `chmod 600` it and run
   `sudo bash deploy-app.sh` without `--init-db`. Only if it stops at
   `Filestore incomplete`, restore the archive and run it again:
 
@@ -121,7 +135,7 @@ sudo bash uninstall.sh --role app
 It removes the containers and `/opt/perodua-app`. The attachments volume and the
 images stay unless you add `--purge`.
 
-On the DB server, in the directory of `deploy-db.sh`:
+On the DB server:
 
 ```bash
 sudo bash uninstall.sh --role db
@@ -133,4 +147,4 @@ stays installed; `--purge` also uninstalls it and deletes every database on the
 server. Both commands list what they will remove and ask you to type the
 database or project name first.
 
-[Self-check](RUNBOOK.md) · [Reference](DEPLOYMENT.md) · [Tests](tests/README.md)
+[Self-check](docs/RUNBOOK.md) · [Reference](docs/DEPLOYMENT.md) · [Tests](tests/README.md)

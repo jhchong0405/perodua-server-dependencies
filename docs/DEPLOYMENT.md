@@ -1,5 +1,11 @@
 # Deployment reference
 
+All scripts and configuration templates are in the `scripts` folder of the
+repository, and the commands below run there (see the
+[README](../README.md#repository-layout)). `deploy.conf`, backups and the
+filestore archive go in that folder too; relative paths in `deploy.conf` resolve
+against it.
+
 Ubuntu 24.04 (amd64). Run the matching command on each server:
 
 ```sh
@@ -49,8 +55,8 @@ certificates are needed for HTTPS downloads; a local backup works offline once
 the other packages are installed.
 
 For the GitHub-only script delivery path, with a backup transferred separately
-to any local directory, follow [README.md](README.md). For a backup outside the
-downloaded setup directory, set `BACKUP_FILE` to its absolute path.
+to any local directory, follow [README.md](../README.md). For a backup outside the
+`scripts` folder, set `BACKUP_FILE` to its absolute path.
 The repository contains deployment code and example configuration only. Database
 archives, real configuration and passwords are never required in GitHub.
 
