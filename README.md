@@ -30,12 +30,17 @@ sudo bash deploy-db.sh
 The script asks:
 
 1. What to set up: press Enter for a fresh UAT system.
-2. This server's internal IP: it lists the addresses it found; press Enter to use the first.
-3. The App server's IP.
-4. A new database password (at least 12 characters), twice. Keep it for the App server.
+2. Where the App server runs: press Enter for another server, or enter `2` if it
+   runs on this server in Docker (then questions 3 and 4 are skipped).
+3. This server's internal IP: it lists the addresses it found; press Enter to use
+   the suggested one.
+4. The App server's IP.
+5. A new database password (at least 12 characters), twice. Keep it for the App server.
 
-Wait for `SUCCESS`. A fresh UAT system needs no backup settings. The answers
-are saved in `deploy.conf` and reused by later runs.
+If an answer cannot be used, the script says why and asks again. Wait for
+`SUCCESS`; it ends by printing the `DB_HOST` for the App server. A fresh UAT
+system needs no backup settings. The answers are saved in `deploy.conf` and
+reused by later runs.
 
 ## 3. App server
 
@@ -45,7 +50,7 @@ sudo systemctl enable --now docker
 sudo bash deploy-app.sh --init-db
 ```
 
-Enter the DB server's IP. Press Enter to keep the defaults for the database port,
+Enter the DB server's IP (the `DB_HOST` printed by `deploy-db.sh`). Press Enter to keep the defaults for the database port,
 name and user and the web port (8110), then enter the database password. When
 asked, enter the registry username and password for `perodua-deploy.novutal.com`.
 The first run takes several minutes.

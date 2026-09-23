@@ -434,6 +434,11 @@ assert_sql https_restored 'SELECT count(*) FROM public.res_users' 2
 assert_absent https_refused
 pass 'real HTTPS Basic-auth download prompts securely; wrong cloud password prevents restore'
 
+write_empty_conf password_prompt app_password_prompt
+python3 "$SOURCE_DIR/tests/check-password-prompt.py" "$SOURCE_DIR" "$TEST_DIR/password_prompt.conf"
+assert_sql password_prompt 'SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = current_database()' app_password_prompt
+pass 'interactive password entry asks again after a short password or two different entries, never echoes, then deploys'
+
 python3 - "$TEST_DIR" <<'PY'
 import pathlib
 import sys

@@ -214,14 +214,26 @@ Use this when there is no backup to restore and the App Server should build a
 new UAT system. No backup is downloaded, copied or restored.
 
 The simplest way is `sudo bash deploy-db.sh` without a `deploy.conf`. On a
-terminal it asks for this server's internal IP (offering the addresses it finds
-and accepting only one that belongs to this server) and the App server's IP (or
-a network in CIDR form). It then shows the settings, and after confirmation
-saves them as `deploy.conf` next to the script: `DB_MODE=empty`, database
-`perodua`, user `odoo`, the installed cluster's port, `DB_LISTEN_IP` and
-`APP_CIDR` (`/32` for a single address). Choosing a restore instead, or
-declining the summary, saves nothing. Later runs read the saved file and ask
-no setup questions; an explicit `--config` is never guided.
+terminal it asks where the App server runs:
+
+- **On another server:** it asks for this server's internal IP, offering the
+  addresses it finds (Docker network addresses are left out, and private
+  addresses are suggested first). It accepts only an address of this server,
+  and asks for confirmation before using a public internet address. It then
+  asks for the App server's IP, or a network in CIDR form. The App server's own
+  address must not be this server.
+- **On this server, in Docker:** PostgreSQL listens on Docker's bridge address
+  and accepts the Docker networks (`172.16.0.0/12`). No addresses are asked for.
+
+It then shows the settings, and after confirmation saves them as `deploy.conf`
+next to the script: `DB_MODE=empty`, database `perodua`, user `odoo`, the
+installed cluster's port, `DB_LISTEN_IP` and `APP_CIDR` (`/32` for a single
+address). Declining the summary starts the questions again. Whenever an answer
+cannot be used, the script says why and asks again. The database password is
+asked for in the same way: a password that is too short or not plain ASCII, or
+two different entries, is asked for again. Choosing a restore instead saves
+nothing. Later runs read the saved file and ask no setup questions; an explicit
+`--config` is never guided.
 
 To choose other values, write `deploy.conf` yourself:
 

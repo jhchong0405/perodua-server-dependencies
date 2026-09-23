@@ -23,13 +23,21 @@ checks static properties of `uat_admins.py` (ORM password writes, groups copied
 from `base.user_admin`, one commit after all checks).
 
 `test_deploy_db_guided.py` answers the guided setup of `deploy-db.sh` on a
-pseudo-terminal with `--check-config`, so nothing is deployed: the saved
-`deploy.conf` and its permissions, re-asking for an address that is not on this
-host or is not an IPv4 address, a CIDR for the App side, a later run that asks
-nothing, and no file written when a restore is chosen, the summary is declined,
-no terminal is available, `--config` is given or PostgreSQL is not installed.
-It needs one non-loopback IPv4 address on the host and is skipped without one
-(for example inside `docker run --network none`). `test_deploy_app.py` also
+pseudo-terminal with `--check-config`, so nothing is deployed. It checks:
+- the saved `deploy.conf` and its permissions, and that a later run asks nothing;
+- asking again after an unknown menu choice, an address that is not on this host,
+  an address that is not IPv4, or a declined summary;
+- a CIDR for the App side;
+- an App on this server in Docker, including going back to that question when
+  the App address is this server or the internal IP is a Docker address;
+- Docker not running;
+- no file written when a restore is chosen, no terminal is available,
+  `--config` is given or PostgreSQL is not installed.
+
+Docker is a stub that reports Docker's multi-line output. The public-address
+warning needs a public address on the host, so it was checked on a real server
+instead. The test needs one non-loopback IPv4 address on the host and is skipped
+without one (for example inside `docker run --network none`). `test_deploy_app.py` also
 checks that the first interactive `deploy-app.sh` run asks for the web port and
 saves it.
 
@@ -88,7 +96,9 @@ invalid archives and corrupt compressed payloads; failure before publication and
 backup; missing expected tables; configuration injection rejection; secret-file
 permissions; literal SQL/HBA keyword names and access isolation; nonlocal listener
 refusal; a real listener update and restart; configuration rollback on a conflicting
-`postgresql.auto.conf`; password absence in output logs; and real HTTPS Basic-auth downloads
+`postgresql.auto.conf`; password absence in output logs; interactive database
+password entry on a pseudo-terminal that asks again after a too-short password
+or two different entries and never echoes it; and real HTTPS Basic-auth downloads
 with correct and incorrect passwords supplied through a pseudo-terminal. The
 HTTPS test generates a temporary certificate trusted only inside its disposable
 container and serves the backup over loopback.
