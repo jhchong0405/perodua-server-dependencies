@@ -53,7 +53,8 @@ sudo bash deploy-app.sh
 ```
 
 Enter the DB server's IP, port `5432`, and the same database name, user and password.
-If asked, enter your GitHub username and GHCR token (`read:packages` + package access).
+If asked, enter the username and password issued for the image registry
+`perodua-deploy.novutal.com`.
 Passwords/tokens are hidden while typing.
 
 For a database with attachments, the first run stops at **`Filestore incomplete`**

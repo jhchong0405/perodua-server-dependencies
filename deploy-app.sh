@@ -7,8 +7,10 @@ umask 077
 
 RELEASE=client-stable-uiux-v1.0.0
 REVISION=ec7c22386204371975ad79931f57c8091c07935d
-ODOO_IMAGE=ghcr.io/jhchong0405/perodua-odoo:client-stable-uiux-v1.0.0@sha256:c16053940627c1c939a742327c2426b83355bf388a5fd2796894cb21770870da
-WEB_IMAGE=ghcr.io/jhchong0405/perodua-odoo:client-stable-uiux-web-v1.0.0@sha256:6f7f7bc3700c6506ab43a9505940538893d75ef4a396e0cc8077f37106dcbdff
+# Same content digests as the GHCR release; the private registry now serves them.
+ODOO_IMAGE=perodua-deploy.novutal.com/perodua-odoo:client-stable-uiux-v1.0.0@sha256:c16053940627c1c939a742327c2426b83355bf388a5fd2796894cb21770870da
+WEB_IMAGE=perodua-deploy.novutal.com/perodua-odoo:client-stable-uiux-web-v1.0.0@sha256:6f7f7bc3700c6506ab43a9505940538893d75ef4a396e0cc8077f37106dcbdff
+REGISTRY=${ODOO_IMAGE%%/*}
 INIT_MODULES=perodua_client_stable,perodua_demo_client,perodua_gateway,perodua_forecast_workbook,perodua_supplier_execution,perodua_uiux_api
 DEPLOY_DIR=/opt/perodua-app
 CONFIG='' NON_INTERACTIVE=0 INIT_DB=0 TEMP_DIR='' AUTH_DIR='' STARTED=0
@@ -161,18 +163,18 @@ pull_image() {
     while ! docker pull "$image" > "$TEMP_DIR/pull.log" 2>&1; do
         if ! auth_error "$TEMP_DIR/pull.log"; then
             if grep -Eiq 'manifest unknown|not found|manifest invalid' "$TEMP_DIR/pull.log"; then
-                fail 'The pinned image was not found in GHCR. Check the release with the publisher'
+                fail "The pinned image was not found in the registry $REGISTRY. Check the release with the publisher"
             fi
-            fail 'GHCR pull failed due to network, registry, or Docker error. Check connectivity and available disk space'
+            fail "Pull from the registry $REGISTRY failed due to network, registry, or Docker error. Check connectivity and available disk space"
         fi
-        ((NON_INTERACTIVE == 0)) || fail 'GHCR authentication is required. Login with docker login ghcr.io first, then retry'
-        ((attempts < 3)) || fail 'GHCR authentication failed after three attempts'
-        [[ -t 0 ]] || fail 'GHCR authentication requires a terminal'
-        printf 'GHCR requires authentication. Token needs read:packages and access to this package.\n'
-        read -r -p 'GitHub username (blank cancels): ' username || fail 'Login cancelled'
+        ((NON_INTERACTIVE == 0)) || fail "Registry authentication is required. Login with docker login $REGISTRY first, then retry"
+        ((attempts < 3)) || fail 'Registry authentication failed after three attempts'
+        [[ -t 0 ]] || fail 'Registry authentication requires a terminal'
+        printf 'The registry %s requires authentication. Use the deployment account issued for it.\n' "$REGISTRY"
+        read -r -p 'Registry username (blank cancels): ' username || fail 'Login cancelled'
         [[ -n $username ]] || fail 'Login cancelled'
-        [[ $username =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}$ ]] || fail 'Invalid GitHub username'
-        read -r -s -p 'GHCR token (hidden; blank cancels): ' token || fail 'Login cancelled'
+        [[ $username =~ ^[A-Za-z0-9][A-Za-z0-9._@-]{0,127}$ ]] || fail 'Invalid registry username'
+        read -r -s -p 'Registry password (hidden; blank cancels): ' token || fail 'Login cancelled'
         printf '\n'
         [[ -n $token ]] || fail 'Login cancelled'
         if [[ -z $AUTH_DIR ]]; then
@@ -186,8 +188,8 @@ pull_image() {
             printf '{}\n' > "$AUTH_DIR/config.json"
         fi
         attempts=$((attempts + 1))
-        if ! printf '%s' "$token" | docker login ghcr.io --username "$username" --password-stdin > "$TEMP_DIR/login.log" 2>&1; then
-            printf 'Login failed. Check the token, username and GHCR connection.\n' >&2
+        if ! printf '%s' "$token" | docker login "$REGISTRY" --username "$username" --password-stdin > "$TEMP_DIR/login.log" 2>&1; then
+            printf 'Login failed. Check the username, password and the connection to %s.\n' "$REGISTRY" >&2
         fi
         unset token
     done

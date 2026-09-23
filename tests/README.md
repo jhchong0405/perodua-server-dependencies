@@ -8,7 +8,7 @@ python3 -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
 The App cases cover argument/configuration validation, literal value handling,
-hidden GHCR prompts, credential cleanup and registry error handling.
+hidden registry prompts, credential cleanup and registry error handling.
 See [the two-server acceptance record](TWO-SERVER-2026-09-18.md) for the real
 Ubuntu VM deployment, attachment persistence and separate reboot checks.
 

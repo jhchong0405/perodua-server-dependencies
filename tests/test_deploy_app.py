@@ -1,7 +1,7 @@
 """Deployment command safety checks. Docker is always replaced by a local fake.
 
 Run on Linux/WSL: python3 -m unittest discover -s tests -v
-These are process-level failure/interactive tests, not a GHCR or Odoo acceptance test.
+These are process-level failure/interactive tests, not a registry or Odoo acceptance test.
 """
 
 import json
@@ -260,8 +260,9 @@ sys.exit(93)
         self.env["FAKE_DOCKER_MODE"] = "auth"
         result = self.run_script("--non-interactive")
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("GHCR authentication", result.stdout)
-        self.assertNotIn("GitHub username", result.stdout)
+        self.assertIn("Registry authentication", result.stdout)
+        self.assertIn("docker login perodua-deploy.novutal.com", result.stdout)
+        self.assertNotIn("Registry username", result.stdout)
         self.assertFalse(any(call['args'][0] == 'login' for call in self.docker_calls()))
         self.assert_original_auth_unchanged()
 
@@ -277,10 +278,10 @@ sys.exit(93)
     def test_hidden_token_retries_and_uses_temporary_docker_auth(self):
         self.env["FAKE_DOCKER_MODE"] = "auth"
         prompts = [
-            (b"GitHub username", b"fixture-user", True),
-            (b"GHCR token", b"fixture-invalid-token", False),
-            (b"GitHub username", b"fixture-user", True),
-            (b"GHCR token", b"fixture-valid-token", False),
+            (b"Registry username", b"fixture-user", True),
+            (b"Registry password", b"fixture-invalid-token", False),
+            (b"Registry username", b"fixture-user", True),
+            (b"Registry password", b"fixture-valid-token", False),
         ]
         code, output = self.terminal_exchange(prompts)
         self.assertNotEqual(code, 0, "Fake Docker must stop before database operations")
@@ -292,6 +293,7 @@ sys.exit(93)
         self.assertEqual(len(logins), 2)
         for login in logins:
             self.assertIn("--password-stdin", login['args'])
+            self.assertEqual(login['args'][1], "perodua-deploy.novutal.com")
             self.assertNotEqual(login['config'], str(self.auth))
             self.assertFalse(Path(login['config']).exists(), "Temporary credentials survived exit")
             self.assertNotIn("fixture-valid-token", " ".join(login['args']))
@@ -303,8 +305,8 @@ sys.exit(93)
     def test_blank_hidden_token_cancels_without_login(self):
         self.env["FAKE_DOCKER_MODE"] = "auth"
         code, output = self.terminal_exchange([
-            (b"GitHub username", b"fixture-user", True),
-            (b"GHCR token", b"", False),
+            (b"Registry username", b"fixture-user", True),
+            (b"Registry password", b"", False),
         ])
         self.assertNotEqual(code, 0)
         self.assertIn("Login cancelled", output)
