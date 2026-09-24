@@ -5,12 +5,12 @@ set -Eeuo pipefail
 export LC_ALL=C
 umask 077
 
-RELEASE=client-stable-uiux-v1.0.1
-REVISION=db5ad78a68d778d6b1d7ef9c94df0995885a3eff
+RELEASE=client-stable-uiux-v1.0.2
+REVISION=73db01814638169aa73bbf9aea5160c48ca3750a
 # Published to the private registry only (not GHCR). The Odoo image loads no
 # sample data; both images name REVISION.
-ODOO_IMAGE=perodua-deploy.novutal.com/perodua-odoo:client-stable-uiux-v1.0.1@sha256:8a55a0688ef42b9c67f088e74e0f815498e9371a554994b35729140925bb83d4
-WEB_IMAGE=perodua-deploy.novutal.com/perodua-odoo:client-stable-uiux-web-v1.0.1@sha256:37add4d764891a0c5bbca99c0000bbca28db35b5184e35b6f115993f66d812a0
+ODOO_IMAGE=perodua-deploy.novutal.com/perodua-odoo:client-stable-uiux-v1.0.2@sha256:a80014632a3263a752a4571ceed900986c0cb811dfd8fe15357d674f1d420fb8
+WEB_IMAGE=perodua-deploy.novutal.com/perodua-odoo:client-stable-uiux-web-v1.0.2@sha256:b64a6514f822d2bc53b6bed101bafa3212cc9e2b679c51afd84e8121f7bed6f8
 REGISTRY=${ODOO_IMAGE%%/*}
 # --init-db: a fresh UAT database, the release graph without the client
 # demonstration dataset. Before anything is written, uat_guard.py checks the
@@ -31,7 +31,7 @@ STARTUP_TIMEOUT=600 INIT_TIMEOUT=3600
 usage() {
     cat <<'HELP'
 Usage: bash deploy-app.sh [--config PATH] [--dir PATH] [--non-interactive] [--init-db]
-Deploy the pinned Client Stable UIUX v1.0.1 Odoo + Web images using Docker Compose.
+Deploy the pinned Client Stable UIUX v1.0.2 Odoo + Web images using Docker Compose.
 Requires a reachable external PostgreSQL 16 server; does not install or configure it.
 Default: use an already initialized, matching Client Stable UIUX database.
 --init-db initializes a NEW or EMPTY database as a fresh UAT system without

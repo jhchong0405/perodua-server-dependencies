@@ -344,18 +344,26 @@ them.
 The accounts are set up only during this first initialization. Later runs of
 `deploy-app.sh` never reset their passwords.
 
-**No business data.** From v1.0.1 the release image loads no sample data. A
+**No business data.** From v1.0.1 the release image loads no sample data, and
+from v1.0.2 it also leaves out the reference lists users maintain themselves. A
 fresh UAT system has no parts, customers, suppliers, agents, price lists,
-campaigns, routes, calendars, forecasts, IDDIs, orders or invoices, and the EBS
-and PROMISE registers (Master Integration, Customer Rank, Supplier
-Classification, freight agents) are empty. What is set up:
+campaigns, routes, calendars, forecasts, IDDIs, orders or invoices; the EBS and
+PROMISE registers (Master Integration, Customer Rank, Supplier Classification,
+freight agents) are empty; and so are Holiday Types, Order Cycles, Payment
+Method and Retail Price List, which administrators fill in on those pages.
+Currencies lists only MYR: USD is archived and can be switched on there. What
+is set up:
 
 - the company: Perodua Parts Sdn Bhd, Malaysia, MYR on the Malaysian chart of
   accounts, with the AR/AP journal rules;
 - the HQ Distribution warehouse (`HQDC`);
-- the reference lists the modules ship: order types, order cycles, customer
-  types, holiday types, weekdays and material characteristics, and Odoo's own
-  currencies (MYR and USD active), payment terms and units of measure;
+- the seven Perodua order types (Normal, Part-to-Part, Campaign,
+  Special-Monthly, Stockist Order, Export Order, IHC / Engineering Order):
+  sale orders take their processing method and channel from them;
+- the two customer types, Service Centres (`CAT-SERVICE`) and Body & Paint
+  (`CAT-BP`): campaigns target customers by these codes;
+- the weekday and material characteristic lists, which no screen edits, and
+  Odoo's units of measure;
 - the logins above.
 
 The client demonstration dataset (`perodua_demo_client`) and Odoo's demo data
@@ -374,8 +382,8 @@ again under Settings > Technical > Scheduled Actions once real systems are
 connected. Demo Control's Reset & Reseed is refused on such a database, because
 it would load the sample data.
 
-A database initialized with v1.0.0 cannot be used with v1.0.1: its module
-fingerprint differs and the App refuses it. Uninstall both servers (or recreate
+A database initialized with an earlier release (v1.0.0 or v1.0.1) cannot be
+used with v1.0.2: its module fingerprint differs and the App refuses it. Uninstall both servers (or recreate
 the empty database on the DB server) and initialize again.
 
 If the initialization stops after the modules are installed, for example on a
