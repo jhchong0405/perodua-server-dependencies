@@ -43,8 +43,10 @@ saves it.
 `test_uninstall_app.py` runs `uninstall.sh --role app` against a fake Docker CLI.
 The fake keeps containers, volumes and networks in a file, including those of
 another Compose project, answers only the commands and filters the script uses,
-and fails on anything else. The tests check the exact Docker calls and what is
-left:
+and fails on anything else. It also records, for each call, whether the
+deployment lock (`.deploy.lock`) was held. A fake `rm` records the same, and
+what is left in the directory when the lock file is removed. The tests check
+the exact Docker calls and what is left:
 - the default removes the containers, network and directory and the containers'
   anonymous volumes, and keeps the attachments volume, the images and the other
   project's resources;
@@ -59,7 +61,20 @@ left:
   left no volume is looked up;
 - nothing changes if the volumes cannot be read before the plan, after a wrong
   confirmation, with no terminal and no `--confirm`, or in a directory
-  `deploy-app.sh` did not create.
+  `deploy-app.sh` did not create, where no lock file is created either;
+- while another process holds the lock the way `deploy-app.sh` does, the
+  uninstall stops before any Docker call, with or without `--purge`, and the
+  directory stays;
+- if the lock file is deleted, or deleted and created again, between the
+  script's open and its lock (another uninstall finished, then a deployment
+  started), the lock on the old file does not count: the uninstall stops before
+  any Docker call;
+- `deploy-app.sh` started while the uninstall waits for the project name on a
+  pseudo-terminal stops with "Another deployment is running in this directory"
+  and changes nothing, and the uninstall then finishes;
+- after every run, each changing Docker call and each removal found the lock
+  held, including the image removals of `--purge`, and the lock file was removed
+  last, when nothing else was left in the directory.
 
 It needs root on Ubuntu 24.04, so run it in the test image. The fake follows
 what a real engine did on 2026-09-24 (Docker 29, Compose v5): after

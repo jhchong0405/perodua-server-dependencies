@@ -398,6 +398,14 @@ removes the containers, and deletes them by name afterwards. If Docker cannot
 delete one, for example because another container still uses it, the script
 prints its name and Docker's error, and finishes the uninstall.
 
+`deploy-app.sh` holds a lock on `.deploy.lock` in the directory while it runs.
+The uninstall takes the same lock before it lists anything and keeps it until it
+exits. If a deployment is running, it stops with "A deployment is running in
+this directory. Nothing was changed." A deployment started during the
+uninstall, including while it waits for the project name, stops with "Another
+deployment is running in this directory". The lock file is deleted last, when
+nothing else is left in the directory.
+
 **DB Server** (`sudo bash uninstall.sh --role db [--config FILE | --database NAME] [--purge]`)
 takes the database from `deploy.conf` next to the script, `--config`,
 `--database`, or the only deployment recorded on the server. It removes a
