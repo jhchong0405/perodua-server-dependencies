@@ -9,8 +9,9 @@ Allow **App → DB port 5432** and **browser → App port 8110**.
 
 The steps below create a **fresh UAT system** with an empty database.
 To restore an existing database instead, see [From a backup](#from-a-backup).
-A database set up with an earlier version (v1.0.0 to v1.0.2) cannot be reused:
-run [Uninstall](#uninstall) on both servers first.
+A system set up with an earlier version (v1.0.0 to v1.0.2) cannot keep its data:
+download this version on the App server and run a [reset](#stop-start-and-reset)
+there. The DB server needs no step.
 
 ## Repository layout
 
@@ -132,17 +133,24 @@ This setup serves HTTP only; add HTTPS before production.
 
 ## Stop, start and reset
 
-In the `scripts` folder on the App server:
+`service.sh` stops and starts the services without deleting anything. To stop
+everything, stop the App first, on the App server:
 
 ```bash
 sudo bash service.sh --role app stop
 ```
 
-`start`, `restart` and `status` work the same way. On the DB server, use
-`--role db` for PostgreSQL 16. Stop the App before the database, and start the
-database before the App. Nothing is deleted. `start` checks the database first
-and refuses if it is not reachable or not set up. A stopped App stays stopped
-after a reboot until you start it; PostgreSQL starts again with the server.
+Then, on the DB server:
+
+```bash
+sudo bash service.sh --role db stop
+```
+
+To start again, run `start`: the database first, then the App. `restart` and
+`status` work the same way. To stop only the App, leave the database running.
+`start` checks the database first and refuses if it is not reachable or not set
+up. A stopped App stays stopped after a reboot until you start it; PostgreSQL
+starts again with the server.
 
 To go back to a fresh UAT system, run this on the App server only:
 
@@ -156,10 +164,14 @@ App, deletes all data in the database and all attachments, and runs
 the registry account like the first deployment. The database, its login and
 password, the web port and the other settings stay. `whadmin`, `admin1` and
 `admin2` get the password `perodua` again. The reset installs the release of
-the `scripts` folder you run it from. If it stops part-way, solve the problem
-it shows and run it again.
+the `scripts` folder you run it from, so it also moves a system set up with an
+earlier version to this one. If it stops part-way, solve the problem it shows
+and run it again.
 
 ## Uninstall
+
+Uninstall removes the setup from the servers. To start over with an empty
+system, a [reset](#stop-start-and-reset) is enough.
 
 Uninstall the App first; the DB server refuses while the App is still connected.
 
