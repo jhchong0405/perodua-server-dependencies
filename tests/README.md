@@ -81,6 +81,24 @@ what a real engine did on 2026-09-24 (Docker 29, Compose v5): after
 `up --force-recreate`, Compose passes the old anonymous volume to the new
 container by name, and neither `compose rm -v` nor `down --volumes` deletes it.
 
+`test_service_app.py` runs `service.sh --role app` against a smaller fake
+Docker CLI of the same kind, with a fake `deploy-app.sh` next to a copy of the
+script. It checks:
+- `stop`, `start` and `restart` make only their Compose calls, each with the
+  deployment lock held, and `status` works while another process holds it;
+- `start` and `restart` run the database check first and change nothing when
+  it reports `EMPTY` or `SETUP_PENDING`, or fails;
+- while `deploy-app.sh` runs, every action except `status` stops before any
+  Docker call;
+- `reset` lists the anonymous volumes, stops the App, sends `reset_database.py`
+  to the Odoo container on standard input, removes the containers and volumes,
+  deletes the anonymous volumes by name, binds the directory to the release next
+  to it and runs `deploy-app.sh --dir DIR --init-db` last, with the lock free;
+- nothing changes after a wrong confirmation, without a terminal and without
+  `--confirm`, or without `app.env`;
+- a failed wipe stops before the containers and the attachments volume go, and
+  says whether anything was deleted (exit 3 of `reset_database.py`: nothing).
+
 `test_uat_guard.py` runs `uat_guard.py` against temporary addon trees shaped
 like the pinned image (literal manifests, code shipped as bare `.pyc`): direct,
 transitive and `auto_install` dependencies on `perodua_demo_client`, XML IDs,
@@ -170,6 +188,21 @@ keeps its previous check, which requires the dataset module.
 - keeping a role and a listen address that another deployment uses, and deleting
   a guided `deploy.conf`;
 - refusing a database the script did not create, or one replaced since.
+
+`service.sh` coverage, on real PostgreSQL:
+- `check_reset_database.py` fills an empty-mode database as the App role the way
+  Odoo does (900 tables with `create_uid`/`write_uid` foreign keys to
+  `res_users`, tables that inherit another, an `api` schema with views, a free
+  sequence, a function). As a control, dropping it in one transaction fails with
+  "out of shared memory". `reset_database.py` exits 3 on a wrong password and
+  changes nothing; with the right one it empties the database, `public` is as in
+  a new database (owner `pg_database_owner`, `USAGE` for everyone, the standard
+  comment), the database, its owner and who may connect are unchanged, the role
+  can create tables again, a second run passes, and the generated `preflight.py`
+  reports `EMPTY`;
+- `--role db`: `status` shows the cluster online; `stop` closes an open
+  connection and says so, the cluster is down and a second `stop` says it
+  already is; `start` and `restart` bring it back with the same databases.
 
 The last check, `check-uninstall-purge.py`, runs `--purge` on a pseudo-terminal:
 a wrong answer changes nothing, and `PURGE` removes the PostgreSQL 16 packages,

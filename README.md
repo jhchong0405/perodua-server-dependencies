@@ -9,14 +9,15 @@ Allow **App → DB port 5432** and **browser → App port 8110**.
 
 The steps below create a **fresh UAT system** with an empty database.
 To restore an existing database instead, see [From a backup](#from-a-backup).
-A database set up with an earlier version (v1.0.0 to v1.0.2) cannot be reused:
-run [Uninstall](#uninstall) on both servers first.
+A system set up with an earlier version (v1.0.0 to v1.0.2) cannot keep its data:
+download this version on the App server and run a [reset](#stop-start-and-reset)
+there. The DB server needs no step.
 
 ## Repository layout
 
 | Path | Contents |
 | --- | --- |
-| `scripts/` | `install-dependencies.sh`, `deploy-db.sh`, `deploy-app.sh`, `uninstall.sh`, the two helpers `deploy-app.sh` uses (`uat_guard.py`, `uat_admins.py`) and the configuration templates. Your `deploy.conf`, backups and filestore archive also go here. |
+| `scripts/` | `install-dependencies.sh`, `deploy-db.sh`, `deploy-app.sh`, `service.sh`, `uninstall.sh`, the helpers they use (`uat_guard.py`, `uat_admins.py`, `reset_database.py`) and the configuration templates. Your `deploy.conf`, backups and filestore archive also go here. |
 | `docs/` | [DEPLOYMENT.md](docs/DEPLOYMENT.md) (full reference) and [RUNBOOK.md](docs/RUNBOOK.md) (self-check after deployment) |
 | `tests/` | Automated checks, see [tests/README.md](tests/README.md) |
 
@@ -127,9 +128,50 @@ Sign in with the web login from the backup.
 ## Operations
 
 Back up the database on the DB server and the filestore volume on the App server.
-Services start again after a reboot. This setup serves HTTP only; add HTTPS before production.
+Services start again after a reboot, except an App you stopped with `service.sh`.
+This setup serves HTTP only; add HTTPS before production.
+
+## Stop, start and reset
+
+`service.sh` stops and starts the services without deleting anything. To stop
+everything, stop the App first, on the App server:
+
+```bash
+sudo bash service.sh --role app stop
+```
+
+Then, on the DB server:
+
+```bash
+sudo bash service.sh --role db stop
+```
+
+To start again, run `start`: the database first, then the App. `restart` and
+`status` work the same way. To stop only the App, leave the database running.
+`start` checks the database first and refuses if it is not reachable or not set
+up. A stopped App stays stopped after a reboot until you start it; PostgreSQL
+starts again with the server.
+
+To go back to a fresh UAT system, run this on the App server only:
+
+```bash
+sudo bash service.sh --role app reset
+```
+
+It shows its plan and asks you to type the database name. Then it stops the
+App, deletes all data in the database and all attachments, and runs
+`deploy-app.sh --init-db` again, which takes several minutes and may ask for
+the registry account like the first deployment. The database, its login and
+password, the web port and the other settings stay. `whadmin`, `admin1` and
+`admin2` get the password `perodua` again. The reset installs the release of
+the `scripts` folder you run it from, so it also moves a system set up with an
+earlier version to this one. If it stops part-way, solve the problem it shows
+and run it again.
 
 ## Uninstall
+
+Uninstall removes the setup from the servers. To start over with an empty
+system, a [reset](#stop-start-and-reset) is enough.
 
 Uninstall the App first; the DB server refuses while the App is still connected.
 
