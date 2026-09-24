@@ -1,6 +1,6 @@
 # Two-server setup
 
-Client Stable UIUX v1.0.0 on two Ubuntu 24.04 amd64 servers with sudo and internet access:
+Client Stable UIUX v1.0.3 on two Ubuntu 24.04 amd64 servers with sudo and internet access:
 
 - **DB server**: PostgreSQL 16.
 - **App server**: Odoo and web containers, pulled from `perodua-deploy.novutal.com`.
@@ -9,6 +9,8 @@ Allow **App → DB port 5432** and **browser → App port 8110**.
 
 The steps below create a **fresh UAT system** with an empty database.
 To restore an existing database instead, see [From a backup](#from-a-backup).
+A database set up with an earlier version (v1.0.0 to v1.0.2) cannot be reused:
+run [Uninstall](#uninstall) on both servers first.
 
 ## Repository layout
 
@@ -79,8 +81,13 @@ Open `http://APP_SERVER_IP:8110/app/` (or the web port you chose).
 | `planner`, `whouse`, `sop`, `op`, `finance` | `perodua` | Business role |
 
 These accounts are for UAT only. Do not use this setup for production or expose it
-to the internet. The database includes the release's sample records (products,
-partners, orders); the client dataset and Odoo demo data are not installed.
+to the internet. The database starts without business data: no parts, customers,
+suppliers, orders or EBS/PROMISE register rows, and no order types, customer
+types, holiday types, order cycles, payment terms or price lists; MYR is the
+only currency. Only the company (Perodua Parts Sdn Bhd) and the HQ warehouse are
+set up. Administrators add the lists with **+ New**; see
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#initialize-a-fresh-uat-system-on-the-app-server)
+for the two codes campaigns need and how order types behave.
 
 ```bash
 sudo docker compose -p perodua-client-uiux -f /opt/perodua-app/compose.yml ps

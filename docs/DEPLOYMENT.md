@@ -322,33 +322,75 @@ used on a production system or one reachable from the public internet:
 
 | Login | Password | Account |
 | --- | --- | --- |
-| `whadmin` | `perodua` | Sumathi (Admin), seeded by the release |
-| `admin1` | `perodua` | Haziq (Admin 1), seeded by the release |
-| `admin2` | `perodua` | Nurul (Admin 2), seeded by the release |
+| `whadmin` | `perodua` | Sumathi (Admin), created by the release |
+| `admin1` | `perodua` | Haziq (Admin 1), created by the release |
+| `admin2` | `perodua` | Nurul (Admin 2), created by the release |
 
 The release's `perodua_demo_ui` module already creates these three logins. The
-initialization keeps them, with their names, IDs and the seeded records that
-refer to them, and gives each exactly the groups and companies of Odoo's native
-Administrator (`base.user_admin`), to which every module grants its
-administrator rights. It then archives the native Administrator, which the seed
-data renamed to `admin@demo.perodua.my` and which still had Odoo's default
-password, so these three are the only active administrator logins. Odoo itself
-recommends archiving that user rather than deleting it. The technical superuser
-is not changed. If a later release stops seeding one of the three logins, it is
-created as a copy of the native Administrator instead.
+initialization keeps them, with their names and IDs, and gives each exactly the
+groups and companies of Odoo's native Administrator (`base.user_admin`), to
+which every module grants its administrator rights. It then archives the native
+Administrator (login `admin`, still with Odoo's default password), so these
+three are the only active administrator logins. Odoo itself recommends archiving
+that user rather than deleting it. The technical superuser is not changed. If a
+later release stops creating one of the three logins, it is created as a copy of
+the native Administrator instead.
 
-The same seed data also creates five role users that are not administrators:
-`planner`, `whouse`, `sop`, `op` and `finance`. They also sign in with
-`perodua`. The initialization does not change them.
+The same module also creates five role users that are not administrators:
+`planner`, `whouse`, `sop`, `op` and `finance`, and one supplier portal login,
+`supplier`. They also sign in with `perodua`. The initialization does not change
+them.
 
 The accounts are set up only during this first initialization. Later runs of
 `deploy-app.sh` never reset their passwords.
 
-Note that `perodua_client_stable` depends on `perodua_demo_profile`, which
-depends on `perodua_demo_ui` and, through it, `perodua_demo`. Those modules are
-part of the release's module graph, so their own seed records are present in a
-fresh UAT system. Only the client demonstration dataset (`perodua_demo_client`)
-and Odoo's demo data are left out.
+**No business data.** From v1.0.1 the release image loads no sample data, and
+from v1.0.2 it also leaves out the reference lists users maintain themselves. A
+fresh UAT system has no parts, customers, suppliers, agents, price lists,
+campaigns, routes, calendars, forecasts, IDDIs, orders or invoices; the EBS and
+PROMISE registers (Master Integration, Customer Rank, Supplier Classification,
+freight agents) are empty; and so are Holiday Types, Order Cycles, Order Types,
+Customer Type, Payment Method and Retail Price List, which administrators fill
+in on those pages with **+ New**. Currencies lists only MYR: from v1.0.3 the
+other currencies Odoo ships are removed, so any currency can be added there with
+**+ New** (enter its ISO code, symbol and rounding). What is set up:
+
+- the company: Perodua Parts Sdn Bhd, Malaysia, MYR on the Malaysian chart of
+  accounts, with the AR/AP journal rules;
+- the HQ Distribution warehouse (`HQDC`), which the workbench cannot create;
+- the weekday and material characteristic lists, which no screen edits, and
+  Odoo's units of measure;
+- the logins above.
+
+Two things to know when filling in the lists:
+
+- Sale orders take their processing method (Part-to-Part, Campaign,
+  Special-Monthly) and channel (Stockist, Export) from the order types the
+  release used to ship. Order types created in the workbench are not
+  recognized: their orders count as Normal, with no channel.
+- Campaigns target customers by customer type code. Give the service-centre
+  type the code `CAT-SERVICE` and the body-and-paint type `CAT-BP`.
+
+The client demonstration dataset (`perodua_demo_client`) and Odoo's demo data
+are left out as before.
+
+The EBS and PROMISE registers are read-only in the application: their rows come
+only from those systems. Until real feeds are connected they stay empty, and
+screens that pick from them (for example an EBS supplier to activate, or an OEM
+material) have nothing to offer.
+
+The integrations run in mock mode (`perodua_integration.mode`). The mock
+PROMISE, PSS and PSOS feeds start empty, and the two scheduled pulls that turn
+the mock PROMISE part feed and the mock PSS order feed into records are switched
+off: *PROMISE: consume Part Master feed* and the PSS order pull. Switch them on
+again under Settings > Technical > Scheduled Actions once real systems are
+connected. Demo Control's Reset & Reseed is refused on such a database, because
+it would load the sample data.
+
+A database initialized with an earlier release (v1.0.0 to v1.0.2) cannot be
+used with v1.0.3: its module fingerprint differs and the App refuses it.
+Uninstall both servers (or recreate the empty database on the DB server) and
+initialize again.
 
 If the initialization stops after the modules are installed, for example on a
 timeout, Ctrl-C, a lost SSH session or a failed sign-in check, the preflight

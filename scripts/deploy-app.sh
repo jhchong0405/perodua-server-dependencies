@@ -5,11 +5,12 @@ set -Eeuo pipefail
 export LC_ALL=C
 umask 077
 
-RELEASE=client-stable-uiux-v1.0.0
-REVISION=ec7c22386204371975ad79931f57c8091c07935d
-# Same content digests as the GHCR release; the private registry now serves them.
-ODOO_IMAGE=perodua-deploy.novutal.com/perodua-odoo:client-stable-uiux-v1.0.0@sha256:c16053940627c1c939a742327c2426b83355bf388a5fd2796894cb21770870da
-WEB_IMAGE=perodua-deploy.novutal.com/perodua-odoo:client-stable-uiux-web-v1.0.0@sha256:6f7f7bc3700c6506ab43a9505940538893d75ef4a396e0cc8077f37106dcbdff
+RELEASE=client-stable-uiux-v1.0.3
+REVISION=86411fb2f695dc36fa5022271dda6e54bf448e34
+# Published to the private registry only (not GHCR). The Odoo image loads no
+# sample data; both images name REVISION.
+ODOO_IMAGE=perodua-deploy.novutal.com/perodua-odoo:client-stable-uiux-v1.0.3@sha256:45e80bc5a9020aedee15a40dfc5e3c635beb06174664038672556ccfc4430026
+WEB_IMAGE=perodua-deploy.novutal.com/perodua-odoo:client-stable-uiux-web-v1.0.3@sha256:347692f5ea149eefb20677f49cf36ff63ace7f0b6e639b29cb17c3547531b1be
 REGISTRY=${ODOO_IMAGE%%/*}
 # --init-db: a fresh UAT database, the release graph without the client
 # demonstration dataset. Before anything is written, uat_guard.py checks the
@@ -30,13 +31,14 @@ STARTUP_TIMEOUT=600 INIT_TIMEOUT=3600
 usage() {
     cat <<'HELP'
 Usage: bash deploy-app.sh [--config PATH] [--dir PATH] [--non-interactive] [--init-db]
-Deploy the pinned Client Stable UIUX v1.0.0 Odoo + Web images using Docker Compose.
+Deploy the pinned Client Stable UIUX v1.0.3 Odoo + Web images using Docker Compose.
 Requires a reachable external PostgreSQL 16 server; does not install or configure it.
 Default: use an already initialized, matching Client Stable UIUX database.
---init-db initializes a NEW or EMPTY database as a fresh UAT system: the release
-modules without the client demonstration dataset (perodua_demo_client), without
-Odoo demo data, and with UAT-only administrators whadmin, admin1 and admin2, all
-with the fixed password "perodua". Prepare the empty database on the DB server
+--init-db initializes a NEW or EMPTY database as a fresh UAT system without
+business data: the release modules (the image loads no sample data), without the
+client demonstration dataset (perodua_demo_client), without Odoo demo data, and
+with UAT-only administrators whadmin, admin1 and admin2, all with the fixed
+password "perodua". Prepare the empty database on the DB server
 with deploy-db.sh DB_MODE=empty. It never reinitializes or upgrades an
 initialized database.
 --dir defaults to /opt/perodua-app; existing configuration is reused there.
