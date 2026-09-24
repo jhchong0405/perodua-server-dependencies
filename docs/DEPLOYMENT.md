@@ -349,23 +349,27 @@ from v1.0.2 it also leaves out the reference lists users maintain themselves. A
 fresh UAT system has no parts, customers, suppliers, agents, price lists,
 campaigns, routes, calendars, forecasts, IDDIs, orders or invoices; the EBS and
 PROMISE registers (Master Integration, Customer Rank, Supplier Classification,
-freight agents) are empty; and so are Holiday Types, Order Cycles, Payment
-Method and Retail Price List, which administrators fill in on those pages.
-Currencies lists only MYR: USD is archived. The workbench lists only active
-currencies and a second USD cannot be created, so switching USD back on is a
-step on the server, not in the workbench. What is set up:
+freight agents) are empty; and so are Holiday Types, Order Cycles, Order Types,
+Customer Type, Payment Method and Retail Price List, which administrators fill
+in on those pages with **+ New**. Currencies lists only MYR: from v1.0.3 the
+other currencies Odoo ships are removed, so any currency can be added there with
+**+ New** (enter its ISO code, symbol and rounding). What is set up:
 
 - the company: Perodua Parts Sdn Bhd, Malaysia, MYR on the Malaysian chart of
   accounts, with the AR/AP journal rules;
-- the HQ Distribution warehouse (`HQDC`);
-- the seven Perodua order types (Normal, Part-to-Part, Campaign,
-  Special-Monthly, Stockist Order, Export Order, IHC / Engineering Order):
-  sale orders take their processing method and channel from them;
-- the two customer types, Service Centres (`CAT-SERVICE`) and Body & Paint
-  (`CAT-BP`): campaigns target customers by these codes;
+- the HQ Distribution warehouse (`HQDC`), which the workbench cannot create;
 - the weekday and material characteristic lists, which no screen edits, and
   Odoo's units of measure;
 - the logins above.
+
+Two things to know when filling in the lists:
+
+- Sale orders take their processing method (Part-to-Part, Campaign,
+  Special-Monthly) and channel (Stockist, Export) from the order types the
+  release used to ship. Order types created in the workbench are not
+  recognized: their orders count as Normal, with no channel.
+- Campaigns target customers by customer type code. Give the service-centre
+  type the code `CAT-SERVICE` and the body-and-paint type `CAT-BP`.
 
 The client demonstration dataset (`perodua_demo_client`) and Odoo's demo data
 are left out as before.
@@ -383,9 +387,10 @@ again under Settings > Technical > Scheduled Actions once real systems are
 connected. Demo Control's Reset & Reseed is refused on such a database, because
 it would load the sample data.
 
-A database initialized with an earlier release (v1.0.0 or v1.0.1) cannot be
-used with v1.0.2: its module fingerprint differs and the App refuses it. Uninstall both servers (or recreate
-the empty database on the DB server) and initialize again.
+A database initialized with an earlier release (v1.0.0 to v1.0.2) cannot be
+used with v1.0.3: its module fingerprint differs and the App refuses it.
+Uninstall both servers (or recreate the empty database on the DB server) and
+initialize again.
 
 If the initialization stops after the modules are installed, for example on a
 timeout, Ctrl-C, a lost SSH session or a failed sign-in check, the preflight
