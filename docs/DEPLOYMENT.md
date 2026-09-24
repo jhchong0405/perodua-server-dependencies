@@ -388,9 +388,10 @@ connected. Demo Control's Reset & Reseed is refused on such a database, because
 it would load the sample data.
 
 A database initialized with an earlier release (v1.0.0 to v1.0.2) cannot be
-used with v1.0.3: its module fingerprint differs and the App refuses it.
-Uninstall both servers (or recreate the empty database on the DB server) and
-initialize again.
+used with v1.0.3: its module fingerprint differs and the App refuses it. Run
+`sudo bash service.sh --role app reset` from the v1.0.3 `scripts` folder on the
+App Server (see [Stop, start and reset](#stop-start-and-reset-servicesh)), or
+uninstall both servers and initialize again.
 
 If the initialization stops after the modules are installed, for example on a
 timeout, Ctrl-C, a lost SSH session or a failed sign-in check, the preflight
@@ -402,7 +403,9 @@ or without `--init-db`.
 
 If the module installation itself failed part-way, the App refuses the database
 instead, because a partial installation cannot be finished safely. Start again
-from an empty database:
+from an empty database: on the App Server, run
+`sudo bash service.sh --role app reset`, which empties the database and
+initializes it again. Or, on both servers:
 
 1. On the DB Server, drop the unfinished database, for example
    `sudo -u postgres dropdb perodua` (use your `DB_NAME`). Only do this for a
@@ -414,6 +417,67 @@ from an empty database:
 A missing database is created by the App only if `DB_USER` has `CREATEDB`. With
 the least-privileged role from `deploy-db.sh`, the App stops and asks for the
 database to be created on the DB server with `DB_MODE=empty` first.
+
+## Stop, start and reset (`service.sh`)
+
+`service.sh` stops, starts and restarts a deployment without deleting anything,
+and shows its status. Stop the App before the database, and start the database
+before the App.
+
+**App Server** (`sudo bash service.sh --role app [--dir PATH] stop|start|restart|status`)
+works on the directory `deploy-app.sh` created (default `/opt/perodua-app`).
+`stop` runs `docker compose stop`. The containers, the attachments volume and
+the settings stay, and because the containers were stopped by hand, Docker does
+not start them again after a reboot. `start` first runs the database check of
+`deploy-app.sh` (`preflight.py check`) and goes ahead only on `READY`: on an
+empty or unfinished database, Odoo would set itself up at start without the UAT
+setup. It then runs `docker compose up --detach --no-recreate --wait` and waits
+up to 10 minutes for both containers to report healthy; if they do not, it
+prints the command that shows their logs. `restart` is the same check, `stop`
+and then `start`. `status` lists the containers with their health and ports.
+Like `uninstall.sh`, every action except `status` takes the lock on
+`.deploy.lock` first and stops with "A deployment or uninstall is running in
+this directory" while `deploy-app.sh` or `uninstall.sh` runs.
+
+**DB Server** (`sudo bash service.sh --role db [--cluster NAME] stop|start|restart|status`)
+works on the PostgreSQL 16 cluster named by `PG_CLUSTER` in `deploy.conf` next
+to the script, `--cluster`, or `main`. It uses `pg_ctlcluster`, which goes
+through systemd where systemd runs. `stop` names the number of open
+connections it closes; an App that is still running shows errors until the
+database is back. `start` waits until PostgreSQL accepts connections. `status`
+shows `pg_lsclusters` and the number of open connections. PostgreSQL starts
+again with the server, stopped or not.
+
+**Reset** (`sudo bash service.sh --role app [--dir PATH] reset [--confirm DATABASE]`)
+turns the deployment back into a fresh UAT system from the App Server alone. It
+shows its plan and changes nothing until the database name is typed, or given
+with `--confirm` for unattended use. Then it:
+
+1. stops the App;
+2. deletes all data in the database with `reset_database.py`, run in the Odoo
+   image as the application role: the tables, views, sequences and functions
+   in `public` and in the schemas the role created (such as `api`). `public` is
+   then created again as PostgreSQL creates it in a new database. The database
+   itself, its owner, the login and password and the access rules stay;
+3. removes the containers, the attachments volume and the containers'
+   anonymous volumes, as `uninstall.sh --purge` does, but keeps the directory,
+   its configuration and the images;
+4. runs `deploy-app.sh --init-db` with the saved configuration, from the same
+   `scripts` folder: see [Initialize a fresh UAT system on the App Server](#initialize-a-fresh-uat-system-on-the-app-server).
+   Before that, the directory is bound to that release, so a reset run from a
+   newer release's folder installs the newer release.
+
+PostgreSQL locks every object it drops until the end of the transaction. An
+Odoo database has thousands of them (each table has foreign keys to
+`res_users`, each with its triggers), more than a server with default settings
+has room for in one transaction ("out of shared memory"). So step 2 drops the
+foreign keys first and then the tables, a few hundred per transaction, and
+waits at most a minute for a lock. If it fails before anything was dropped (for
+example when the database cannot be reached), the script says nothing was
+deleted and leaves the App stopped; start it again with `start`. If it fails
+later, the database is only partly emptied and the App stays stopped: solve the
+problem and run the reset again, which finishes it. The same applies when
+`deploy-app.sh` stops, for example when the registry cannot be reached.
 
 ## Uninstall (`uninstall.sh`)
 

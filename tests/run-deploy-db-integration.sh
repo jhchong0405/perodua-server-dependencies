@@ -507,6 +507,42 @@ done
 assert_sql postgres "SELECT count(*) FROM pg_database WHERE datname IN ('uninst_manual', 'uninst_a')" 2
 pass 'uninstall refuses a database it did not create, or one replaced since, and changes nothing'
 
+# ── service.sh ────────────────────────────────────────────────────────────────
+SERVICE="$SOURCE_DIR/scripts/service.sh"
+shellcheck "$SERVICE"
+write_empty_conf reset_fixture app_reset
+deploy_ok reset_fixture
+python3 "$SOURCE_DIR/tests/check_reset_database.py" "$SOURCE_DIR/scripts" "$TEST_DIR" reset_fixture app_reset "$TEST_DIR/app.password" \
+    > "$TEST_DIR/reset-database.log" 2>&1 || { cat "$TEST_DIR/reset-database.log" >&2; die 'reset_database.py check failed'; }
+pass 'reset (reset_database.py) empties an Odoo-shaped database that a one-shot drop cannot, changes nothing on a failed login, keeps the database, its owner and access, and leaves it EMPTY for deploy-app.sh --init-db'
+
+service_ok() {
+    local log=$1; shift
+    bash "$SERVICE" --role db "$@" > "$TEST_DIR/$log.log" 2>&1 || { cat "$TEST_DIR/$log.log" >&2; die "service.sh $* failed"; }
+}
+databases=$(admin_sql -d postgres -c 'SELECT string_agg(datname, $$,$$ ORDER BY datname) FROM pg_database')
+service_ok service-status status
+grep -q '^16  *main  *5432  *online ' "$TEST_DIR/service-status.log" || die 'status does not show the cluster online'
+runuser -u postgres -- psql -X -At -d postgres -c 'SELECT pg_sleep(60)' > "$TEST_DIR/service-client.log" 2>&1 &
+client=$!
+for _ in $(seq 50); do
+    [[ $(admin_sql -d postgres -c "SELECT count(*) FROM pg_stat_activity WHERE query LIKE 'SELECT pg_sleep(60)%'") == 1 ]] && break
+    sleep 0.1
+done
+service_ok service-stop stop
+grep -q 'Closing 1 open connection(s)' "$TEST_DIR/service-stop.log" || die 'stop did not report the open connection'
+if pg_ctlcluster 16 main status > /dev/null 2>&1; then die 'stop left PostgreSQL running'; fi
+if wait "$client"; then die 'the open connection survived the stop'; fi
+service_ok service-status-down status
+grep -q '^16  *main  *5432  *down ' "$TEST_DIR/service-status-down.log" || die 'status does not show the cluster down'
+service_ok service-stop-again stop
+grep -q 'already stopped' "$TEST_DIR/service-stop-again.log" || die 'a second stop did not say the cluster is already stopped'
+service_ok service-start start
+service_ok service-restart restart
+[[ $(admin_sql -d postgres -c 'SELECT string_agg(datname, $$,$$ ORDER BY datname) FROM pg_database') == "$databases" ]] \
+    || die 'the databases changed across stop, start and restart'
+pass 'service.sh --role db: status, stop (closing and reporting an open connection), a repeated stop, start and restart; the databases stay'
+
 python3 - "$TEST_DIR" <<'PY'
 import pathlib
 import sys
