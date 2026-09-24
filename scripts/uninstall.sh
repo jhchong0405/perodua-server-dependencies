@@ -81,6 +81,15 @@ uninstall_app() {
     [[ -d $DEPLOY_DIR && ! -L $DEPLOY_DIR ]] || die "No App deployment at $DEPLOY_DIR. Nothing was changed."
     [[ -f $DEPLOY_DIR/.deployment-identity ]] \
         || die "$DEPLOY_DIR was not created by deploy-app.sh (no .deployment-identity). Nothing was changed."
+    # deploy-app.sh holds this lock while it runs. It is held here until the
+    # script exits, so no deployment can create containers between the listing
+    # below and their removal, including while the plan waits for confirmation.
+    exec 9>>"$DEPLOY_DIR/.deploy.lock"
+    flock -n 9 || die 'A deployment is running in this directory. Nothing was changed.'
+    # An uninstall deletes the lock file at the end. If another one did so
+    # between the open and the lock above, this lock is on the old file.
+    [[ /proc/self/fd/9 -ef $DEPLOY_DIR/.deploy.lock ]] \
+        || die "$DEPLOY_DIR was removed or replaced while this uninstall was starting. Nothing was changed."
     project=$(sed -n 's/^project=//p' "$DEPLOY_DIR/.deployment-identity")
     [[ $project =~ ^[a-z][a-z0-9_-]{0,49}$ ]] || die 'Unreadable project name in .deployment-identity. Nothing was changed.'
     command -v docker >/dev/null || die 'Docker is not installed. Nothing was changed.'
@@ -142,7 +151,6 @@ uninstall_app() {
             printf 'Kept anonymous volume %s: %s\n' "$anon" "$error"
         fi
     done
-    rm -rf -- "$DEPLOY_DIR"
     if ((PURGE)); then
         for image in "${images[@]}"; do
             if docker image rm "$image" >/dev/null 2>&1; then
@@ -152,6 +160,12 @@ uninstall_app() {
             fi
         done
     fi
+    # The lock file goes last, once nothing else is left: until then a
+    # deployment that starts is refused. One that starts after it finds an
+    # empty directory, and rmdir fails rather than remove its files.
+    find "$DEPLOY_DIR" -mindepth 1 -maxdepth 1 ! -name .deploy.lock -exec rm -rf -- {} +
+    rm -f -- "$DEPLOY_DIR/.deploy.lock"
+    rmdir -- "$DEPLOY_DIR"
     printf 'SUCCESS: the App deployment "%s" was removed.\n' "$project"
 }
 
