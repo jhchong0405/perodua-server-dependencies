@@ -351,8 +351,9 @@ campaigns, routes, calendars, forecasts, IDDIs, orders or invoices; the EBS and
 PROMISE registers (Master Integration, Customer Rank, Supplier Classification,
 freight agents) are empty; and so are Holiday Types, Order Cycles, Payment
 Method and Retail Price List, which administrators fill in on those pages.
-Currencies lists only MYR: USD is archived and can be switched on there. What
-is set up:
+Currencies lists only MYR: USD is archived. The workbench lists only active
+currencies and a second USD cannot be created, so switching USD back on is a
+step on the server, not in the workbench. What is set up:
 
 - the company: Perodua Parts Sdn Bhd, Malaysia, MYR on the Malaysian chart of
   accounts, with the AR/AP journal rules;
