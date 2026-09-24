@@ -66,14 +66,17 @@ REVIEWED_REFERENCES = (
     {
         'file': 'perodua_demo/hooks.pyc',
         'finding': "constant 'perodua_demo_client.loaded'",
-        'sha256': '4fb05b13bf16ce9db72f1ce726e27844c008dd0b94744fd0a7041ed0b6ae9e82',
+        'sha256': '3ed0f998c31504b81e5e7f6fd9340b83318f33968e19fe6935eae47581f1e2d6',
         'reason': (
             'A system-parameter key, not an XML ID: it is read with a default that '
             'treats a missing value as "not loaded", only to word a log message, and '
             'the surrounding code handles the dataset being absent. Optional '
             'detection, not reliance. Reviewed against the pinned '
             'client-stable-uiux-v1.0.0 image '
-            '(sha256:c16053940627c1c939a742327c2426b83355bf388a5fd2796894cb21770870da).'),
+            '(sha256:c16053940627c1c939a742327c2426b83355bf388a5fd2796894cb21770870da) '
+            'and again for client-stable-uiux-v1.0.1 '
+            '(sha256:8a55a0688ef42b9c67f088e74e0f815498e9371a554994b35729140925bb83d4), '
+            'whose perodua_demo changes do not touch this key.'),
     },
 )
 

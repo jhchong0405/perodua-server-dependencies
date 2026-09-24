@@ -5,17 +5,18 @@
 # before it finished. It never runs on an ordinary redeploy, so the fixed UAT
 # passwords are never reset behind anyone's back.
 #
-#   whadmin / perodua     The release seeds these three logins itself
+#   whadmin / perodua     The release creates these three logins itself
 #   admin1  / perodua     (perodua_demo_ui: Sumathi, Haziq, Nurul). They are
-#   admin2  / perodua     kept -- names, IDs and every seeded record that
-#                         points at them -- and given exactly the groups and
-#                         companies of Odoo's native Administrator.
+#   admin2  / perodua     kept -- names, IDs and any record that points at
+#                         them -- and given exactly the groups and companies
+#                         of Odoo's native Administrator.
 #
 # The native Administrator (base.user_admin) is archived, as Odoo recommends
-# instead of deleting it, so no fourth administrator login remains; after
-# seeding it is admin@demo.perodua.my with Odoo's default password. A login
-# that a future image no longer seeds is created as a copy of that
-# Administrator. The technical superuser (base.user_root) is left alone.
+# instead of deleting it, so no fourth administrator login remains; it still
+# has Odoo's default password (login `admin`, or admin@demo.perodua.my on an
+# image that loads sample data). A login that a future image no longer creates
+# is created as a copy of that Administrator. The technical superuser
+# (base.user_root) is left alone.
 #
 # The fixed password is intentional: this is a UAT system, never production.
 # Everything goes through the ORM -- no SQL on res_users, no hand-made password
