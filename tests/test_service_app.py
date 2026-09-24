@@ -57,6 +57,7 @@ action = args[5:] if compose else None
 if compose and action == ['stop']:
     pass
 elif compose and action == ['run', '--rm', '--no-deps', '-T', 'odoo', 'python3', '/opt/deploy/preflight.py', 'check']:
+    entry['stdin'] = sys.stdin.read()  # compose run passes stdin to the container
     out = [state['preflight']] if state['preflight'] else []
     status = 0 if state['preflight'] else 1
 elif compose and action == ['up', '--detach', '--no-recreate', '--wait', '--wait-timeout', '600']:
@@ -144,9 +145,10 @@ class ServiceAppTests(unittest.TestCase):
         state.update(changes)
         self.state.write_text(json.dumps(state))
 
-    def run_script(self, *args, **env):
+    def run_script(self, *args, stdin=None, **env):
         return subprocess.run(["bash", str(self.bundle / "service.sh"), "--role", "app", "--dir", str(self.app), *args],
-                              env=dict(self.env, **env), stdin=subprocess.DEVNULL, text=True, capture_output=True,
+                              env=dict(self.env, **env), input=stdin,
+                              stdin=subprocess.DEVNULL if stdin is None else None, text=True, capture_output=True,
                               timeout=30, start_new_session=True)
 
     def docker_log(self):
@@ -201,7 +203,7 @@ class ServiceAppTests(unittest.TestCase):
         # On an empty or unfinished database, Odoo would set itself up at start.
         for preflight, message in (("EMPTY", "The database is not set up (EMPTY)"),
                                    ("SETUP_PENDING", "The database is not set up (SETUP_PENDING)"),
-                                   ("", "The database check failed")):
+                                   ("", "the database check failed for the reason above")):
             for action in ("start", "restart"):
                 with self.subTest(preflight=preflight, action=action):
                     self.calls.unlink(missing_ok=True)
@@ -210,6 +212,14 @@ class ServiceAppTests(unittest.TestCase):
                     self.assertEqual(result.returncode, 1)
                     self.assertIn(message, result.stderr)
                     self.assertEqual(self.docker_calls(), [CHECK])
+
+    def test_the_database_check_leaves_stdin_alone(self):
+        # Seen on a real server: run from a script on stdin, the check's
+        # "compose run" read the rest of that script.
+        result = self.run_script("start", stdin="echo the rest of a script\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        check = next(entry for entry in self.docker_log() if entry["args"][5:] == CHECK)
+        self.assertEqual(check["stdin"], "")
 
     def test_an_unhealthy_start_names_the_log_command(self):
         self.set_state(up_status=1)

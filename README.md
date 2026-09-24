@@ -86,7 +86,8 @@ to the internet. The database starts without business data: no parts, customers,
 suppliers, orders or EBS/PROMISE register rows, and no order types, customer
 types, holiday types, order cycles, payment terms or price lists; MYR is the
 only currency. Only the company (Perodua Parts Sdn Bhd) and the HQ warehouse are
-set up. Administrators add the lists with **+ New**; see
+set up ([check it without the web page](#check-the-data-without-the-web-page)).
+Administrators add the lists with **+ New**; see
 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#initialize-a-fresh-uat-system-on-the-app-server)
 for the two codes campaigns need and how order types behave.
 
@@ -130,6 +131,43 @@ Sign in with the web login from the backup.
 Back up the database on the DB server and the filestore volume on the App server.
 Services start again after a reboot, except an App you stopped with `service.sh`.
 This setup serves HTTP only; add HTTPS before production.
+
+## Check the data without the web page
+
+On the DB server (with one server, on that server), this counts the records
+behind the main workbench pages straight from the database, archived records
+included. Use your database name if it is not `perodua`.
+
+```bash
+sudo -u postgres psql -X -P pager=off -d perodua <<'SQL'
+SELECT 'Company' AS data, count(*) AS records FROM res_company
+UNION ALL SELECT 'Warehouses', count(*) FROM stock_warehouse
+UNION ALL SELECT 'Currencies', count(*) FROM res_currency
+UNION ALL SELECT 'Products (parts)', count(*) FROM product_template WHERE perodua_item_no IS NOT NULL
+UNION ALL SELECT 'BOM List', count(*) FROM perodua_bom
+UNION ALL SELECT 'Customer', count(*) FROM res_partner WHERE customer_rank > 0
+UNION ALL SELECT 'Supplier', count(*) FROM res_partner WHERE supplier_rank > 0
+UNION ALL SELECT 'Sales Order', count(*) FROM sale_order
+UNION ALL SELECT 'Purchase Order', count(*) FROM purchase_order
+UNION ALL SELECT 'Forecast', count(*) FROM perodua_forecast
+UNION ALL SELECT 'IDDI', count(*) FROM perodua_spdio
+UNION ALL SELECT 'Campaign', count(*) FROM perodua_campaign
+UNION ALL SELECT 'Supplier (EBS)', count(*) FROM perodua_ebs_supplier_mirror
+UNION ALL SELECT 'Warehouses (EBS)', count(*) FROM perodua_ebs_branch_mirror
+UNION ALL SELECT 'OEM Material (PROMISE)', count(*) FROM perodua_promise_material
+UNION ALL SELECT 'Supplier Price List (PROMISE)', count(*) FROM perodua_supplier_pricing
+UNION ALL SELECT 'Order Types', count(*) FROM sale_order_type
+UNION ALL SELECT 'Customer Type', count(*) FROM perodua_customer_category
+UNION ALL SELECT 'Holiday Types', count(*) FROM perodua_holiday_type
+UNION ALL SELECT 'Order Cycles', count(*) FROM perodua_order_cycle
+UNION ALL SELECT 'Payment Method', count(*) FROM account_payment_term
+UNION ALL SELECT 'Retail Price List', count(*) FROM product_pricelist;
+SQL
+```
+
+The names are the workbench pages the counts belong to. A fresh UAT system
+shows 1 for Company (Perodua Parts Sdn Bhd), Warehouses (HQDC) and Currencies
+(MYR) and 0 for everything else.
 
 ## Stop, start and reset
 

@@ -88,10 +88,11 @@ app_stop() {
 
 app_check() {
     # deploy-app.sh's own database check. On an empty or unfinished database,
-    # Odoo would set itself up at start, without the UAT setup.
+    # Odoo would set itself up at start, without the UAT setup. No stdin:
+    # "compose run" would pass it on and read, say, the rest of a script.
     local state
-    state=$(compose run --rm --no-deps -T odoo python3 /opt/deploy/preflight.py check) \
-        || die 'The database check failed (see above); the App was not started. Is the database server running?'
+    state=$(compose run --rm --no-deps -T odoo python3 /opt/deploy/preflight.py check </dev/null) \
+        || die 'The App was not started: the database check failed for the reason above.'
     [[ $state == READY\ * ]] \
         || die "The database is not set up ($state); the App was not started. Run the reset again, or deploy-app.sh --init-db."
 }
