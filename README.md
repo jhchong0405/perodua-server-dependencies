@@ -132,8 +132,8 @@ On the App server:
 sudo bash uninstall.sh --role app
 ```
 
-It removes the containers and `/opt/perodua-app`. The attachments volume and the
-images stay unless you add `--purge`.
+It removes the containers, their anonymous Docker volumes and `/opt/perodua-app`.
+The attachments volume and the images stay unless you add `--purge`.
 
 On the DB server:
 

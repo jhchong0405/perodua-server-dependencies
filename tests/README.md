@@ -40,16 +40,31 @@ without one (for example inside `docker run --network none`). `test_deploy_app.p
 checks that the first interactive `deploy-app.sh` run asks for the web port and
 saves it.
 
-`test_uninstall_app.py` runs `uninstall.sh --role app` against a fake Docker CLI
-and checks the exact Docker calls:
-- the default removes the containers, network and directory, and keeps the
-  attachments volume and images;
-- `--purge` adds `--volumes` and removes the images;
-- without a compose file, the labelled resources are removed;
-- nothing changes after a wrong confirmation, with no terminal and no
-  `--confirm`, or in a directory `deploy-app.sh` did not create.
+`test_uninstall_app.py` runs `uninstall.sh --role app` against a fake Docker CLI.
+The fake keeps containers, volumes and networks in a file, including those of
+another Compose project, answers only the commands and filters the script uses,
+and fails on anything else. The tests check the exact Docker calls and what is
+left:
+- the default removes the containers, network and directory and the containers'
+  anonymous volumes, and keeps the attachments volume, the images and the other
+  project's resources;
+- `--purge` adds `--volumes` and removes the images; the anonymous volume that
+  `down --volumes` keeps after a redeploy is deleted by name, and the one it
+  deleted itself is not reported;
+- an anonymous volume that another container uses, or that Docker cannot
+  delete, is kept and named with Docker's error, and the uninstall finishes;
+- without a compose file, the labelled resources and the anonymous volumes are
+  removed, and with `--purge` the project's named volumes too;
+- containers without anonymous volumes lose no volume, and with no containers
+  left no volume is looked up;
+- nothing changes if the volumes cannot be read before the plan, after a wrong
+  confirmation, with no terminal and no `--confirm`, or in a directory
+  `deploy-app.sh` did not create.
 
-It needs root on Ubuntu 24.04, so run it in the test image.
+It needs root on Ubuntu 24.04, so run it in the test image. The fake follows
+what a real engine did on 2026-09-24 (Docker 29, Compose v5): after
+`up --force-recreate`, Compose passes the old anonymous volume to the new
+container by name, and neither `compose rm -v` nor `down --volumes` deletes it.
 
 `test_uat_guard.py` runs `uat_guard.py` against temporary addon trees shaped
 like the pinned image (literal manifests, code shipped as bare `.pyc`): direct,

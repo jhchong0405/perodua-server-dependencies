@@ -19,10 +19,10 @@ script, --config, --database, or the only deployment recorded on this server.
 PostgreSQL stays installed. --purge also uninstalls PostgreSQL 16 and deletes
 every database on this server; it needs a terminal.
 
---role app stops and removes the App containers and network and deletes the
-deployment directory (default /opt/perodua-app), including its copy of the
-database password. The attachments volume and the images are kept; --purge
-removes them too.
+--role app stops and removes the App containers, their anonymous volumes and
+the network, and deletes the deployment directory (default /opt/perodua-app),
+including its copy of the database password. The attachments volume and the
+images are kept; --purge removes them too.
 
 The plan is shown first. Type the database or project name to confirm, or pass
 it with --confirm for unattended use.
@@ -76,7 +76,7 @@ confirm_purge() {
 
 # ── App server ────────────────────────────────────────────────────────────────
 uninstall_app() {
-    local project images=() image containers volume
+    local project images=() image label listed ids=() mounted anonymous=() anon error volume
     [[ $DEPLOY_DIR == /* && $DEPLOY_DIR != / ]] || die '--dir must be an absolute directory path, not /.'
     [[ -d $DEPLOY_DIR && ! -L $DEPLOY_DIR ]] || die "No App deployment at $DEPLOY_DIR. Nothing was changed."
     [[ -f $DEPLOY_DIR/.deployment-identity ]] \
@@ -87,11 +87,28 @@ uninstall_app() {
     if [[ -f $DEPLOY_DIR/compose.yml ]]; then
         mapfile -t images < <(sed -n 's/^    image: //p' "$DEPLOY_DIR/compose.yml" | awk '!seen[$0]++')
     fi
-    containers=$(docker ps -aq --filter "label=com.docker.compose.project=$project" | wc -l)
+    label="label=com.docker.compose.project=$project"
+    listed=$(docker ps -aq --filter "$label")
+    [[ -z $listed ]] || mapfile -t ids <<< "$listed"
+    # Docker creates an anonymous volume (label com.docker.volume.anonymous) for
+    # each folder that the image declares as a VOLUME and compose.yml does not
+    # name, such as /mnt/extra-addons. It keeps them when it removes the
+    # containers, and after a redeploy even with "down --volumes", because Compose
+    # hands them to the new container by name. So the ones these containers mount
+    # are listed now and deleted by name afterwards. Named volumes never match.
+    if ((${#ids[@]})); then
+        mounted=$(docker inspect --format '{{range .Mounts}}{{if eq .Type "volume"}}{{println .Name}}{{end}}{{end}}' "${ids[@]}") \
+            || die 'Could not read the volumes of the App containers. Nothing was changed.'
+        listed=$(docker volume ls -q --filter label=com.docker.volume.anonymous) \
+            || die 'Could not list the anonymous volumes. Nothing was changed.'
+        mapfile -t anonymous < <(sed '/^$/d' <<< "$mounted" | grep -Fx -f <(printf '%s\n' "$listed") | awk '!seen[$0]++')
+    fi
     volume=${project}_filestore
 
     printf 'Uninstall the App deployment "%s" from %s:\n' "$project" "$DEPLOY_DIR"
-    printf '  - stop and remove its %s container(s) and its network\n' "$containers"
+    printf '  - stop and remove its %s container(s) and its network\n' "${#ids[@]}"
+    ((${#anonymous[@]} == 0)) \
+        || printf '  - delete the %s anonymous volume(s) Docker created for them (such as /mnt/extra-addons)\n' "${#anonymous[@]}"
     printf '  - delete %s (configuration, the copy of the database password, logs)\n' "$DEPLOY_DIR"
     if ((PURGE)); then
         printf '  - delete the attachments volume %s\n' "$volume"
@@ -109,7 +126,6 @@ uninstall_app() {
         docker compose --project-name "$project" --file "$DEPLOY_DIR/compose.yml" "${down[@]}"
     else
         # No compose file left: remove what carries the project's label.
-        local ids=() label="label=com.docker.compose.project=$project"
         mapfile -t ids < <(docker ps -aq --filter "$label")
         ((${#ids[@]} == 0)) || docker rm -f "${ids[@]}" >/dev/null
         mapfile -t ids < <(docker network ls -q --filter "$label")
@@ -119,6 +135,13 @@ uninstall_app() {
             ((${#ids[@]} == 0)) || docker volume rm "${ids[@]}" >/dev/null
         fi
     fi
+    for anon in "${anonymous[@]}"; do
+        if error=$(docker volume rm "$anon" 2>&1 >/dev/null); then
+            printf 'Deleted anonymous volume %s\n' "$anon"
+        elif [[ $error != *'no such volume'* ]]; then  # else "down --volumes" deleted it
+            printf 'Kept anonymous volume %s: %s\n' "$anon" "$error"
+        fi
+    done
     rm -rf -- "$DEPLOY_DIR"
     if ((PURGE)); then
         for image in "${images[@]}"; do
