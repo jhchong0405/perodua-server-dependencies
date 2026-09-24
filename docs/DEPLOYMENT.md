@@ -383,10 +383,20 @@ database or project name is typed. For unattended use, pass the name with
 **App Server** (`sudo bash uninstall.sh --role app [--dir PATH] [--purge]`)
 removes the directory only if `deploy-app.sh` created it (it contains
 `.deployment-identity`). It runs `docker compose down --remove-orphans` for that
-project, then deletes the directory with its configuration, logs and copy of the
-database password. The attachments volume and the pinned images are kept. With
-`--purge` the volume is removed as well (`down --volumes`), and so is each image
-that no other container uses. The database is not touched.
+project and deletes the containers' anonymous volumes, then deletes the directory
+with its configuration, logs and copy of the database password. The attachments
+volume and the pinned images are kept. With `--purge` the volume is removed as
+well (`down --volumes`), and so is each image in `compose.yml` that no other
+container uses. The database is not touched.
+
+Anonymous volumes are the unnamed volumes Docker creates for folders that the
+image declares as volumes and `compose.yml` does not name, such as
+`/mnt/extra-addons`. `down` keeps them, and after a redeploy so does
+`down --volumes`, because Compose hands them to the new container by name. The
+script lists them by Docker's `com.docker.volume.anonymous` label before it
+removes the containers, and deletes them by name afterwards. If Docker cannot
+delete one, for example because another container still uses it, the script
+prints its name and Docker's error, and finishes the uninstall.
 
 **DB Server** (`sudo bash uninstall.sh --role db [--config FILE | --database NAME] [--purge]`)
 takes the database from `deploy.conf` next to the script, `--config`,
