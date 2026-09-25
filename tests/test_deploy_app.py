@@ -65,6 +65,11 @@ class DeploymentSafetyTests(unittest.TestCase):
         self.fake = self.bin / "docker"
         self.fake.write_text(self.fake_docker_source(), encoding="utf-8")
         self.fake.chmod(0o755)
+        # This server's addresses, for the "who may open the web page" choices:
+        # one private and one public.
+        hostname = self.bin / "hostname"
+        hostname.write_text('#!/bin/sh\n[ "$1" = -I ] && echo "10.1.2.3 203.0.113.7 "\n', encoding="utf-8")
+        hostname.chmod(0o755)
         self.write_config()
 
     @staticmethod
@@ -302,24 +307,75 @@ sys.exit(93)
                          ["fixture-invalid-token", "fixture-valid-token"])
         self.assert_original_auth_unchanged()
 
-    def test_first_interactive_run_asks_for_the_web_port_and_saves_it(self):
+    def interactive_run(self, host_answers, choices, port=b""):
+        """The first interactive run: database questions, web port, who may open the page."""
         self.env["FAKE_DOCKER_MODE"] = "auth"
         (self.base / "fake-state").write_text("authenticated")  # pulls succeed without a login
-        code, output = self.terminal_exchange([
-            (b"Database server IP / hostname []: ", b"192.0.2.20", True),
+        host = [(b"Database server IP / hostname []: ", answer, True) for answer in host_answers]
+        return self.terminal_exchange(host + [
             (b"Database port [5432]: ", b"", True),
             (b"Application database name [perodua]: ", b"", True),
             (b"Database username [odoo]: ", b"", True),
-            (b"Web port that browsers open on this server [8110]: ", b"18111", True),
+            (b"Web port that browsers open on this server [8110]: ", port, True),
+            *choices,
             (b"Database password (hidden): ", b"fixture-password", False),
         ], command=["bash", str(SCRIPT), "--dir", str(self.deploy_dir)])
+
+    def test_first_interactive_run_asks_for_the_web_port_and_saves_it(self):
+        code, output = self.interactive_run([b"192.0.2.20"], [(b"Choose [2]: ", b"", True)], port=b"18111")
         self.assertNotEqual(code, 0, "Fake Docker must stop before database operations")
         self.assertIn("Fixture stopped before", output)
         self.assertNotIn("fixture-password", output)
         saved = (self.deploy_dir / "app.env").read_text()
-        for line in ("DB_HOST=192.0.2.20", "DB_PORT=5432", "DB_NAME=perodua", "DB_USER=odoo", "HTTP_PORT=18111"):
+        for line in ("DB_HOST=192.0.2.20", "DB_PORT=5432", "DB_NAME=perodua", "DB_USER=odoo", "HTTP_PORT=18111",
+                     "BIND_IP=10.1.2.3"):
             self.assertIn(line + "\n", saved)
-        self.assertIn('"0.0.0.0:18111:80"', (self.deploy_dir / "compose.yml").read_text())
+        # The private network is the default; the public address is not offered on its own.
+        self.assertIn("2) Computers on the private network, through 10.1.2.3", output)
+        self.assertNotIn("through 203.0.113.7", output)
+        self.assertIn('"10.1.2.3:18111:80"', (self.deploy_dir / "compose.yml").read_text())
+
+    def test_this_server_only_binds_to_loopback(self):
+        code, output = self.interactive_run([b"192.0.2.20"], [(b"Choose [2]: ", b"1", True)])
+        self.assertIn("Fixture stopped before", output)
+        self.assertIn('"127.0.0.1:8110:80"', (self.deploy_dir / "compose.yml").read_text())
+
+    def test_every_address_on_a_public_server_needs_a_confirmation(self):
+        code, output = self.interactive_run([b"192.0.2.20"], [
+            (b"Choose [2]: ", b"9", True),
+            (b"Choose [2]: ", b"3", True),
+            (b"Open it on every address anyway? [y/N]: ", b"", True),
+            (b"Choose [2]: ", b"3", True),
+            (b"Open it on every address anyway? [y/N]: ", b"y", True),
+        ])
+        self.assertIn("Fixture stopped before", output)
+        self.assertIn("Enter a number from 1 to 3.", output)
+        self.assertIn("203.0.113.7 is a public internet address", output)
+        self.assertIn("Docker opens published ports past ufw", output)
+        self.assertIn('"0.0.0.0:8110:80"', (self.deploy_dir / "compose.yml").read_text())
+
+    def test_a_loopback_database_host_is_explained_and_asked_again(self):
+        code, output = self.interactive_run([b"127.0.0.1", b"192.0.2.20"], [(b"Choose [2]: ", b"", True)])
+        self.assertIn("Fixture stopped before", output)
+        self.assertIn("127.0.0.1 would be the App container itself", output)
+        self.assertIn("DB_HOST=192.0.2.20\n", (self.deploy_dir / "app.env").read_text())
+
+    def test_a_loopback_database_host_in_the_configuration_fails_before_docker(self):
+        for value in ("localhost", "127.0.0.1"):
+            with self.subTest(value=value):
+                self.write_config(DB_HOST=value)
+                result = self.run_script("--non-interactive")
+                self.assert_early_failure(result)
+                self.assertIn("would be the App container itself", result.stdout)
+
+    def test_every_address_from_a_configuration_warns_on_a_public_server(self):
+        self.env["FAKE_DOCKER_MODE"] = "auth"
+        (self.base / "fake-state").write_text("authenticated")
+        self.write_config(BIND_IP="0.0.0.0")
+        result = self.run_script("--non-interactive")
+        self.assertIn("Fixture stopped before", result.stdout)
+        self.assertIn("Warning: BIND_IP=0.0.0.0 opens the web page on every address of this server, "
+                      "including the public 203.0.113.7", result.stdout)
 
     def test_blank_hidden_token_cancels_without_login(self):
         self.env["FAKE_DOCKER_MODE"] = "auth"

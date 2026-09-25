@@ -102,7 +102,7 @@ Edit the file, especially these settings:
 | `DOWNLOAD_USER` | Optional HTTP Basic-auth username; curl prompts for its password |
 | `DB_LC_COLLATE`, `DB_LC_CTYPE` | Source database locales |
 | `DB_LISTEN_IP` | DB server's own IPv4 address; initially `127.0.0.1` |
-| `APP_CIDR` | Allowed App Server IPv4 source, e.g. `10.0.0.10/32`; empty means local access only |
+| `APP_CIDR` | Allowed App Server IPv4 source, e.g. `10.0.0.10/32`, or several separated by commas; empty means local access only |
 | `MIN_FREE_MB` | Minimum free space on both download and database filesystems |
 | `EXPECTED_TABLES` | Comma-separated `schema.table` names checked after restore |
 
@@ -220,12 +220,19 @@ Use this when there is no backup to restore and the App Server should build a
 new UAT system. No backup is downloaded, copied or restored.
 
 The simplest way is `sudo bash deploy-db.sh` without a `deploy.conf`. On a
-terminal it asks for this server's internal IP, offering the addresses it finds
-(Docker network addresses are left out, and private addresses are suggested
-first). It accepts only an address of this server, and asks for confirmation
-before using a public internet address. It then asks for the App server's IP, or
-a network in CIDR form, which must not be this server: the App server always runs
-on another server. It then shows the settings, and after confirmation saves them as `deploy.conf`
+terminal it first asks where the App runs.
+
+- **On another server** (the default): it asks for this server's internal IP,
+  offering the addresses it finds (Docker network addresses are left out, and
+  private addresses are suggested first). It accepts only an address of this
+  server, and asks for confirmation before using a public internet address. It
+  then asks for the App server's IP, or a network in CIDR form. If the answer is
+  this server (its own address, `127.0.0.1` or `localhost`), it asks whether the
+  App runs on this server too and, if so, continues as below.
+- **On this server too**: see [One server](#one-server) below. No address is
+  asked for.
+
+It then shows the settings, and after confirmation saves them as `deploy.conf`
 next to the script: `DB_MODE=empty`, database `perodua`, user `odoo`, the
 installed cluster's port, `DB_LISTEN_IP` and `APP_CIDR` (`/32` for a single
 address). Declining the summary starts the questions again. Whenever an answer
@@ -234,6 +241,26 @@ asked for in the same way: a password that is too short or not plain ASCII, or
 two different entries, is asked for again. Choosing a restore instead saves
 nothing. Later runs read the saved file and ask no setup questions; an explicit
 `--config` is never guided.
+
+### One server
+
+When the App runs on the DB server too, its containers reach PostgreSQL on
+Docker's address on this server (the default bridge, usually `172.17.0.1`),
+which only this server and its containers reach. The guided setup then saves
+`DB_LISTEN_IP` as that address and `APP_CIDR` as the networks Docker gives
+containers their addresses in: Docker's configured address pools, or its
+defaults `172.16.0.0/12,192.168.0.0/16`. Docker must be running first
+(`sudo bash install-dependencies.sh --role app`); otherwise the script says so
+and asks again. A hand-written `deploy.conf` with these values works the same.
+
+Docker creates that address only when it starts, and at boot PostgreSQL would
+start first and listen on its other addresses only. So whenever `DB_LISTEN_IP`
+is a Docker network address of this server, `deploy-db.sh` writes
+`/etc/systemd/system/postgresql@16-<cluster>.service.d/perodua-after-docker.conf`
+(`After=docker.service`), which makes PostgreSQL start after Docker. No firewall
+change is needed, and the final message points to `deploy-app.sh` on the same
+server, which offers the recorded database settings as its defaults.
+`uninstall.sh --role db` removes the setting together with the listen address.
 
 To choose other values, write `deploy.conf` yourself:
 
@@ -287,6 +314,37 @@ After `deploy-db.sh` reports `SUCCESS` in `DB_MODE=empty`, run on the App Server
 ```sh
 sudo bash deploy-app.sh --init-db
 ```
+
+The first run asks for the database settings. On one server they default to what
+`deploy-db.sh` recorded there. A database host of `127.0.0.1` or `localhost` is
+explained and asked again: inside the App container it would be the container
+itself. On one server, use Docker's address (the `DB_HOST` `deploy-db.sh`
+printed).
+
+It then asks who may open the web page, and saves the answer as `BIND_IP`:
+
+| Choice | `BIND_IP` | Reached from |
+| --- | --- | --- |
+| Only this server | `127.0.0.1` | this server; from a computer through the SSH tunnel the script prints at the end |
+| The private network | the server's private address | computers on that network (the default when the server has one) |
+| Every computer | `0.0.0.0` | every address of the server |
+
+On a server with a public IPv4 address, choosing every computer asks for a
+confirmation. Without a firewall in front of the web port, anyone on the
+internet could sign in with the UAT passwords. Use the cloud provider's
+firewall (security group): Docker's published ports bypass ufw. With a
+configuration file that sets `BIND_IP=0.0.0.0`, the script prints the same
+warning instead of asking.
+
+If the project's attachments volume was already there (a default
+`uninstall.sh --role app` keeps it), the script decides what to do with it:
+
+- **The database already holds this system:** it uses the volume again, and
+  checks the files against the database.
+- **The database is new and empty (`--init-db`):** it counts the files still in
+  the volume. They belong to the earlier database, so it asks before deleting
+  the volume. Without a terminal, it stops with the command to delete it. The
+  database is not changed.
 
 The App preflight reports the database as `EMPTY`, and the script then:
 
@@ -491,9 +549,12 @@ removes the directory only if `deploy-app.sh` created it (it contains
 `.deployment-identity`). It runs `docker compose down --remove-orphans` for that
 project and deletes the containers' anonymous volumes, then deletes the directory
 with its configuration, logs and copy of the database password. The attachments
-volume and the pinned images are kept. With `--purge` the volume is removed as
-well (`down --volumes`), and so is each image in `compose.yml` that no other
-container uses. The database is not touched.
+volume and the pinned images are kept. A later `deploy-app.sh` of the same
+project uses the volume again with the same database, and asks before deleting
+it for a new empty one (see
+[Initialize a fresh UAT system](#initialize-a-fresh-uat-system-on-the-app-server)).
+With `--purge` the volume is removed as well (`down --volumes`), and so is each
+image in `compose.yml` that no other container uses. The database is not touched.
 
 Anonymous volumes are the unnamed volumes Docker creates for folders that the
 image declares as volumes and `compose.yml` does not name, such as
@@ -503,6 +564,23 @@ script lists them by Docker's `com.docker.volume.anonymous` label before it
 removes the containers, and deletes them by name afterwards. If Docker cannot
 delete one, for example because another container still uses it, the script
 prints its name and Docker's error, and finishes the uninstall.
+
+**Other Perodua containers.** After the uninstall, and also when `--dir` holds no
+deployment, the script lists the containers whose name or image contains
+"perodua" and that belong to another Compose project or to none. An example is
+the App that the earlier perodua-odoo package deployed as the project
+`perodua-odoo`. Each project is shown with the directory it was started from and
+the name, image, state and ports of each container. It is deleted only after a
+`y` on a terminal:
+- a project with `docker compose --project-name NAME down --remove-orphans`, run
+  from `/` so that Compose does not read a compose file in the current directory;
+- containers without a project with `docker rm -f`.
+
+A second question covers the volumes those containers mounted, including the
+anonymous ones, and the project's other volumes. Enter keeps them. The images
+stay, and the script prints the command that removes them. Without a terminal it
+only lists the containers with the delete command. When `--dir` holds no
+deployment, the script exits with 0 only if it deleted something.
 
 `deploy-app.sh` holds a lock on `.deploy.lock` in the directory while it runs.
 The uninstall takes the same lock before it lists anything and keeps it until it
@@ -526,7 +604,9 @@ App first. It then removes:
 - the managed block of access rules in `pg_hba.conf`, validated before PostgreSQL
   reloads it;
 - the listen address that the deployment added, unless another recorded
-  deployment uses it (PostgreSQL restarts; `127.0.0.1` stays);
+  deployment uses it (PostgreSQL restarts; `127.0.0.1` stays), and with a
+  Docker address on one server also the setting that starts PostgreSQL after
+  Docker (`--purge` removes it as well);
 - the deployment records, and `deploy.conf` if the guided setup wrote it. A
   hand-written `deploy.conf` is kept.
 

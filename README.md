@@ -1,11 +1,12 @@
-# Two-server setup
+# Server setup
 
-Client Stable UIUX v1.0.3 on two Ubuntu 24.04 amd64 servers with sudo and internet access:
+Client Stable UIUX v1.0.3 on Ubuntu 24.04 amd64 servers with sudo and internet access:
 
 - **DB server**: PostgreSQL 16.
 - **App server**: Odoo and web containers, pulled from `perodua-deploy.novutal.com`.
 
-Allow **App → DB port 5432** and **browser → App port 8110**.
+Both can also run on one server: do steps 2 and 3 on that server. With two
+servers, allow **App → DB port 5432**. Browsers need **App port 8110**.
 
 The steps below create a **fresh UAT system** with an empty database.
 To restore an existing database instead, see [From a backup](#from-a-backup).
@@ -44,15 +45,23 @@ sudo bash install-dependencies.sh --role db
 sudo bash deploy-db.sh
 ```
 
+On one server, run `sudo bash install-dependencies.sh --role app` as well before
+`deploy-db.sh`: the App runs in Docker, and the database setup needs Docker there.
+
 The script asks:
 
 1. What to set up: press Enter for a fresh UAT system.
-2. This server's internal IP: it lists the addresses it found; press Enter to use
+2. Where the App runs: press Enter for another server, or enter 2 if it runs on
+   this server too. With 2, questions 3 and 4 are skipped: PostgreSQL listens
+   only on Docker's address on this server, accepts only the App's containers,
+   and starts after Docker when the server boots.
+3. This server's internal IP: it lists the addresses it found; press Enter to use
    the suggested one.
-3. The App server's IP, as this server sees it: its private IP if both servers
+4. The App server's IP, as this server sees it: its private IP if both servers
    share a private network, otherwise its public IP (`curl -4 -s ifconfig.me`
-   on the App server shows it).
-4. A new database password (at least 12 characters), twice. Keep it for the App server.
+   on the App server shows it). If you enter this server's own address, the
+   script offers the one-server setup instead.
+5. A new database password (at least 12 characters), twice. Keep it for the App server.
 
 If an answer cannot be used, the script says why and asks again. Wait for
 `SUCCESS`; it ends by printing the `DB_HOST` for the App server. A fresh UAT
@@ -67,14 +76,30 @@ sudo systemctl enable --now docker
 sudo bash deploy-app.sh --init-db
 ```
 
-Enter the DB server's IP (the `DB_HOST` printed by `deploy-db.sh`). Press Enter to keep the defaults for the database port,
-name and user and the web port (8110), then enter the database password. When
-asked, enter the registry username and password for `perodua-deploy.novutal.com`.
-The first run takes several minutes.
+Enter the DB server's IP (the `DB_HOST` printed by `deploy-db.sh`). On one
+server the database settings are already filled in; press Enter. Press Enter to
+keep the defaults for the database port, name and user and the web port (8110).
+
+Then choose who may open the web page:
+
+- **Only this server**: open it from your computer through the SSH tunnel that
+  the script prints at the end.
+- **The private network**, through the server's private address (the default
+  when the server has one).
+- **Every computer that can reach the server.** On a server with a public IP,
+  anyone on the internet could then sign in with the UAT passwords below. Put a
+  firewall in front of the web port first: your cloud provider's firewall
+  (security group), because ufw does not filter ports that Docker publishes. The
+  script asks you to confirm this choice.
+
+Then enter the database password. When asked, enter the registry username and
+password for `perodua-deploy.novutal.com`. The first run takes several minutes.
 
 ## 4. Sign in and check
 
-Open `http://APP_SERVER_IP:8110/app/` (or the web port you chose).
+Open `http://APP_SERVER_IP:8110/app/` (or the web port you chose). If only this
+server may open the page, open the SSH tunnel that `deploy-app.sh` printed and
+use `http://localhost:8110/app/`.
 
 | Login | Password | Access |
 | --- | --- | --- |
@@ -220,7 +245,15 @@ sudo bash uninstall.sh --role app
 ```
 
 It removes the containers, their anonymous Docker volumes and `/opt/perodua-app`.
-The attachments volume and the images stay unless you add `--purge`.
+The attachments volume and the images stay unless you add `--purge`. Deploying
+the App again uses the kept volume with the same database; for a new empty
+database, `deploy-app.sh` asks before deleting the old files in it.
+
+Afterwards, and also when there is no `/opt/perodua-app`, it lists the other
+containers with "perodua" in their name or image. An example is the App that the
+earlier perodua-odoo package deployed (Compose project `perodua-odoo`). It
+deletes each project only after you answer `y`, then asks separately about the
+volumes those containers used. The images stay.
 
 On the DB server:
 
