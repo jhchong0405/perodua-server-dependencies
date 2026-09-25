@@ -249,6 +249,12 @@ The attachments volume and the images stay unless you add `--purge`. Deploying
 the App again uses the kept volume with the same database; for a new empty
 database, `deploy-app.sh` asks before deleting the old files in it.
 
+Afterwards, and also when there is no `/opt/perodua-app`, it lists the other
+containers with "perodua" in their name or image. An example is the App that the
+earlier perodua-odoo package deployed (Compose project `perodua-odoo`). It
+deletes each project only after you answer `y`, then asks separately about the
+volumes those containers used. The images stay.
+
 On the DB server:
 
 ```bash

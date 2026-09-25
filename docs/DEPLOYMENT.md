@@ -565,6 +565,23 @@ removes the containers, and deletes them by name afterwards. If Docker cannot
 delete one, for example because another container still uses it, the script
 prints its name and Docker's error, and finishes the uninstall.
 
+**Other Perodua containers.** After the uninstall, and also when `--dir` holds no
+deployment, the script lists the containers whose name or image contains
+"perodua" and that belong to another Compose project or to none. An example is
+the App that the earlier perodua-odoo package deployed as the project
+`perodua-odoo`. Each project is shown with the directory it was started from and
+the name, image, state and ports of each container. It is deleted only after a
+`y` on a terminal:
+- a project with `docker compose --project-name NAME down --remove-orphans`, run
+  from `/` so that Compose does not read a compose file in the current directory;
+- containers without a project with `docker rm -f`.
+
+A second question covers the volumes those containers mounted, including the
+anonymous ones, and the project's other volumes. Enter keeps them. The images
+stay, and the script prints the command that removes them. Without a terminal it
+only lists the containers with the delete command. When `--dir` holds no
+deployment, the script exits with 0 only if it deleted something.
+
 `deploy-app.sh` holds a lock on `.deploy.lock` in the directory while it runs.
 The uninstall takes the same lock before it lists anything and keeps it until it
 exits. If a deployment is running, it stops with "A deployment is running in

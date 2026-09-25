@@ -92,7 +92,26 @@ the exact Docker calls and what is left:
   and changes nothing, and the uninstall then finishes;
 - after every run, each changing Docker call and each removal found the lock
   held, including the image removals of `--purge`, and the lock file was removed
-  last, when nothing else was left in the directory.
+  last, when nothing else was left in the directory. The other Perodua
+  containers below are not guarded by this lock.
+
+Other Perodua containers (an App of the earlier perodua-odoo package, with an
+attachments volume, an anonymous volume and a project volume that no container
+mounts, and containers without a Compose project):
+- after an uninstall without a terminal, they are listed by project with the
+  delete command and kept;
+- on a pseudo-terminal, `n` or Enter keeps a project, and `y` takes it down by
+  name from `/` (the fake refuses a compose call without `--file` in any other
+  directory). The volume question lists all three volumes; `n` or Enter keeps
+  them, and `y` deletes each by name. The images stay;
+- containers without a project are matched by name in any case or by image,
+  and removed by ID; a container that does not match is neither listed nor
+  removed;
+- with no deployment directory, the exit status is 0 after a deletion, and 1
+  with "Nothing was changed." after `n` or without a terminal;
+- a failed deletion is reported and the next project is still asked about;
+- containers of the uninstalled project that appear afterwards (a new
+  deployment) are not offered.
 
 It needs root on Ubuntu 24.04, so run it in the test image. The fake follows
 what a real engine did on 2026-09-24 (Docker 29, Compose v5): after

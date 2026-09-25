@@ -49,6 +49,30 @@ VOLUMES = {
     "anon-dangling": "anonymous", "other-app_data": "named:other-app", "anon-other": "anonymous",
 }
 NETWORKS = {"fixture-network": PROJECT, "other-network": "other-app"}
+# An App that the earlier perodua-odoo package deployed: its own Compose
+# project, named containers and images, an attachments volume and an anonymous
+# volume. After their mounts, containers may carry a name (default: the ID), an
+# image and the Compose working directory.
+OLD_PROJECT = "perodua-odoo"
+OLD_IMAGE = "perodua-deploy.novutal.com/perodua-odoo:client-stable-uiux"
+OLD_VOLUME = "perodua-odoo_perodua-filestore"
+OLD_CONTAINERS = {
+    "old-id-1": [OLD_PROJECT, [OLD_VOLUME, "old-anon"], "perodua-odoo-odoo-1", OLD_IMAGE, "/opt/perodua-odoo"],
+    "old-id-2": [OLD_PROJECT, [], "perodua-odoo-web-1", OLD_IMAGE + "-web", "/opt/perodua-odoo"],
+}
+# Containers without a Compose project: two match by name (in any case) or by
+# image, and the third does not match.
+MANUAL = {
+    "manual-id-1": ["", [], "Perodua-Manual", "busybox"],
+    "manual-id-2": ["", [], "legacy-app", OLD_IMAGE],
+    "manual-id-3": ["", [], "unrelated", "busybox"],
+}
+# Its volumes: the attachments, the anonymous one and one that no container mounts.
+OLD_VOLUMES = {OLD_VOLUME: f"named:{OLD_PROJECT}", "old-anon": "anonymous", "old-unused": f"named:{OLD_PROJECT}"}
+# What the other deployments' tests change. This directory's lock does not guard them.
+OTHERS = {OLD_PROJECT, *OLD_VOLUMES, "manual-id-1", "manual-id-2"}
+LISTING = ('{{.ID}}|{{.Label "com.docker.compose.project"}}|{{.Label "com.docker.compose.project.working_dir"}}'
+           '|{{.Names}}|{{.Image}}|{{.Status}}|{{.Ports}}')
 UNREACHABLE = "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?"
 # The last two are the checks deploy-app.sh makes before it takes its lock.
 READS = (["ps"], ["inspect"], ["network", "ls"], ["volume", "ls"], ["compose", "version"], ["info"])
@@ -90,9 +114,9 @@ def project_of(value):
     return value[len(PROJECT_FILTER):]
 
 def remove_containers(ids, with_volumes):  # with_volumes skips volumes still in use, like Docker
-    for project, mounts in [containers.pop(container) for container in ids]:
+    for project, mounts, *_ in [containers.pop(container) for container in ids]:
         for name in mounts:
-            in_use = any(name in other for _, other in containers.values())
+            in_use = any(name in entry[1] for entry in containers.values())
             if with_volumes and not in_use and volumes.get(name) in ('named:' + project, 'anonymous'):
                 del volumes[name]
     state['fail'] += state.pop('fail_after_down', [])
@@ -101,7 +125,7 @@ if any(' '.join(args).startswith(command) for command in state['fail']):
     error = UNREACHABLE
 elif filtered(['ps', '-aq'], 4) is not None:
     project = project_of(args[-1])
-    out = [c for c, (p, _) in containers.items() if p == project]
+    out = [c for c, entry in containers.items() if entry[0] == project]
 elif args[:1] == ['inspect']:
     if args[1:3] != ['--format', TEMPLATE] or len(args) < 4:
         sys.exit(f'fake docker: unsupported inspect {args}')
@@ -117,7 +141,7 @@ elif filtered(['volume', 'ls', '-q'], 5) is not None:
     out = [v for v, kind in volumes.items() if kind == 'named:' + project]
 elif args[:2] == ['volume', 'rm'] and len(args) > 2:
     for name in args[2:]:
-        users = [c for c, (_, mounts) in containers.items() if name in mounts]
+        users = [c for c, entry in containers.items() if name in entry[1]]
         if name not in volumes:
             error = f'Error response from daemon: get {name}: no such volume'
         elif users:
@@ -131,7 +155,20 @@ elif args[:2] == ['rm', '-f'] and len(args) > 2:
     remove_containers(args[2:], False)
 elif args[:2] == ['compose', '--project-name'] and args[3] == '--file' and args[5:7] == ['down', '--remove-orphans'] \
         and args[7:] in ([], ['--volumes']):
-    remove_containers([c for c, (p, _) in containers.items() if p == args[2]], args[7:] == ['--volumes'])
+    remove_containers([c for c, entry in containers.items() if entry[0] == args[2]], args[7:] == ['--volumes'])
+    for name in [n for n, p in networks.items() if p == args[2]]:
+        del networks[name]
+elif args == ['ps', '-a', '--format', LISTING]:
+    containers.update(state.pop('start_before_listing', {}))  # for example a deployment that started meanwhile
+    for container, entry in containers.items():
+        project, _, name, image, directory = entry + [container, '', ''][len(entry) - 2:]
+        out.append(f'{container}|{project or ""}|{directory}|{name}|{image}|Up 2 hours|')
+elif args[:2] == ['compose', '--project-name'] and args[3:] == ['down', '--remove-orphans']:
+    # A project taken down by its name alone. Compose would read a compose file
+    # in the current directory instead.
+    if os.getcwd() != '/':
+        sys.exit(f'fake docker: compose without --file in {os.getcwd()}')
+    remove_containers([c for c, entry in containers.items() if entry[0] == args[2]], False)
     for name in [n for n, p in networks.items() if p == args[2]]:
         del networks[name]
 elif args[:2] == ['image', 'rm'] and len(args) == 3:
@@ -146,7 +183,7 @@ with open(os.environ['FAKE_DOCKER_STATE'], 'w') as f:
     json.dump(state, f)
 sys.stdout.write(''.join(line + '\n' for line in out))
 sys.exit(error)
-'''.replace("UNREACHABLE", repr(UNREACHABLE))
+'''.replace("UNREACHABLE", repr(UNREACHABLE)).replace("LISTING", repr(LISTING))
 FAKE_RM = FAKE_START + r'''
 lock = os.environ['FAKE_DOCKER_LOCK']
 directory = os.path.dirname(lock)
@@ -241,7 +278,7 @@ class UninstallAppTests(unittest.TestCase):
         # changing Docker call and every removal found the lock held, and the
         # lock file was removed on its own, once nothing else was left.
         changes = [entry for entry in self.log(self.calls)
-                   if not any(entry["args"][:len(read)] == read for read in READS)]
+                   if not any(entry["args"][:len(read)] == read for read in READS) and not OTHERS & set(entry["args"])]
         removals = self.log(self.removals)
         self.assertEqual([entry["args"] for entry in changes + removals if entry["lock"] != "held"], [],
                          "changed while a deployment could start")
@@ -423,6 +460,7 @@ class UninstallAppTests(unittest.TestCase):
         self.assertEqual(self.docker_calls(), [
             ["ps", "-aq", "--filter", f"label=com.docker.compose.project={PROJECT}"],
             self.down(),
+            ["ps", "-a", "--format", LISTING],  # other Perodua containers: none
         ])
         self.assertEqual(self.left_volumes(), set(VOLUMES))
         self.assertFalse(self.app.exists())
@@ -462,9 +500,174 @@ class UninstallAppTests(unittest.TestCase):
         result = self.run_script("--confirm", PROJECT)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("was not created by deploy-app.sh", result.stderr)
-        self.assertEqual(self.docker_calls(), [])
+        # Only a look for an older deployment, which finds none here.
+        self.assertEqual(self.docker_calls(), [["ps", "-a", "--format", LISTING]])
         self.assertTrue(self.app.exists())
         self.assertFalse((self.app / ".deploy.lock").exists())  # no lock file left in such a directory
+
+    # ── other Perodua containers, such as an App the older package deployed ─
+    def with_old_deployment(self, **extra):
+        self.set_state(containers={**CONTAINERS, **OLD_CONTAINERS, **extra},
+                       volumes={**VOLUMES, **OLD_VOLUMES},
+                       networks={**NETWORKS, "old-network": OLD_PROJECT})
+
+    def old_down(self):
+        return ["compose", "--project-name", OLD_PROJECT, "down", "--remove-orphans"]
+
+    def test_other_perodua_containers_are_listed_but_kept_without_a_terminal(self):
+        self.with_old_deployment()
+        result = self.run_script("--confirm", PROJECT)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f'SUCCESS: the App deployment "{PROJECT}" was removed.\n\n'
+                      'Other containers with "perodua" in their name or image are on this server.', result.stdout)
+        self.assertIn(f"Compose project {OLD_PROJECT} (from /opt/perodua-odoo):\n"
+                      f"  perodua-odoo-odoo-1  {OLD_IMAGE}  Up 2 hours\n"
+                      f"  perodua-odoo-web-1  {OLD_IMAGE}-web  Up 2 hours\n"
+                      f"Not deleted without a terminal. To delete them: sudo docker compose --project-name {OLD_PROJECT} down\n",
+                      result.stdout)
+        # Only this deployment was removed; the older one and its data stay.
+        self.assertEqual(self.changes(), [self.down(), ["volume", "rm", "anon-reused"], ["volume", "rm", "anon-new"]])
+        self.assertEqual(sorted(self.left("containers")), ["old-id-1", "old-id-2", "other-id-1"])
+        self.assertLessEqual(set(OLD_VOLUMES), self.left_volumes())
+
+    def test_other_perodua_containers_are_deleted_only_after_a_yes(self):
+        for answers, deleted, volumes_deleted in (
+                ([b"n"], False, False),
+                ([b""], False, False),  # Enter keeps them too
+                ([b"y", b"n"], True, False),
+                ([b"y", b""], True, False),
+                ([b"y", b"y"], True, True)):
+            with self.subTest(answers=answers):
+                self.setUp()
+                self.with_old_deployment()
+                code, output = self.on_terminal(["--confirm", PROJECT], answers)
+                self.assertEqual(code, 0, output)
+                self.assertIn("Is this an old deployment? Delete these containers [y/N]: ", output)
+                old_left = [c for c in self.left("containers") if c.startswith("old-")]
+                self.assertEqual(old_left, [] if deleted else ["old-id-1", "old-id-2"])
+                self.assertEqual(self.old_down() in self.changes(), deleted)
+                self.assertEqual("old-network" in self.left("networks"), not deleted)
+                self.assertEqual(set(OLD_VOLUMES) & self.left_volumes(),
+                                 set() if volumes_deleted else set(OLD_VOLUMES))
+                if not deleted:
+                    self.assertIn("Kept them.", output)
+                    self.assertNotIn("volumes they used", output)
+                    continue
+                # The anonymous volume too, which "down" keeps, and the project's
+                # volume that no container mounts; each deleted by name.
+                self.assertIn(f"Also delete the volumes they used ({OLD_VOLUME} old-anon old-unused)? "
+                              "Attachments in them cannot be recovered. [y/N]: ", output)
+                self.assertIn(f"Their images stay. To free the disk space: sudo docker image rm {OLD_IMAGE} {OLD_IMAGE}-web",
+                              output)
+                if volumes_deleted:
+                    self.assertIn(f"Deleted volume {OLD_VOLUME}\nDeleted volume old-anon\nDeleted volume old-unused\n",
+                                  output)
+                    self.assertEqual(self.changes()[-3:], [["volume", "rm", volume] for volume in OLD_VOLUMES])
+                else:
+                    self.assertIn("Kept the volumes.", output)
+
+    def test_without_a_deployment_an_older_one_is_offered(self):
+        # Only the older package's App is here: no deployment directory at all.
+        self.with_old_deployment()
+        missing = self.app.parent / "no-such-app"
+        code, output = self.on_terminal(["--dir", str(missing)], [b"y", b"y"])
+        self.assertEqual(code, 0, output)
+        self.assertTrue(output.startswith(f"No App deployment at {missing}.\n\nOther containers with"), output)
+        self.assertNotIn("Nothing was changed", output)
+        self.assertEqual(self.changes(), [self.old_down(), *(["volume", "rm", volume] for volume in OLD_VOLUMES)])
+        self.assertEqual(sorted(self.left("containers")), ["fixture-id-1", "fixture-id-2", "other-id-1"])
+
+    def test_without_a_deployment_kept_containers_still_fail_the_uninstall(self):
+        # Nothing was removed: the answer "n", or no terminal to ask on.
+        self.with_old_deployment()
+        missing = self.app.parent / "no-such-app"
+        code, output = self.on_terminal(["--dir", str(missing)], [b"n"])
+        self.assertEqual(code, 1, output)
+        self.assertIn(f"Kept them.\nERROR: No App deployment at {missing}. Nothing was changed.", output)
+        result = self.run_script("--dir", str(missing))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Not deleted without a terminal.", result.stdout)
+        self.assertIn(f"No App deployment at {missing}. Nothing was changed.", result.stderr)
+        self.assertEqual(self.changes(), [])
+
+    def test_without_a_deployment_or_an_older_one_nothing_changes(self):
+        result = self.run_script("--dir", str(self.app.parent / "no-such-app"), "--confirm", PROJECT)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("No App deployment at", result.stderr)
+        self.assertIn("Nothing was changed", result.stderr)
+        self.assertEqual(self.changes(), [])
+
+    def test_perodua_containers_without_a_compose_project_are_removed_by_id(self):
+        self.with_old_deployment(**MANUAL)
+        code, output = self.on_terminal(["--confirm", PROJECT], [b"n", b"y"])
+        self.assertEqual(code, 0, output)
+        self.assertIn("Containers without a Compose project:\n"
+                      "  Perodua-Manual  busybox  Up 2 hours\n"
+                      f"  legacy-app  {OLD_IMAGE}  Up 2 hours\n"
+                      "Is this an old deployment?", output)
+        self.assertNotIn("unrelated", output)
+        self.assertIn(["rm", "-f", "manual-id-1", "manual-id-2"], self.changes())
+        self.assertNotIn(self.old_down(), self.changes())
+        self.assertEqual(sorted(c for c in self.left("containers") if c.startswith(("old-", "manual-"))),
+                         ["manual-id-3", "old-id-1", "old-id-2"])
+
+    def test_a_failed_delete_is_reported_and_the_rest_goes_on(self):
+        self.with_old_deployment(**MANUAL)
+        self.set_state(**{**json.loads(self.state.read_text()), "fail": ["compose --project-name perodua-odoo down"]})
+        code, output = self.on_terminal(["--confirm", PROJECT], [b"y", b"y"])
+        self.assertEqual(code, 0, output)
+        self.assertIn(f"{UNREACHABLE}\nCould not delete them all; see the error above.\n", output)
+        self.assertNotIn("volumes they used", output)
+        self.assertIn("old-id-1", self.left("containers"))
+        self.assertNotIn("manual-id-1", self.left("containers"))
+
+    def test_a_deployment_started_after_the_uninstall_is_not_offered(self):
+        # Once the lock file is gone a deployment may start here again. Its
+        # containers carry this project, and are not offered for deletion.
+        started = {"new-id-1": [PROJECT, [], f"{PROJECT}-odoo-1", ODOO, str(self.app)]}
+        self.set_state(start_before_listing=started)
+        code, output = self.on_terminal(["--confirm", PROJECT], [])
+        self.assertEqual(code, 0, output)
+        self.assertNotIn("Other containers", output)
+        self.assertIn("new-id-1", self.left("containers"))
+
+    def on_terminal(self, args, answers):
+        """The uninstall on a pseudo-terminal, answering its y/N questions in order."""
+        pid, terminal = pty.fork()
+        if pid == 0:
+            try:
+                command = ["bash", str(SCRIPT), "--role", "app", *args]
+                if "--dir" not in args:
+                    command += ["--dir", str(self.app)]
+                os.execvpe("bash", command, self.env)
+            finally:
+                os._exit(127)
+        output, pending, status = b"", list(answers), None
+        deadline = time.monotonic() + 30
+        try:
+            while True:
+                self.assertLess(time.monotonic(), deadline, "timed out: " + output.decode(errors="replace"))
+                if select.select([terminal], [], [], 0.1)[0]:
+                    try:
+                        chunk = os.read(terminal, 65536)
+                    except OSError:
+                        break
+                    if not chunk:
+                        break
+                    output += chunk
+                    if pending and output.rstrip().endswith(b"[y/N]:"):
+                        os.write(terminal, pending.pop(0) + b"\n")
+            status = os.waitpid(pid, 0)[1]
+        finally:
+            if status is None:
+                os.kill(pid, signal.SIGKILL)
+                os.waitpid(pid, 0)
+            os.close(terminal)
+        output = output.decode(errors="replace").replace("\r\n", "\n")
+        self.assertEqual(pending, [], "not asked: " + output)
+        self.check_lock()
+        return os.waitstatus_to_exitcode(status), output
 
     def test_while_a_deployment_runs_nothing_is_listed_or_changed(self):
         self.hold_lock()

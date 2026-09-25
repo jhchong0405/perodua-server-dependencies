@@ -22,7 +22,10 @@ every database on this server; it needs a terminal.
 --role app stops and removes the App containers, their anonymous volumes and
 the network, and deletes the deployment directory (default /opt/perodua-app),
 including its copy of the database password. The attachments volume and the
-images are kept; --purge removes them too.
+images are kept; --purge removes them too. Other containers with "perodua" in
+their name or image, such as the App of the earlier perodua-odoo package, are
+listed afterwards, or when there is no deployment, and deleted after a "y" on a
+terminal.
 
 The plan is shown first. Type the database or project name to confirm, or pass
 it with --confirm for unattended use.
@@ -75,12 +78,107 @@ confirm_purge() {
 }
 
 # ── App server ────────────────────────────────────────────────────────────────
+# Containers with "perodua" in their name or image that this uninstall does not
+# remove: for example the App that the earlier perodua-odoo package deployed
+# (Compose project perodua-odoo), or a copy started by hand. They are listed by
+# Compose project, and each project is deleted only after a "y" on a terminal.
+# The volumes its containers used are asked about separately; the images stay.
+# $1: the project this uninstall removes, $2: a line to print first. Returns 1
+# when there are none, and sets OTHERS_DELETED=1 once any are deleted.
+OTHERS_DELETED=0
+other_perodua_containers() {
+    local skip=$1 intro=$2 rows=() groups=() ids=() lines=() images=() volumes=() listed
+    local row id project dir name image status ports group from answer volume error
+    local format='{{.ID}}|{{.Label "com.docker.compose.project"}}|{{.Label "com.docker.compose.project.working_dir"}}'
+    format+='|{{.Names}}|{{.Image}}|{{.Status}}|{{.Ports}}'
+    mapfile -t rows < <(docker ps -a --format "$format" 2>/dev/null \
+        | awk -F'|' -v skip="$skip" 'tolower($4 "|" $5) ~ /perodua/ && (skip == "" || $2 != skip)')
+    ((${#rows[@]})) || return 1
+    [[ -z $intro ]] || printf '%s\n' "$intro"
+    printf '\nOther containers with "perodua" in their name or image are on this server. The earlier\n'
+    printf 'perodua-odoo package deployed its App as the Compose project perodua-odoo.\n'
+    for row in "${rows[@]}"; do
+        IFS='|' read -r id project dir name image status ports <<< "$row"
+        [[ " ${groups[*]} " == *" ${project:--} "* ]] || groups+=("${project:--}")
+    done
+    for group in "${groups[@]}"; do
+        ids=() lines=() images=() volumes=() from=''
+        for row in "${rows[@]}"; do
+            IFS='|' read -r id project dir name image status ports <<< "$row"
+            [[ ${project:--} == "$group" ]] || continue
+            ids+=("$id") lines+=("  $name  $image  $status${ports:+  $ports}") from=${from:-$dir}
+            [[ " ${images[*]} " == *" $image "* ]] || images+=("$image")
+        done
+        if [[ $group == - ]]; then
+            group=''
+            printf '\nContainers without a Compose project:\n'
+        else
+            printf '\nCompose project %s%s:\n' "$group" "${from:+ (from $from)}"
+        fi
+        printf '%s\n' "${lines[@]}"
+        if ! has_terminal; then
+            if [[ -n $group ]]; then
+                printf 'Not deleted without a terminal. To delete them: sudo docker compose --project-name %s down\n' "$group"
+            else
+                printf 'Not deleted without a terminal. To delete them: sudo docker rm -f %s\n' "${ids[*]}"
+            fi
+            continue
+        fi
+        IFS= read -r -p 'Is this an old deployment? Delete these containers [y/N]: ' answer </dev/tty || answer=''
+        if [[ $answer != [Yy]* ]]; then
+            printf 'Kept them.\n'
+            continue
+        fi
+        # Read while the containers exist: the volumes they mount, named or
+        # created by Docker for them (such as /mnt/extra-addons), and the
+        # project's other volumes.
+        listed=$(docker inspect --format '{{range .Mounts}}{{if eq .Type "volume"}}{{println .Name}}{{end}}{{end}}' "${ids[@]}" 2>/dev/null || true)
+        [[ -z $group ]] || listed+=$'\n'$(docker volume ls -q --filter "label=com.docker.compose.project=$group" 2>/dev/null || true)
+        mapfile -t volumes < <(sed '/^$/d' <<< "$listed" | awk '!seen[$0]++')
+        # Compose would read a compose file in the current directory; / has none.
+        if [[ -n $group ]]; then
+            (cd / && docker compose --project-name "$group" down --remove-orphans) \
+                || { printf 'Could not delete them all; see the error above.\n'; continue; }
+        else
+            docker rm -f "${ids[@]}" >/dev/null || { printf 'Could not delete them all; see the error above.\n'; continue; }
+        fi
+        OTHERS_DELETED=1
+        printf 'Deleted the containers.\n'
+        if ((${#volumes[@]})); then
+            IFS= read -r -p "Also delete the volumes they used (${volumes[*]})? Attachments in them cannot be recovered. [y/N]: " \
+                answer </dev/tty || answer=''
+            if [[ $answer == [Yy]* ]]; then
+                for volume in "${volumes[@]}"; do
+                    if error=$(docker volume rm "$volume" 2>&1 >/dev/null); then
+                        printf 'Deleted volume %s\n' "$volume"
+                    else
+                        printf 'Kept volume %s: %s\n' "$volume" "$error"
+                    fi
+                done
+            else
+                printf 'Kept the volumes.\n'
+            fi
+        fi
+        printf 'Their images stay. To free the disk space: sudo docker image rm %s\n' "${images[*]}"
+    done
+}
+
 uninstall_app() {
-    local project images=() image label listed ids=() mounted anonymous=() anon error volume
+    local project images=() image label listed ids=() mounted anonymous=() anon error volume missing=''
     [[ $DEPLOY_DIR == /* && $DEPLOY_DIR != / ]] || die '--dir must be an absolute directory path, not /.'
-    [[ -d $DEPLOY_DIR && ! -L $DEPLOY_DIR ]] || die "No App deployment at $DEPLOY_DIR. Nothing was changed."
-    [[ -f $DEPLOY_DIR/.deployment-identity ]] \
-        || die "$DEPLOY_DIR was not created by deploy-app.sh (no .deployment-identity). Nothing was changed."
+    if [[ ! -d $DEPLOY_DIR || -L $DEPLOY_DIR ]]; then
+        missing="No App deployment at $DEPLOY_DIR."
+    elif [[ ! -f $DEPLOY_DIR/.deployment-identity ]]; then
+        missing="$DEPLOY_DIR was not created by deploy-app.sh (no .deployment-identity)."
+    fi
+    if [[ -n $missing ]]; then
+        # Nothing of deploy-app.sh to remove here; an older deployment may still run.
+        if command -v docker >/dev/null; then
+            other_perodua_containers '' "$missing" || true
+            ((OTHERS_DELETED == 0)) || exit 0
+        fi
+        die "$missing Nothing was changed."
+    fi
     # deploy-app.sh holds this lock while it runs. It is held here until the
     # script exits, so no deployment can create containers between the listing
     # below and their removal, including while the plan waits for confirmation.
@@ -168,6 +266,7 @@ uninstall_app() {
     rm -f -- "$DEPLOY_DIR/.deploy.lock"
     rmdir -- "$DEPLOY_DIR"
     printf 'SUCCESS: the App deployment "%s" was removed.\n' "$project"
+    other_perodua_containers "$project" '' || true
 }
 
 # ── DB server ─────────────────────────────────────────────────────────────────
