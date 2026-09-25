@@ -125,6 +125,7 @@ uninstall_app() {
         printf 'The attachments are deleted and cannot be recovered.\n'
     else
         printf 'Kept: the attachments volume %s and the downloaded images (--purge removes them).\n' "$volume"
+        printf 'deploy-app.sh of this project later uses the volume again with the same database, and asks before deleting it for a new empty one.\n'
     fi
     printf 'The database on the DB server is not touched.\n'
     confirm "$project"
@@ -228,6 +229,14 @@ purge_execute() {
         || die 'apt-get purge failed; see /var/tmp/uninstall-postgresql.log.'
     rm -rf /var/lib/postgresql /etc/postgresql /etc/postgresql-common /var/log/postgresql /run/postgresql "$STATE_BASE"
     rm -f /var/tmp/uninstall-postgresql.log
+    # The start-after-Docker settings that deploy-db.sh wrote, if any.
+    local after_docker
+    for after_docker in /etc/systemd/system/postgresql@16-*.service.d/perodua-after-docker.conf; do
+        [[ -f $after_docker ]] || continue
+        rm -f -- "$after_docker"
+        rmdir --ignore-fail-on-non-empty -- "${after_docker%/*}"
+    done
+    if has_systemd; then systemctl daemon-reload; fi
     printf 'PostgreSQL 16 was uninstalled. Libraries it pulled in stay; "sudo apt autoremove" lists them.\n'
 }
 
@@ -320,6 +329,11 @@ uninstall_db() {
             new_listen=$(tr ',' '\n' <<< "$current_listen" | { grep -vxF "$listen_ip" || true; } | paste -sd ',' -)
         fi
     fi
+    # deploy-db.sh made PostgreSQL start after Docker when it listens on Docker's address.
+    local after_docker=/etc/systemd/system/postgresql@16-$PG_CLUSTER.service.d/perodua-after-docker.conf after_docker_action=''
+    if [[ $listen_action == remove ]] && grep -qxF "# Listen address: $listen_ip" "$after_docker" 2>/dev/null; then
+        after_docker_action=remove
+    fi
     guided=${CONFIG:-$SCRIPT_DIR/deploy.conf}
     if [[ -f $guided && $(conf_value DB_NAME "$guided") == "$db_name" ]]; then
         if head -n 1 "$guided" | grep -q '^# Created by deploy-db.sh from your answers'; then conf_action=delete; else conf_action=keep; fi
@@ -336,6 +350,7 @@ uninstall_db() {
         remove) printf '  - stop listening on %s (PostgreSQL restarts briefly)\n' "$listen_ip" ;;
         keep) printf '  - keep listening on %s: another deployment uses it\n' "$listen_ip" ;;
     esac
+    [[ -z $after_docker_action ]] || printf '  - no longer start PostgreSQL after Docker at boot (%s)\n' "$after_docker"
     printf '  - delete the deployment records in %s\n' "$state"
     case $conf_action in
         delete) printf '  - delete %s (written by the guided setup)\n' "$guided" ;;
@@ -397,6 +412,12 @@ PY
     printf 'Removed the access rules for %s\n' "$db_name"
     if [[ $listen_action == remove ]]; then
         pg_conftool 16 "$PG_CLUSTER" set listen_addresses "${new_listen:-localhost}"
+        if [[ $after_docker_action == remove ]]; then
+            rm -f -- "$after_docker"
+            rmdir --ignore-fail-on-non-empty -- "${after_docker%/*}"
+            if has_systemd; then systemctl daemon-reload; fi
+            printf 'PostgreSQL no longer waits for Docker at boot.\n'
+        fi
         restart_cluster
         printf 'PostgreSQL now listens on %s\n' "$(admin -c 'SHOW listen_addresses')"
     fi

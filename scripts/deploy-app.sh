@@ -98,15 +98,91 @@ prompt() {
     [[ -z $answer ]] || printf -v "$name" '%s' "$answer"
     [[ -n ${!name} ]] || fail "$name is required"
 }
+db_host_problem() {  # why DB_HOST cannot be used, if it cannot
+    case $DB_HOST in
+        localhost|127.*|::1|0.0.0.0)
+            printf '%s would be the App container itself, not the database. With the database on this server, use the DB_HOST that deploy-db.sh printed (Docker'"'"'s address of this server, usually 172.17.0.1).' "$DB_HOST" ;;
+        *) [[ $DB_HOST =~ ^[A-Za-z0-9][A-Za-z0-9_.:-]*$ ]] || printf 'DB_HOST must be an IP address or hostname (no URL or shell syntax).' ;;
+    esac
+}
+local_database() {  # the settings deploy-db.sh recorded, when it set up exactly one database on this server
+    local records=() line
+    mapfile -t records < <(find /var/lib/perodua-db-deploy -mindepth 3 -maxdepth 3 -name connection.txt 2>/dev/null)
+    ((${#records[@]} == 1)) || return 1
+    while IFS= read -r line || [[ -n $line ]]; do
+        if [[ $line =~ ^(DB_HOST|DB_PORT|DB_NAME|DB_USER)=([A-Za-z0-9_.:-]+)$ ]]; then
+            printf -v "${BASH_REMATCH[1]}" '%s' "${BASH_REMATCH[2]}"
+        fi
+    done < "${records[0]}"
+}
+server_addresses() {  # this server's own IPv4 addresses, without loopback and Docker's
+    local gateways=() address
+    if command -v docker >/dev/null; then
+        # shellcheck disable=SC2046 # one argument per network ID
+        read -r -d '' -a gateways < <(docker network inspect $(docker network ls -q 2>/dev/null) \
+            --format '{{range .IPAM.Config}}{{.Gateway}} {{end}}' 2>/dev/null) || true
+    fi
+    for address in $(hostname -I 2>/dev/null); do
+        [[ $address == *.* && $address != 127.* && $address != 169.254.* ]] || continue
+        [[ " ${gateways[*]} " != *" $address "* ]] || continue
+        printf '%s\n' "$address"
+    done
+}
+is_private_ipv4() { [[ $1 =~ ^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.) ]]; }
+public_addresses() {
+    local address
+    for address in $(server_addresses); do is_private_ipv4 "$address" || printf '%s\n' "$address"; done
+}
+choose_bind_ip() {
+    local private=() public=() options answer default number=1 address
+    for address in $(server_addresses); do
+        if is_private_ipv4 "$address"; then private+=("$address"); else public+=("$address"); fi
+    done
+    options=(127.0.0.1 "${private[@]}" 0.0.0.0)
+    printf '\nWho may open the web page?\n'
+    printf '  1) Only this server (127.0.0.1): open it from your computer through an SSH tunnel\n'
+    for address in "${private[@]}"; do
+        number=$((number + 1))
+        printf '  %s) Computers on the private network, through %s\n' "$number" "$address"
+    done
+    printf '  %s) Every computer that can reach this server (all addresses)\n' "${#options[@]}"
+    default=1
+    ((${#private[@]} == 0)) || default=2
+    while :; do
+        read -r -p "Choose [$default]: " answer || fail 'Input cancelled'
+        answer=${answer:-$default}
+        if [[ ! $answer =~ ^[1-9][0-9]?$ ]] || ((answer > ${#options[@]})); then
+            printf 'Enter a number from 1 to %s.\n' "${#options[@]}"
+            continue
+        fi
+        BIND_IP=${options[answer - 1]}
+        [[ $BIND_IP == 0.0.0.0 && ${#public[@]} -gt 0 ]] || break
+        printf '%s is a public internet address: anyone on the internet could open the page and sign in with the UAT passwords in the README, unless a cloud firewall (security group) blocks port %s. Docker opens published ports past ufw.\n' "${public[*]}" "$HTTP_PORT"
+        read -r -p 'Open it on every address anyway? [y/N]: ' answer || fail 'Input cancelled'
+        [[ ${answer:-n} != [Yy]* ]] || break
+    done
+}
 # Supplying a complete configuration avoids repeated prompts on subsequent runs.
 if [[ -z $CONFIG ]]; then
-    prompt DB_HOST 'Database server IP / hostname'
+    if ((NON_INTERACTIVE == 0)) && local_database; then
+        printf 'deploy-db.sh set up the database on this server: its settings are the defaults below.\n'
+    fi
+    while :; do
+        prompt DB_HOST 'Database server IP / hostname'
+        problem=$(db_host_problem)
+        [[ -n $problem ]] || break
+        ((NON_INTERACTIVE == 0)) || fail "$problem"
+        printf '%s\n' "$problem"
+        DB_HOST=''
+    done
     prompt DB_PORT 'Database port'
     prompt DB_NAME 'Application database name'
     prompt DB_USER 'Database username'
     prompt HTTP_PORT 'Web port that browsers open on this server'
+    ((NON_INTERACTIVE)) || choose_bind_ip
 fi
-[[ $DB_HOST =~ ^[A-Za-z0-9][A-Za-z0-9_.:-]*$ ]] || fail 'DB_HOST must be an IP address or hostname (no URL or shell syntax)'
+problem=$(db_host_problem)
+[[ -z $problem ]] || fail "$problem"
 for key in DB_NAME DB_USER; do
     [[ ${!key} =~ ^[A-Za-z_][A-Za-z0-9_-]{0,62}$ ]] || fail "$key must be a simple database identifier"
 done
@@ -152,12 +228,19 @@ for container in $containers; do
     owner=$(docker inspect --format '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}' "$container")
     [[ $owner == "$DEPLOY_DIR" ]] || fail 'PROJECT_NAME is already used from a different directory'
 done
+FILESTORE_VOLUME=${PROJECT_NAME}_filestore ADOPTED=0
 if [[ ! -e $DEPLOY_DIR/.deployment-identity ]]; then
     for kind in volume network; do
         existing=$(docker "$kind" ls -q --filter "label=com.docker.compose.project=$PROJECT_NAME")
+        # An App uninstall keeps the attachments volume. It is used again below
+        # with the same database, or offered for deletion for a new empty one.
+        if [[ $kind == volume && $existing == "$FILESTORE_VOLUME" ]]; then ADOPTED=1; continue; fi
         [[ -z $existing ]] || fail 'PROJECT_NAME already owns Docker resources; choose a new project name'
     done
 fi
+# Whether the volume, and so perhaps attachments, existed before this run.
+LEFTOVER=0
+if docker volume inspect "$FILESTORE_VOLUME" >/dev/null 2>&1; then LEFTOVER=1; fi
 if [[ -n $DB_PASSWORD_FILE ]]; then
     password=$(<"$DB_PASSWORD_FILE")
 elif [[ -r $DEPLOY_DIR/secrets/db_password ]]; then
@@ -214,6 +297,12 @@ pull_image() {
     done
     printf 'Pulled pinned image: %s\n' "${image%@*}"
 }
+if [[ -n $CONFIG && $BIND_IP == 0.0.0.0 ]]; then  # asked on the terminal otherwise
+    exposed=$(public_addresses | paste -sd ' ' -)
+    if [[ -n $exposed ]]; then
+        printf 'Warning: BIND_IP=0.0.0.0 opens the web page on every address of this server, including the public %s. Unless a cloud firewall (security group) blocks port %s, anyone on the internet can sign in with the UAT passwords. Docker opens published ports past ufw.\n' "$exposed" "$HTTP_PORT" >&2
+    fi
+fi
 pull_image "$ODOO_IMAGE"
 pull_image "$WEB_IMAGE"
 
@@ -453,12 +542,31 @@ uat_setup() {
     state=$(preflight verify-fresh)
     [[ $state == VERIFIED\ * ]] || fail 'Fresh UAT database failed its post-initialization checks'
 }
+clear_leftover_attachments() {
+    # Files an earlier deployment of this project left in the volume belong to
+    # that deployment's database, not to a new empty one.
+    local files answer
+    files=$(compose run --rm --no-deps -T odoo bash -c 'find /var/lib/odoo/filestore -type f 2>/dev/null | wc -l' </dev/null) \
+        || fail "Cannot read the attachments volume $FILESTORE_VOLUME"
+    [[ $files =~ ^[0-9]+$ ]] || fail "Cannot read the attachments volume $FILESTORE_VOLUME"
+    ((files > 0)) || return 0
+    printf 'The attachments volume %s still holds %s files from an earlier deployment of this project. They belong to its database, so a new UAT system cannot use them.\n' "$FILESTORE_VOLUME" "$files"
+    if ((NON_INTERACTIVE)) || [[ ! -t 0 ]]; then
+        fail "Delete the volume (sudo docker volume rm $FILESTORE_VOLUME) or set another PROJECT_NAME, then rerun. The database was not changed"
+    fi
+    read -r -p "Delete $FILESTORE_VOLUME and continue? [y/N]: " answer || fail 'Input cancelled'
+    [[ ${answer:-n} == [Yy]* ]] \
+        || fail "Kept $FILESTORE_VOLUME. Delete it (sudo docker volume rm $FILESTORE_VOLUME) or set another PROJECT_NAME, then rerun. The database was not changed"
+    docker volume rm "$FILESTORE_VOLUME" >/dev/null || fail "Could not delete $FILESTORE_VOLUME"
+    printf 'Deleted %s.\n' "$FILESTORE_VOLUME"
+}
 state=$(preflight check)
 FRESH=0
 case $state in
     MISSING|EMPTY|MISSING_NO_CREATEDB)
         ((INIT_DB)) || fail 'Database is missing or empty. Restore a matching database, or create an empty one with deploy-db.sh DB_MODE=empty and rerun with --init-db'
         [[ $state != MISSING_NO_CREATEDB ]] || fail "Database $DB_NAME does not exist and $DB_USER may not create databases (by design). On the DB server run deploy-db.sh with DB_MODE=empty to create it, then rerun with --init-db"
+        ((LEFTOVER == 0)) || clear_leftover_attachments
         printf 'Initializing NEW UAT database %s without %s and without Odoo demo data.\n' "$DB_NAME" "$EXCLUDED_MODULE"
         printf 'Checking the pinned image before anything is written to the database...\n'
         if ! uat_helper guard --modules "$INIT_MODULES" --exclude "$EXCLUDED_MODULE" --odoo-config /etc/odoo/odoo.conf --json \
@@ -490,7 +598,11 @@ case $state in
         fi
         uat_setup
         FRESH=1 ;;
-    READY\ *) printf 'Existing initialized database accepted; initialization and module upgrades are skipped.\n' ;;
+    READY\ *)
+        printf 'Existing initialized database accepted; initialization and module upgrades are skipped.\n'
+        if ((ADOPTED)); then
+            printf 'Using the attachments volume %s that an earlier deployment of this project left; it is checked against the database below.\n' "$FILESTORE_VOLUME"
+        fi ;;
     *) fail 'Unexpected database preflight response' ;;
 esac
 if ((FRESH)); then
@@ -599,7 +711,12 @@ if ((FRESH)); then
     [[ $state == READY\ * ]] || fail 'Fresh UAT database could not be stamped READY'
 fi
 printf '\nDeployment verified: %s (%s)\n' "$RELEASE" "$REVISION"
-printf 'HTTP URL: http://%s:%s/app/\n' "${BIND_IP/0.0.0.0/<APP_SERVER_IP>}" "$HTTP_PORT"
+if [[ $BIND_IP == 127.0.0.1 ]]; then
+    printf 'HTTP URL: http://127.0.0.1:%s/app/ (this server only). From your computer: ssh -N -L %s:127.0.0.1:%s <user>@<APP_SERVER_IP>, then open http://localhost:%s/app/\n' \
+        "$HTTP_PORT" "$HTTP_PORT" "$HTTP_PORT" "$HTTP_PORT"
+else
+    printf 'HTTP URL: http://%s:%s/app/\n' "${BIND_IP/0.0.0.0/<APP_SERVER_IP>}" "$HTTP_PORT"
+fi
 printf 'Compose: %s/compose.yml\nFilestore volume: %s_filestore\n' "$DEPLOY_DIR" "$PROJECT_NAME"
 if ((FRESH)); then
     printf 'UAT administrators (UAT only, fixed password): whadmin, admin1, admin2 / perodua\n'

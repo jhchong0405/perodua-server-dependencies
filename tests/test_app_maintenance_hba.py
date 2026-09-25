@@ -59,6 +59,18 @@ class MaintenanceDatabaseHbaTests(unittest.TestCase):
         self.assertIn('host "postgres" "odoo" 10.233.10.11/32 scram-sha-256', result)
         self.assertTrue(result.endswith(EXISTING))
 
+    def test_several_app_networks_each_get_both_rules(self):
+        # An App on this server connects from any of Docker's networks.
+        result = self.write_hba('172.16.0.0/12,192.168.0.0/16')
+        generated = result.removesuffix(EXISTING).splitlines()
+        for network in ('172.16.0.0/12', '192.168.0.0/16'):
+            self.assertIn(f'host "postgres" "odoo" {network} scram-sha-256', generated)
+            self.assertIn(f'host "perodua_app_script" "odoo" {network} scram-sha-256', generated)
+        # The allow rules come before the database's reject rules.
+        self.assertLess(generated.index('host "perodua_app_script" "odoo" 192.168.0.0/16 scram-sha-256'),
+                        generated.index('host "perodua_app_script" all 0.0.0.0/0 reject'))
+        self.assertTrue(result.endswith(EXISTING))
+
     def test_local_only_deployment_has_no_remote_maintenance_exception(self):
         self.assertNotIn('host "postgres" "odoo" ', self.write_hba(''))
         self.write_hba('10.233.10.10/32')

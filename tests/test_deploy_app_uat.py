@@ -33,7 +33,12 @@ def reply(text='', code=0, err=''):
 if args[:2] == ['compose', 'version']: reply('Docker Compose version v2.39.4')
 if args and args[0] == 'info': reply('linux/x86_64' if '--format' in args else '')
 if args and args[0] in ('ps', 'pull'): reply()
-if len(args) > 1 and args[0] in ('volume', 'network') and args[1] == 'ls': reply()
+# FAKE_VOLUMES: the project's volumes that an uninstall left; FAKE_LEFTOVER:
+# the attachments volume existed before this run.
+if args[:2] == ['volume', 'ls']: reply(os.environ.get('FAKE_VOLUMES', ''))
+if args[:2] == ['network', 'ls']: reply()
+if args[:2] == ['volume', 'inspect']: reply(code=0 if os.environ.get('FAKE_LEFTOVER') else 1)
+if args[:2] == ['volume', 'rm']: reply()
 if args and args[0] == 'compose':
     if 'config' in args: reply()
     if 'up' in args: reply()
@@ -56,6 +61,8 @@ if args and args[0] == 'compose':
             if cmd[2] == 'demo-flag':
                 reply(os.environ.get('FAKE_DEMO_FLAG', '--without-demo=True'))
         if cmd[:1] == ['odoo']: reply('fake odoo init', int(os.environ.get('FAKE_INIT_EXIT', '0')))
+        if cmd[:2] == ['bash', '-c'] and '/var/lib/odoo/filestore' in cmd[2]:
+            reply(os.environ.get('FAKE_LEFTOVER_FILES', '0'))
         if cmd[:2] == ['bash', '-c'] and 'odoo shell' in cmd[2]:
             code = int(os.environ.get('FAKE_ADMINS_EXIT', '0'))
             reply('UAT admins: ready: whadmin, admin1, admin2' if code == 0 else 'boom', code)
@@ -114,6 +121,8 @@ class UatOrchestrationTests(unittest.TestCase):
                     steps.append('uat_guard ' + cmd[2])
                 elif cmd[:1] == ['odoo']:
                     steps.append('odoo ' + ' '.join(cmd[1:]))
+                elif cmd[:2] == ['bash', '-c'] and '/var/lib/odoo/filestore' in cmd[2]:
+                    steps.append('leftover check')
                 elif cmd[:2] == ['bash', '-c']:
                     steps.append('odoo shell < uat_admins.py' if 'uat_admins.py' in cmd[2] else 'bash')
                 elif cmd[:2] == ['python3', '-c']:
@@ -183,6 +192,94 @@ class UatOrchestrationTests(unittest.TestCase):
             self.assertNotIn('-u', args)
             # The database password never appears on a command line.
             self.assertFalse(any('--db_password' in a for a in args), args)
+
+    # ── attachments an earlier deployment of the project left ──────────────
+    FRESH_STEPS = ['uat_guard guard', 'uat_guard demo-flag']
+
+    def volume_removals(self):
+        return [args for args in self.calls() if args[:2] == ['volume', 'rm']]
+
+    def test_leftover_attachments_stop_a_new_system_without_a_terminal(self):
+        result = self.run_script('EMPTY', '--init-db', leftover='1', leftover_files='3')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('still holds 3 files from an earlier deployment', result.stdout)
+        self.assertIn('sudo docker volume rm perodua-uat-fixture_filestore', result.stdout)
+        self.assertIn('The database was not changed', result.stdout)
+        self.assertEqual(self.container_steps(), ['preflight check', 'leftover check'])
+        self.assertEqual(self.volume_removals(), [])
+
+    def test_a_leftover_volume_without_files_is_used_as_is(self):
+        result = self.run_script('EMPTY', '--init-db', leftover='1', leftover_files='0')
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(self.container_steps()[:4], ['preflight check', 'leftover check', *self.FRESH_STEPS])
+        self.assertEqual(self.volume_removals(), [])
+
+    def test_leftover_attachments_are_deleted_only_after_a_yes(self):
+        for answer, deleted in ((b'y', True), (b'', False)):
+            with self.subTest(answer=answer):
+                self.log.unlink(missing_ok=True)
+                code, output = self.run_on_terminal(answer, 'EMPTY', leftover='1', leftover_files='3')
+                self.assertIn('Delete perodua-uat-fixture_filestore and continue? [y/N]: ', output)
+                if deleted:
+                    self.assertEqual(code, 0, output)
+                    self.assertIn('Deleted perodua-uat-fixture_filestore.', output)
+                    self.assertEqual(self.volume_removals(), [['volume', 'rm', 'perodua-uat-fixture_filestore']])
+                    self.assertEqual(self.container_steps()[:4], ['preflight check', 'leftover check', *self.FRESH_STEPS])
+                else:
+                    self.assertNotEqual(code, 0)
+                    self.assertIn('Kept perodua-uat-fixture_filestore', output)
+                    self.assertEqual(self.volume_removals(), [])
+                    self.assertEqual(self.container_steps(), ['preflight check', 'leftover check'])
+
+    def test_a_volume_an_uninstall_kept_is_used_again_with_the_same_database(self):
+        # A new deployment directory; the project's attachments volume is still there.
+        result = self.run_script('READY 2', volumes='perodua-uat-fixture_filestore', leftover='1')
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn('Using the attachments volume perodua-uat-fixture_filestore that an earlier deployment', result.stdout)
+        self.assertEqual(self.container_steps(), ['preflight check', 'filestore check', 'up', 'http verify fresh=0'])
+        self.assertEqual(self.volume_removals(), [])
+
+    def test_other_resources_of_the_project_still_stop_a_new_directory(self):
+        result = self.run_script('READY 2', volumes='perodua-uat-fixture_data')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('PROJECT_NAME already owns Docker resources', result.stdout)
+        self.assertEqual(self.container_steps(), [])
+
+    def run_on_terminal(self, answer, check, **fake):
+        """deploy-app.sh on a pseudo-terminal, answering the one question it asks."""
+        import pty, select, time
+        self.env['FAKE_CHECK'] = check
+        self.env.update({f'FAKE_{k.upper()}': str(v) for k, v in fake.items()})
+        pid, master = pty.fork()
+        if pid == 0:
+            os.execvpe('bash', ['bash', str(SCRIPT), '--config', str(self.config),
+                                '--dir', str(self.deploy_dir), '--init-db'], self.env)
+        output, answered, deadline = b'', False, time.monotonic() + 60
+        try:
+            while time.monotonic() < deadline:
+                if select.select([master], [], [], 0.05)[0]:
+                    try:
+                        chunk = os.read(master, 65536)
+                    except OSError:
+                        chunk = b''
+                    output += chunk
+                if not answered and b'and continue? [y/N]: ' in output:
+                    os.write(master, answer + b'\n')
+                    answered = True
+                done, status = os.waitpid(pid, os.WNOHANG)
+                if done:
+                    while select.select([master], [], [], 0.1)[0]:
+                        try:
+                            chunk = os.read(master, 65536)
+                        except OSError:
+                            break
+                        if not chunk:
+                            break
+                        output += chunk
+                    return os.waitstatus_to_exitcode(status), output.decode(errors='replace')
+            self.fail('deploy-app.sh did not finish: ' + output.decode(errors='replace'))
+        finally:
+            os.close(master)
 
     def test_guard_refusal_stops_before_any_database_write(self):
         for code in (3, 2):  # refused, or could not be verified

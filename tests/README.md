@@ -26,10 +26,15 @@ from `base.user_admin`, one commit after all checks).
 pseudo-terminal with `--check-config`, so nothing is deployed. It checks:
 - the saved `deploy.conf` and its permissions, and that a later run asks nothing;
 - asking again after an unknown menu choice, an address that is not on this host,
-  an address that is not IPv4, an App address that is this server, or a declined
-  summary;
+  an address that is not IPv4, or a declined summary;
 - a CIDR for the App side;
 - Docker network addresses neither offered nor accepted as the internal IP;
+- the App on this server: Docker's bridge address as `DB_LISTEN_IP`, Docker's
+  default networks as `APP_CIDR` (a comma-separated list the configuration check
+  accepts), and no address questions; without Docker, the reason and the
+  question again;
+- this server's own address or `127.0.0.1` as the App address offers the
+  one-server setup, and "no" asks for the App server's IP again;
 - no file written when a restore is chosen, no terminal is available,
   `--config` is given or PostgreSQL is not installed.
 
@@ -37,8 +42,21 @@ Docker is a stub that reports Docker's multi-line output. The public-address
 warning needs a public address on the host, so it was checked on a real server
 instead. The test needs one non-loopback IPv4 address on the host and is skipped
 without one (for example inside `docker run --network none`). `test_deploy_app.py` also
-checks that the first interactive `deploy-app.sh` run asks for the web port and
-saves it.
+checks the first interactive `deploy-app.sh` run, with a stub `hostname` that
+gives the host one private and one public address:
+- it asks for the web port and saves it;
+- a database host of `127.0.0.1` is explained and asked again, and in a
+  configuration file it stops before any Docker call;
+- who may open the page: the private network is the default, this server only
+  binds `127.0.0.1`, a wrong number is asked again, and every address on a
+  server with a public address needs a "y" (a configuration file gets a
+  warning instead).
+
+`test_deploy_app_uat.py` also covers an attachments volume from an earlier
+deployment of the project. Files in it stop a new system without a terminal
+(with the delete command), and on a terminal they are deleted only after "y".
+An empty one is used as is. In a new directory, a volume that an uninstall kept
+is used again with the same database; other project resources still stop it.
 
 `test_uninstall_app.py` runs `uninstall.sh --role app` against a fake Docker CLI.
 The fake keeps containers, volumes and networks in a file, including those of
@@ -205,6 +223,13 @@ keeps its previous check, which requires the dataset module.
 - `--role db`: `status` shows the cluster online; `stop` closes an open
   connection and says so, the cluster is down and a second `stop` says it
   already is; `start` and `restart` bring it back with the same databases.
+
+One server: with a stub Docker that reports the listen address as Docker's,
+`deploy-db.sh` writes the setting that starts PostgreSQL after Docker, and a
+rerun keeps exactly one. The final message points to `deploy-app.sh` on this
+server. `uninstall.sh --role db` lists the setting and removes it with the
+listen address. systemd is not PID 1 in the container, so an actual boot order
+was checked on a real server.
 
 The last check, `check-uninstall-purge.py`, runs `--purge` on a pseudo-terminal:
 a wrong answer changes nothing, and `PURGE` removes the PostgreSQL 16 packages,

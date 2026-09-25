@@ -543,6 +543,31 @@ service_ok service-restart restart
     || die 'the databases changed across stop, start and restart'
 pass 'service.sh --role db: status, stop (closing and reporting an open connection), a repeated stop, start and restart; the databases stay'
 
+# ── one server: PostgreSQL on Docker's address starts after Docker ─────────────
+# A stub Docker reports 127.0.0.6 as a Docker network address of this server;
+# the container has no real Docker bridge. systemd is not PID 1 here, so this
+# checks the setting and its removal, not an actual boot.
+mkdir -p "$TEST_DIR/stub-docker"
+printf '%s\n' '#!/bin/sh' 'case "$*" in' '  "network ls -q") echo bridge ;;' '  "network inspect "*) echo "127.0.0.6 " ;;' \
+    '  *) exit 1 ;;' 'esac' > "$TEST_DIR/stub-docker/docker"
+chmod 755 "$TEST_DIR/stub-docker/docker"
+AFTER_DOCKER=/etc/systemd/system/postgresql@16-main.service.d/perodua-after-docker.conf
+write_empty_conf one_server app_one_server
+sed -i 's/^DB_LISTEN_IP=.*/DB_LISTEN_IP=127.0.0.6/' "$TEST_DIR/one_server.conf"
+PATH="$TEST_DIR/stub-docker:$PATH" deploy_ok one_server
+grep -qxF '# Listen address: 127.0.0.6' "$AFTER_DOCKER" && grep -qxF 'After=docker.service' "$AFTER_DOCKER" \
+    || die 'listening on a Docker address did not order PostgreSQL after Docker'
+grep -q 'PostgreSQL starts after Docker at boot' "$TEST_DIR/one_server.log" || die 'the start-after-Docker setting was not reported'
+grep -q 'Next, on this server: sudo bash deploy-app.sh --init-db' "$TEST_DIR/one_server.log" || die 'one server: the next step names the wrong server'
+PATH="$TEST_DIR/stub-docker:$PATH" deploy_ok one_server
+[[ $(grep -c 'After=docker.service' "$AFTER_DOCKER") == 1 ]] || die 'a rerun duplicated the start-after-Docker setting'
+bash "$SOURCE_DIR/scripts/uninstall.sh" --role db --config "$TEST_DIR/one_server.conf" --confirm one_server \
+    > "$TEST_DIR/uninst-one-server.log" 2>&1 || { cat "$TEST_DIR/uninst-one-server.log" >&2; die 'uninstall of the one-server deployment failed'; }
+grep -q 'no longer start PostgreSQL after Docker at boot' "$TEST_DIR/uninst-one-server.log" || die 'uninstall did not list the start-after-Docker setting'
+[[ ! -e $AFTER_DOCKER && ! -d ${AFTER_DOCKER%/*} ]] || die 'uninstall left the start-after-Docker setting'
+[[ ",$(admin_sql -d postgres -c 'SHOW listen_addresses')," != *,127.0.0.6,* ]] || die 'uninstall left the Docker listen address'
+pass 'one server: a Docker listen address makes PostgreSQL start after Docker (kept once on rerun); uninstall removes that setting with the listen address'
+
 python3 - "$TEST_DIR" <<'PY'
 import pathlib
 import sys

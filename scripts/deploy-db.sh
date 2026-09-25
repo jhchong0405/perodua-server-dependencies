@@ -51,7 +51,8 @@ command -v python3 >/dev/null || die 'Install python3 (standard library only; no
 # Guided setup. With no deploy.conf, ask on the terminal for what a fresh UAT
 # system needs, asking again whenever an answer cannot be used, and save it as
 # deploy.conf; everything below reads that file exactly like a hand-written one.
-# An explicit --config is not guided. The App server is on another server.
+# An explicit --config is not guided. The App runs on another server or, in
+# Docker, on this one.
 ask() { IFS= read -r -p "$1" ANSWER </dev/tty || die 'Input cancelled.'; ANSWER=${ANSWER//[[:space:]]/}; }
 say() { printf '%s\n' "$@" >/dev/tty; }
 password_ok() { [[ ${#1} -ge 12 && ${#1} -le 1024 && $1 != *[!\ -\~]* ]]; }
@@ -85,8 +86,42 @@ network = ipaddress.IPv4Network(sys.argv[1], strict=True)
 sys.exit(network.prefixlen == 0 or network.is_multicast or network.is_loopback or network.is_unspecified)
 PY
 }
+# One server: the App's containers reach PostgreSQL on Docker's address of
+# this server, from the networks Docker gives containers their addresses in.
+DOCKER_DEFAULT_NETWORKS=172.16.0.0/12,192.168.0.0/16
+docker_bridge_ipv4() {
+    local gateway
+    command -v docker >/dev/null || return 1
+    for gateway in $(docker network inspect bridge --format '{{range .IPAM.Config}}{{.Gateway}} {{end}}' 2>/dev/null); do
+        if is_local_ipv4 "$gateway"; then printf '%s\n' "$gateway"; return 0; fi
+    done
+    return 1
+}
+docker_networks() {
+    # Docker's own address pools when its configuration sets them, else its defaults.
+    local pools
+    pools=$(docker info --format '{{json .DefaultAddressPools}}' 2>/dev/null) || pools=''
+    python3 - "$pools" "$DOCKER_DEFAULT_NETWORKS" <<'PY'
+import ipaddress, json, sys
+try:
+    pools = [ipaddress.IPv4Network(pool['Base']) for pool in json.loads(sys.argv[1] or 'null') or []]
+except (ValueError, TypeError, KeyError, AttributeError):
+    pools = []
+networks = ipaddress.collapse_addresses(pools) if pools else sys.argv[2].split(',')
+print(','.join(str(network) for network in networks))
+PY
+}
+one_server() {  # sets listen and app for an App on this server, or says why it cannot
+    local bridge
+    if ! bridge=$(docker_bridge_ipv4); then
+        say 'The App runs in Docker, and Docker is not running on this server yet. Install it first (sudo bash install-dependencies.sh --role app), then run this again.'
+        return 1
+    fi
+    listen=$bridge
+    app=$(docker_networks)
+}
 guided_setup() {
-    local port listen app address default choices=() private=() gateways=()
+    local port listen app address default together choices=() private=() gateways=()
     { : </dev/tty; } 2>/dev/null || die "No configuration at $CONFIG. Copy deploy.conf.example to deploy.conf and edit it, or run on a terminal to be guided."
     port=$(pg_conftool 16 main show port 2>/dev/null | awk '{print $NF}') || true
     [[ $port =~ ^[1-9][0-9]{0,4}$ ]] || die 'PostgreSQL 16 is not installed yet. Run: sudo bash install-dependencies.sh --role db'
@@ -110,8 +145,18 @@ guided_setup() {
         esac
     done
     while :; do
-        ((${#choices[@]} == 0)) || say '' "This server's addresses: ${choices[*]}"
+        listen='' app='' together=0
+        say '' '  1) The App runs on another server' '  2) The App runs on this server too' ''
         while :; do
+            ask 'Where does the App run? [1]: '
+            case ${ANSWER:-1} in
+                1) break ;;
+                2) if one_server; then together=1; break; fi ;;
+                *) say 'Enter 1 or 2.' ;;
+            esac
+        done
+        while ((!together)); do
+            ((${#choices[@]} == 0)) || say '' "This server's addresses: ${choices[*]}"
             ask "This server's internal IP, which the App server connects to [$default]: "
             listen=${ANSWER:-$default}
             if [[ -n $listen && " ${gateways[*]} " == *" $listen "* ]]; then
@@ -127,20 +172,31 @@ guided_setup() {
             ask 'Use it anyway? [y/N]: '
             [[ ${ANSWER:-n} != [Yy]* ]] || break
         done
-        while :; do
+        while ((!together)); do
             ask 'App server IP (only it may connect): '
             app=$ANSWER
             [[ -z $app || $app == */* ]] || app+=/32
-            if [[ -z $app ]] || ! is_app_network "$app"; then
+            address=${app%/32}
+            if [[ $address == localhost || $address == 127.* ]] || { [[ $app == */32 ]] && is_local_ipv4 "$address"; }; then
+                ask "$address is this server. Does the App run on this server too? [y/N]: "
+                if [[ ${ANSWER:-n} == [Yy]* ]]; then
+                    if one_server; then together=1; break; fi
+                else
+                    say 'Enter the IP of the App server.'
+                fi
+            elif [[ -z $app ]] || ! is_app_network "$app"; then
                 say 'Enter the IPv4 address that the App server connects from.'
-            elif [[ $app == */32 ]] && is_local_ipv4 "${app%/32}"; then
-                say "${app%/32} is this server. Enter the IP of the App server."
             else
                 break
             fi
         done
-        say '' "Fresh UAT database perodua for user odoo on PostgreSQL port $port." \
-            "Listen on $listen and accept connections only from $app."
+        say '' "Fresh UAT database perodua for user odoo on PostgreSQL port $port."
+        if ((together)); then
+            say "The App runs on this server: listen on $listen, Docker's address here, which only this server and its containers reach," \
+                "and accept connections only from Docker's networks ($app). PostgreSQL will start after Docker."
+        else
+            say "Listen on $listen and accept connections only from $app."
+        fi
         ask "Save these settings to $CONFIG and continue? [Y/n]: "
         [[ ${ANSWER:-y} != [Yy]* ]] || break
         say 'Answer again (Ctrl-C stops without saving).'
@@ -235,9 +291,12 @@ try:
     if address.is_unspecified or address.is_multicast:
         raise ValueError('DB_LISTEN_IP must be a specific local IPv4 address, not 0.0.0.0 or multicast')
     if sys.argv[2]:
-        network = ipaddress.IPv4Network(sys.argv[2], strict=True)
-        if network.prefixlen == 0 or network.is_multicast:
-            raise ValueError('APP_CIDR must be a restricted IPv4 CIDR, not 0.0.0.0/0')
+        # One CIDR, or several separated by commas (an App on this server
+        # connects from any of Docker's networks).
+        for item in sys.argv[2].split(','):
+            network = ipaddress.IPv4Network(item, strict=True)
+            if network.prefixlen == 0 or network.is_multicast:
+                raise ValueError('APP_CIDR must be restricted IPv4 CIDRs, not 0.0.0.0/0')
         if address.is_loopback:
             raise ValueError('Set DB_LISTEN_IP to the database server internal IP when APP_CIDR is set')
     if sys.argv[3]:
@@ -489,12 +548,12 @@ for line in lines:
         inside=False; continue
     if not inside: remaining.append(line)
 block=[begin]
-if cidr:
-    # The App preflight and pinned Odoo entrypoint query postgres before startup.
-    block.append(f'host "postgres" "{user}" {cidr} scram-sha-256')
+cidrs=[item for item in cidr.split(',') if item]
+# The App preflight and pinned Odoo entrypoint query postgres before startup.
+block += [f'host "postgres" "{user}" {item} scram-sha-256' for item in cidrs]
 for name in filter(None, [db, stage]):
     block.append(f'host "{name}" "{user}" 127.0.0.1/32 scram-sha-256')
-    if cidr and name==db: block.append(f'host "{name}" "{user}" {cidr} scram-sha-256')
+    if name==db: block += [f'host "{name}" "{user}" {item} scram-sha-256' for item in cidrs]
     block += [f'host "{name}" all 0.0.0.0/0 reject',f'host "{name}" all ::/0 reject']
 text='\n'.join(block+[end]+remaining)+'\n'
 s=os.stat(path); fd,tmp=tempfile.mkstemp(dir=os.path.dirname(path))
@@ -538,6 +597,24 @@ if [[ $new_listen != "$current_listen" ]]; then
 fi
 "$PG_BIN/pg_isready" -h "$DB_LISTEN_IP" -p "$PG_PORT" >/dev/null || die 'PostgreSQL is not accepting connections at DB_LISTEN_IP.'
 NETWORK_DIRTY=0
+
+# One server: DB_LISTEN_IP is Docker's address on this server, which exists
+# only once Docker has started. At boot PostgreSQL would otherwise start first,
+# listen on its other addresses only, and the App could not connect.
+ONE_SERVER=0
+AFTER_DOCKER=/etc/systemd/system/postgresql@16-$PG_CLUSTER.service.d/perodua-after-docker.conf
+read -r -d '' -a gateways < <(docker_gateways) || true
+if [[ " ${gateways[*]} " == *" $DB_LISTEN_IP "* ]]; then
+    ONE_SERVER=1
+    if ! grep -qxF "# Listen address: $DB_LISTEN_IP" "$AFTER_DOCKER" 2>/dev/null; then
+        install -d -m 0755 "${AFTER_DOCKER%/*}"
+        printf '%s\n' '# Written by deploy-db.sh; uninstall.sh removes it with the listen address.' \
+            "# Listen address: $DB_LISTEN_IP" '[Unit]' 'After=docker.service' > "$AFTER_DOCKER"
+        chmod 0644 "$AFTER_DOCKER"
+        if has_systemd; then systemctl daemon-reload; fi
+    fi
+    log "PostgreSQL starts after Docker at boot ($AFTER_DOCKER): $DB_LISTEN_IP is Docker's address on this server."
+fi
 
 verify_db() {
     local db=$1 table relation
@@ -611,12 +688,16 @@ else
 fi
 cat "$STATE_DIR/connection.txt"
 printf 'Log: %s\nConnection summary: %s/connection.txt\n' "$LOG_FILE" "$STATE_DIR"
-if [[ -n $APP_CIDR ]]; then
+if ((ONE_SERVER)); then
+    printf 'HBA permits %s: the App on this server reaches PostgreSQL at %s, Docker'"'"'s address here. No firewall change is needed.\n' "$APP_CIDR" "$DB_LISTEN_IP"
+elif [[ -n $APP_CIDR ]]; then
     printf 'HBA permits %s. Allow TCP %s from that source in the host/cloud firewall, then test from App Server.\n' "$APP_CIDR" "$PG_PORT"
 else
     printf 'Database is restricted to local TCP access. Set DB_LISTEN_IP and APP_CIDR, then rerun to enable App Server access.\n'
 fi
 printf 'This verifies PostgreSQL only; Odoo startup and filestore restoration run on App Server.\n'
-if [[ $DB_MODE == empty ]]; then
+if [[ $DB_MODE == empty ]] && ((ONE_SERVER)); then
+    printf 'Next, on this server: sudo bash deploy-app.sh --init-db (it offers the settings above as defaults).\n'
+elif [[ $DB_MODE == empty ]]; then
     printf 'Next, on App Server: sudo bash deploy-app.sh --init-db (initializes Odoo, its modules and the UAT administrators).\n'
 fi
