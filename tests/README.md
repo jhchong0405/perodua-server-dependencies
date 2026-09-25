@@ -88,6 +88,8 @@ script. It checks:
   deployment lock held, and `status` works while another process holds it;
 - `start` and `restart` run the database check first and change nothing when
   it reports `EMPTY` or `SETUP_PENDING`, or fails;
+- that check does not read stdin, so `service.sh` also works in a script fed
+  on stdin (on a real server, it had read the rest of such a script);
 - while `deploy-app.sh` runs, every action except `status` stops before any
   Docker call;
 - `reset` lists the anonymous volumes, stops the App, sends `reset_database.py`
