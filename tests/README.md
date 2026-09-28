@@ -186,6 +186,48 @@ script. It checks:
 - a failed wipe stops before the containers and the attachments volume go, and
   says whether anything was deleted (exit 3 of `reset_database.py`: nothing).
 
+`test_iss_api.py` runs `iss-api.sh` against a fake Docker CLI, a fake `ss`, and
+`mv` and `tar` that can be made to fail. The fake Docker records every call, its
+standard input and whether the script's lock (in `/run/lock`) was held, models
+the Compose project's working directory, and fails on any command the script
+should not use; only the port the container publishes listens. It checks:
+- an install from `--config` pulls the pinned image and writes the database
+  password (with `$`, `#`, quotes, a space and a backslash, in a file with a
+  Windows line break) only to `secrets/db_password`, 0444 in a 0700 directory:
+  no Docker argument or `compose.yml` contains it. `iss-api.env` is 0600 and
+  literal, and a `$` in the user name is `$$` for Compose. The port binds
+  `127.0.0.1`; the identity and the last good snapshot are written; `up` never
+  pulls; the pull and `up` hold the lock;
+- the new API key reaches the check on standard input and no argument, only its
+  SHA-256 is saved, and it is printed once, also when the first start fails, but
+  not when the new files were never published. Rerunning an install with the same
+  `--config`, which has no `API_KEY_HASH`, keeps the key and the container, and
+  its success message does not claim a query with a key;
+- a new password recreates the container, which reads it;
+- shell syntax, a loopback database host, a user name with a space, a port over
+  65535, an address or hash that is not one, and an unknown key stop before any
+  Docker call and create nothing; a compose file Compose refuses changes none of
+  the deployed files;
+- a release that does not become healthy is replaced by the last one that
+  started, with its compose file, settings and password, also when only the
+  password changed or the settings were edited in place; the settings that failed
+  go to `iss-api.env.failed`; when the last good release does not start either,
+  the message says so. A move that fails while the new files are published puts
+  back the files that were there before, also on a first install, whose retry
+  then issues a key that works; a snapshot that cannot be written keeps the
+  previous one;
+- `gen-key` keeps the running image and every other setting (no pull), and
+  refuses while `iss-api.env` differs from the last good snapshot;
+- `PROJECT_NAME` cannot change, and a project that already runs from another
+  directory is refused by `install`, `stop` and `uninstall`;
+- `install` refuses a non-empty directory it did not create, and `uninstall`
+  refuses a directory without its identity, changing nothing; `uninstall` without
+  a terminal or with a wrong `--confirm` changes nothing, and `--purge --confirm`
+  takes the project down with `--rmi all` and removes only the files `install`
+  created, leaving the administrator's own;
+- while another process holds the lock, `install`, `start`, `stop`, `restart`,
+  `gen-key` and `uninstall` stop before any Docker call.
+
 `test_uat_guard.py` runs `uat_guard.py` against temporary addon trees shaped
 like the pinned image (literal manifests, code shipped as bare `.pyc`): direct,
 transitive and `auto_install` dependencies on `perodua_demo_client`, XML IDs,

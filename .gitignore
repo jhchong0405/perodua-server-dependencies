@@ -2,6 +2,7 @@
 # (normally in scripts/, next to the scripts that read them).
 deploy.conf
 app.env
+iss-api.env
 filestore*.tar.gz
 *.dump
 *.zip
