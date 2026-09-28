@@ -10,7 +10,7 @@ servers, allow **App → DB port 5432**. Browsers need **App port 8110**.
 
 The steps below create a **fresh UAT system** with an empty database.
 To restore an existing database instead, see [From a backup](#from-a-backup).
-A system set up with an earlier version (v1.0.0 to v1.0.2) cannot keep its data:
+A system set up with an earlier version (v1.0.0 to v1.0.3) cannot keep its data:
 download this version on the App server and run a [reset](#stop-start-and-reset)
 there. The DB server needs no step.
 
