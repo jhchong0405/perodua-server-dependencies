@@ -79,7 +79,10 @@ REVIEWED_REFERENCES = (
             'and client-stable-uiux-v1.0.2 '
             '(sha256:a80014632a3263a752a4571ceed900986c0cb811dfd8fe15357d674f1d420fb8) '
             'and client-stable-uiux-v1.0.3 '
-            '(sha256:45e80bc5a9020aedee15a40dfc5e3c635beb06174664038672556ccfc4430026), '
+            '(sha256:45e80bc5a9020aedee15a40dfc5e3c635beb06174664038672556ccfc4430026) '
+            'and client-stable-uiux-v1.0.4 '
+            '(sha256:0febf36e6c4150548f1b70b3bcf6195621c665368525f5de825d8fdfd951384c, '
+            'the same file), '
             'whose perodua_demo changes do not touch this key.'),
     },
 )

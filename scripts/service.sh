@@ -25,8 +25,10 @@ reset, on the App server, deletes all data in the App's database and all
 attachments, then runs deploy-app.sh --init-db for a fresh UAT system of the
 release next to this script. The database, its login and password, the web
 port and the other settings stay; the UAT administrators whadmin, admin1 and
-admin2 get the password "perodua" again. The plan is shown first: type the
-database name to confirm, or pass it with --confirm for unattended use.
+admin2 get the password "perodua" again. That deploy-app.sh first checks the
+settings in app.env (--check-config); if it refuses them, nothing is changed.
+The plan is shown next: type the database name to confirm, or pass it with
+--confirm for unattended use.
 EOF
 }
 
@@ -113,6 +115,12 @@ app_reset() {
     revision=$(sed -n 's/^REVISION=//p' "$SCRIPT_DIR/deploy-app.sh")
     [[ $release =~ ^[a-z0-9.-]+$ && $revision =~ ^[0-9a-f]{40}$ ]] || die 'Cannot read the release of deploy-app.sh.'
     current=$(sed -n 's/^release=//p' "$DEPLOY_DIR/.deployment-identity")
+    # deploy-app.sh reads app.env only at the end, after the data is gone. Let
+    # it check the settings first: one this release refuses (such as
+    # PUBLIC_ROOT, which v1.0.3 does not support) stops the reset here.
+    # Its reasons and warnings go to stderr; its "valid" line is not needed here.
+    bash "$SCRIPT_DIR/deploy-app.sh" --dir "$DEPLOY_DIR" --init-db --check-config </dev/null >/dev/null \
+        || die "deploy-app.sh of $release refuses $DEPLOY_DIR/app.env for the reason above. Nothing was changed."
 
     printf 'Reset the App deployment "%s" in %s:\n' "$PROJECT" "$DEPLOY_DIR"
     printf '  - stop the App and delete all data in database %s on %s (the database, its login and password stay)\n' "$DB_NAME" "$DB_HOST"

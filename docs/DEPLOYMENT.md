@@ -445,11 +445,13 @@ again under Settings > Technical > Scheduled Actions once real systems are
 connected. Demo Control's Reset & Reseed is refused on such a database, because
 it would load the sample data.
 
-A database initialized with an earlier release (v1.0.0 to v1.0.2) cannot be
-used with v1.0.3: its module fingerprint differs and the App refuses it. Run
-`sudo bash service.sh --role app reset` from the v1.0.3 `scripts` folder on the
-App Server (see [Stop, start and reset](#stop-start-and-reset-servicesh)), or
-uninstall both servers and initialize again.
+A database initialized with v1.0.0 to v1.0.2 cannot be used with v1.0.4: its
+module fingerprint differs and the App refuses it. v1.0.4 has the same Odoo
+modules as v1.0.3, but a deployment directory records its release, so a
+directory deployed with v1.0.3 is refused as well. In both cases run
+`sudo bash service.sh --role app reset` from the v1.0.4 `scripts` folder on the
+App Server (see [Stop, start and reset](#stop-start-and-reset-servicesh); it
+deletes the data), or uninstall both servers and initialize again.
 
 If the initialization stops after the modules are installed, for example on a
 timeout, Ctrl-C, a lost SSH session or a failed sign-in check, the preflight
@@ -507,9 +509,11 @@ shows `pg_lsclusters` and the number of open connections. PostgreSQL starts
 again with the server, stopped or not.
 
 **Reset** (`sudo bash service.sh --role app [--dir PATH] reset [--confirm DATABASE]`)
-turns the deployment back into a fresh UAT system from the App Server alone. It
-shows its plan and changes nothing until the database name is typed, or given
-with `--confirm` for unattended use. Then it:
+turns the deployment back into a fresh UAT system from the App Server alone.
+First the `deploy-app.sh` next to it checks the saved configuration
+(`deploy-app.sh --check-config`); if it refuses it, the reset stops and nothing
+is changed. Then the reset shows its plan and changes nothing until the
+database name is typed, or given with `--confirm` for unattended use. Then it:
 
 1. stops the App;
 2. deletes all data in the database with `reset_database.py`, run in the Odoo
@@ -616,6 +620,172 @@ configuration and logs, which removes every database on the server. It first
 checks that apt would remove only those packages, and refuses if another
 PostgreSQL version or a dependent package would go too. Libraries pulled in by
 the installation stay (`sudo apt autoremove` lists them).
+
+## Two environments on one server, by path (`/dev`, `/uat`)
+
+From v1.0.4, one App server can run two separate systems under one host name,
+for example `https://stgissrp.perodua.com.my/dev/` and
+`https://stgissrp.perodua.com.my/uat/`. Each one is a deployment of its own:
+its own directory, Compose project, database, web port and release. They can
+run different versions, and one can be stopped, reset or removed without the
+other.
+
+With `PUBLIC_ROOT=/dev`, the web container of that deployment serves the page
+at `/dev/app/` and passes `/dev/uiux/`, `/dev/web/content/`, `/dev/web/image/`
+and `/dev/report/pdf/` on to Odoo without the `/dev`. Every other path returns
+404, including Odoo's own pages (`/dev/my`, `/dev/odoo`, `/dev/web/...`), which
+do not work under a path, and the page without its path (`/app/`). In front of
+the two deployments, F5 or an nginx on the server sends each path, unchanged,
+to that deployment's web port.
+
+### Settings
+
+The three settings below are read only from the configuration file (`--config`)
+and, on later runs, from `app.env` in the deployment directory. The questions of
+a first interactive run do not ask for them. Each run saves the ones that are
+set in `app.env`. Empty is their default and is left out, so a deployment that
+does not use them keeps an `app.env` that the scripts of v1.0.3 and earlier can
+still read.
+
+| Setting | Meaning |
+| --- | --- |
+| `PUBLIC_ROOT` | The path, such as `/dev`: a `/` followed by 1-31 lowercase letters, digits or `-`, without `/` at the end. Empty (the default): the page is at `/app/` as before. Needs v1.0.4 or later; the `scripts` folder of v1.0.3 stops with a message before it changes anything. |
+| `ENVIRONMENT_LABEL` | The label on the sign-in page, such as `DEV` or `UAT`: up to 40 letters, digits, spaces and `. _ ( ) -`. Empty: the label the release has always shown. From v1.0.4; v1.0.3 prints a warning and ignores it. |
+| `PUBLIC_BASE_URL` | The address browsers use, such as `https://stgissrp.perodua.com.my/dev`, without `/` at the end. The host is a host name (labels of letters, digits and `-`, separated by single dots) or an IPv4 address. Its path must be `PUBLIC_ROOT`: with `PUBLIC_ROOT` empty it has no path. Empty: nothing is written, and Odoo sets its base URL (`web.base.url`) itself, from the address of each administrator sign-in. Behind the web container that address has no path (the container removes `PUBLIC_ROOT` before Odoo) and starts with `http://`, so with `PUBLIC_ROOT` set, set `PUBLIC_BASE_URL` too; `deploy-app.sh` prints a warning otherwise. |
+
+Every run of `deploy-app.sh` writes these Odoo system parameters to the
+database before the containers start, on a new and an existing database alike:
+
+- `report.url` = `http://127.0.0.1:8069`, always. PDF reports then load their
+  styles from Odoo itself, not through the front.
+- with `PUBLIC_BASE_URL` set: `web.base.url` = that address, and
+  `web.base.url.freeze` = `True`, so that an administrator's sign-in does not
+  replace it with the address the request came through. Links Odoo builds, for
+  example in e-mails, use it. Most of those links lead to Odoo's own pages
+  (`/web`, `/odoo`, `/my`), which the v1.0.4 web container does not serve: they
+  open a 404 page. Only the workbench under `/dev/app/` is served.
+
+Clearing `PUBLIC_BASE_URL` later does not remove these two values; change them
+under Settings > Technical > System Parameters if needed.
+
+The two deployments differ in these settings (the ports are examples):
+
+| Setting | `/dev` | `/uat` |
+| --- | --- | --- |
+| `--dir` | `/opt/perodua-dev` | `/opt/perodua-uat` |
+| `PROJECT_NAME` | `perodua-dev` | `perodua-uat` |
+| `DB_NAME` | `perodua_dev` | `perodua_uat` |
+| `HTTP_PORT` | `8110` | `8111` |
+| `PUBLIC_ROOT` | `/dev` | `/uat` |
+| `PUBLIC_BASE_URL` | `https://stgissrp.perodua.com.my/dev` | `https://stgissrp.perodua.com.my/uat` |
+| `ENVIRONMENT_LABEL` | `DEV` | `UAT` |
+
+`BIND_IP` is `127.0.0.1` for both with an nginx on this server in front, or the
+server's private address when F5 connects to the web ports directly.
+
+### Deploy
+
+1. On the DB server, create one empty database per environment with
+   `deploy-db.sh`. Write one configuration file for each, with `DB_MODE=empty`
+   and its own `DB_NAME` (copy `deploy.conf.example`, or the `deploy.conf` the
+   guided setup saved), and run `sudo bash deploy-db.sh --config deploy-dev.conf`
+   and `sudo bash deploy-db.sh --config deploy-uat.conf`. Both can use the same
+   `DB_USER` with the same password, or a user each. Each database is recorded
+   separately.
+2. On the App server, keep one `scripts` folder per release, for example
+   `/root/perodua-v1.0.4/scripts`. Write one configuration file per environment
+   (see `app.env.example`), for example `/root/perodua-dev.env`:
+
+   ```
+   DB_HOST=192.168.1.20
+   DB_PORT=5432
+   DB_NAME=perodua_dev
+   DB_USER=odoo
+   DB_PASSWORD_FILE=/root/perodua-dev-db-password
+   PROJECT_NAME=perodua-dev
+   HTTP_PORT=8110
+   BIND_IP=127.0.0.1
+   STARTUP_TIMEOUT=600
+   INIT_TIMEOUT=3600
+   PUBLIC_ROOT=/dev
+   ENVIRONMENT_LABEL=DEV
+   PUBLIC_BASE_URL=https://stgissrp.perodua.com.my/dev
+   ```
+
+3. Deploy each from the `scripts` folder of its release:
+
+   ```sh
+   sudo bash deploy-app.sh --config /root/perodua-dev.env --dir /opt/perodua-dev --init-db
+   sudo bash deploy-app.sh --config /root/perodua-uat.env --dir /opt/perodua-uat --init-db
+   ```
+
+   Besides its usual checks, the script opens the page the way a browser behind
+   the front does: `/dev/app/version.json`, `/dev/uiux/api/version` and the
+   page itself, whose files must load from `/dev/app/assets/`. It also checks
+   that `/dev/` leads to `/dev/app/` and that `/dev/my` and `/app/` return 404.
+   At the end it prints the address on this server
+   (`http://127.0.0.1:8110/dev/app/`, or through an SSH tunnel
+   `http://localhost:8110/dev/app/`) and the public address. On this server
+   and through the tunnel the page works as it does through the front,
+   attachments and PDF reports included.
+
+4. Set up the front, below.
+
+### The front
+
+- **F5 to the web ports directly:** one pool per path, `/dev/*` to
+  `APP_SERVER:8110` and `/uat/*` to `APP_SERVER:8111`, with the path unchanged
+  and the Host header passed on. Give each pool its own health check, for
+  example `GET /dev/app/version.json` and `GET /uat/app/version.json` with the
+  public host name.
+- **nginx on this server:** [front-proxy.example.conf](front-proxy.example.conf)
+  sends `/dev/` to `127.0.0.1:8110` and `/uat/` to `127.0.0.1:8111` with the
+  path unchanged and the Host header passed on, allows uploads up to 128 MB and
+  requests up to 720 seconds as the web container does, and returns 404 for
+  everything else. Install nginx on the server itself: a container on a Docker
+  network cannot reach ports published on `127.0.0.1`. F5, if any, then sends
+  both paths to this nginx; its health check must still go through nginx to
+  each path (`/dev/app/version.json`, `/uat/app/version.json`), because nginx
+  answers while one environment is down. This nginx is not part of either
+  deployment: `deploy-app.sh`, `service.sh` and `uninstall.sh` do not start,
+  stop or remove it.
+
+### Things to know
+
+- **One release folder per environment.** `deploy-app.sh` deploys the release
+  its `scripts` folder pins, and a deployment directory is bound to that
+  release. Run each environment's `deploy-app.sh` and `service.sh reset` from
+  the folder of the release it should run: a reset from another release's
+  folder installs that release.
+- **A reset checks the settings first.** `service.sh reset` has the
+  `deploy-app.sh` next to it check `app.env` (`deploy-app.sh --check-config`)
+  before it stops the App or deletes anything. A reset of a `/dev` environment
+  from the v1.0.3 folder therefore stops with "PUBLIC_ROOT needs Client Stable
+  UIUX v1.0.4 or later" and nothing is changed. The scripts of 26c70b7 and
+  earlier have no such check and do not know the three settings: when
+  `app.env` contains any of them, their reset empties the database first and
+  then stops with "Unknown configuration key". Do not reset such an
+  environment from those folders.
+- **`--dir` on every command.** `service.sh` and `uninstall.sh` default to
+  `/opt/perodua-app`; pass `--dir /opt/perodua-dev` or `--dir /opt/perodua-uat`.
+- **Uninstalling one environment.** After `uninstall.sh --role app --dir
+  /opt/perodua-uat`, the script lists the other environment's containers as
+  "other Perodua containers" and asks whether to delete them. Answer `n` (or
+  press Enter). Without a terminal it only lists them.
+- **Both databases on one DB server.** Give `uninstall.sh --role db` the
+  database to remove: `--database perodua_uat` (or that database's
+  `--config`). Otherwise it takes the one in `deploy.conf` next to the script.
+  `uninstall.sh --role db --purge` uninstalls PostgreSQL and deletes every
+  database on the server, both environments' included. Stopping the DB server
+  (`service.sh --role db stop`) takes both environments down.
+- **Resources.** Two environments are two Odoo and two web containers, two
+  attachments volumes and two databases. Size memory, CPU and disk on both
+  servers for two systems.
+- **One origin.** Under one host name the two environments are the same site
+  for the browser. Each path keeps its own sign-in, but a page of one
+  environment could call the other's API with the session signed in there.
+  This is acceptable for test data. When UAT holds real data or real accounts,
+  give it a host name of its own instead.
 
 ## Isolated verification
 

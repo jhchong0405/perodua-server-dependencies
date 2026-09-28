@@ -1,6 +1,6 @@
 # Server setup
 
-Client Stable UIUX v1.0.3 on Ubuntu 24.04 amd64 servers with sudo and internet access:
+Client Stable UIUX v1.0.4 on Ubuntu 24.04 amd64 servers with sudo and internet access:
 
 - **DB server**: PostgreSQL 16.
 - **App server**: Odoo and web containers, pulled from `perodua-deploy.novutal.com`.
@@ -10,7 +10,7 @@ servers, allow **App → DB port 5432**. Browsers need **App port 8110**.
 
 The steps below create a **fresh UAT system** with an empty database.
 To restore an existing database instead, see [From a backup](#from-a-backup).
-A system set up with an earlier version (v1.0.0 to v1.0.2) cannot keep its data:
+A system set up with an earlier version (v1.0.0 to v1.0.3) cannot keep its data:
 download this version on the App server and run a [reset](#stop-start-and-reset)
 there. The DB server needs no step.
 
@@ -156,6 +156,15 @@ Sign in with the web login from the backup.
 Back up the database on the DB server and the filestore volume on the App server.
 Services start again after a reboot, except an App you stopped with `service.sh`.
 This setup serves HTTP only; add HTTPS before production.
+
+## Two environments on one server
+
+From v1.0.4, two separate systems can run on one App server under one host
+name, for example `/dev/` and `/uat/`: two deployments, each with its own
+directory, project name, database, web port and `PUBLIC_ROOT`, behind F5 or an
+nginx that sends each path to its port. See
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#two-environments-on-one-server-by-path-dev-uat).
+v1.0.3 does not support it.
 
 ## Check the data without the web page
 
