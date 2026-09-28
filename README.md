@@ -157,6 +157,15 @@ Back up the database on the DB server and the filestore volume on the App server
 Services start again after a reboot, except an App you stopped with `service.sh`.
 This setup serves HTTP only; add HTTPS before production.
 
+## Two environments on one server
+
+From v1.0.4, two separate systems can run on one App server under one host
+name, for example `/dev/` and `/uat/`: two deployments, each with its own
+directory, project name, database, web port and `PUBLIC_ROOT`, behind F5 or an
+nginx that sends each path to its port. See
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#two-environments-on-one-server-by-path-dev-uat).
+v1.0.3 does not support it.
+
 ## Check the data without the web page
 
 On the DB server (with one server, on that server), this counts the records

@@ -12,6 +12,10 @@ REVISION=86411fb2f695dc36fa5022271dda6e54bf448e34
 ODOO_IMAGE=perodua-deploy.novutal.com/perodua-odoo:client-stable-uiux-v1.0.3@sha256:45e80bc5a9020aedee15a40dfc5e3c635beb06174664038672556ccfc4430026
 WEB_IMAGE=perodua-deploy.novutal.com/perodua-odoo:client-stable-uiux-web-v1.0.3@sha256:347692f5ea149eefb20677f49cf36ff63ace7f0b6e639b29cb17c3547531b1be
 REGISTRY=${ODOO_IMAGE%%/*}
+# Whether the pinned web image serves the page under PUBLIC_ROOT and shows
+# ENVIRONMENT_LABEL (from v1.0.4). v1.0.3 does not; set it to 1 together with
+# the pinned release, images and usage text above when moving to v1.0.4.
+PUBLIC_ROOT_SUPPORTED=0
 # --init-db: a fresh UAT database, the release graph without the client
 # demonstration dataset. Before anything is written, uat_guard.py checks the
 # pinned image: nothing Odoo could install may depend on EXCLUDED_MODULE or
@@ -23,14 +27,16 @@ EXCLUDED_MODULE=perodua_demo_client
 RESTORED_MODULES=perodua_client_stable,perodua_demo_client,perodua_gateway,perodua_forecast_workbook,perodua_supplier_execution,perodua_uiux_api
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 DEPLOY_DIR=/opt/perodua-app
-CONFIG='' NON_INTERACTIVE=0 INIT_DB=0 TEMP_DIR='' AUTH_DIR='' STARTED=0
+CONFIG='' NON_INTERACTIVE=0 INIT_DB=0 CHECK_ONLY=0 TEMP_DIR='' AUTH_DIR='' STARTED=0
 DB_HOST='' DB_PORT=5432 DB_NAME=perodua DB_USER=odoo DB_PASSWORD_FILE=''
 PROJECT_NAME=perodua-client-uiux HTTP_PORT=8110 BIND_IP=0.0.0.0
 STARTUP_TIMEOUT=600 INIT_TIMEOUT=3600
+PUBLIC_ROOT='' ENVIRONMENT_LABEL='' PUBLIC_BASE_URL=''
 
 usage() {
     cat <<'HELP'
 Usage: bash deploy-app.sh [--config PATH] [--dir PATH] [--non-interactive] [--init-db]
+       bash deploy-app.sh [--config PATH] [--dir PATH] --check-config
 Deploy the pinned Client Stable UIUX v1.0.3 Odoo + Web images using Docker Compose.
 Requires a reachable external PostgreSQL 16 server; does not install or configure it.
 Default: use an already initialized, matching Client Stable UIUX database.
@@ -43,7 +49,13 @@ with deploy-db.sh DB_MODE=empty. It never reinitializes or upgrades an
 initialized database.
 --dir defaults to /opt/perodua-app; existing configuration is reused there.
 --config accepts literal KEY=VALUE lines (see app.env.example), never shell code.
+--check-config reads --config, or app.env in --dir, checks every setting the
+way a deployment does and stops before Docker is used; nothing is changed.
 HTTP only: default 0.0.0.0:8110. Odoo ports are private to the Compose network.
+Optional keys, read only from --config or app.env: PUBLIC_ROOT (such as /dev,
+v1.0.4 or later) serves the page under http://HOST:PORT/dev/app/;
+ENVIRONMENT_LABEL is the label on the sign-in page (v1.0.4 or later);
+PUBLIC_BASE_URL (such as https://HOST/dev) is the address browsers use.
 HELP
 }
 fail() { printf 'Error: %s\n' "$*" >&2; exit 1; }
@@ -69,6 +81,7 @@ while (($#)); do
             shift 2 ;;
         --non-interactive) NON_INTERACTIVE=1; shift ;;
         --init-db) INIT_DB=1; shift ;;
+        --check-config) CHECK_ONLY=1; shift ;;
         --help|-h) usage; exit 0 ;;
         *) fail "Unknown argument: $1" ;;
     esac
@@ -84,12 +97,14 @@ if [[ -n $CONFIG ]]; then
         [[ $line =~ ^([A-Z_]+)=(.*)$ ]] || fail 'Configuration must contain literal KEY=VALUE lines'
         key=${BASH_REMATCH[1]} value=${BASH_REMATCH[2]}
         case $key in
-            DB_HOST|DB_PORT|DB_NAME|DB_USER|DB_PASSWORD_FILE|PROJECT_NAME|HTTP_PORT|BIND_IP|STARTUP_TIMEOUT|INIT_TIMEOUT)
+            DB_HOST|DB_PORT|DB_NAME|DB_USER|DB_PASSWORD_FILE|PROJECT_NAME|HTTP_PORT|BIND_IP|STARTUP_TIMEOUT|INIT_TIMEOUT|PUBLIC_ROOT|ENVIRONMENT_LABEL|PUBLIC_BASE_URL)
                 printf -v "$key" '%s' "$value" ;;
             *) fail "Unknown configuration key: $key" ;;
         esac
     done < "$CONFIG"
 fi
+# --check-config never asks: there must be settings to check.
+((CHECK_ONLY == 0)) || [[ -n $CONFIG ]] || fail "--check-config needs --config or $DEPLOY_DIR/app.env"
 prompt() {
     local name=$1 label=$2 answer
     if ((NON_INTERACTIVE)); then [[ -n ${!name} ]] || fail "$name is required in --config"; return; fi
@@ -195,6 +210,47 @@ done
 [[ $BIND_IP =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || fail 'BIND_IP must be an IPv4 address'
 IFS=. read -r -a octets <<< "$BIND_IP"
 for octet in "${octets[@]}"; do ((10#$octet <= 255)) || fail 'Invalid BIND_IP'; done
+# The page under a path (/dev, /uat) behind a front proxy or F5 that keeps the
+# path; the web container adds it to its own links. Empty: the page is at /app/.
+[[ $PUBLIC_ROOT =~ ^(/[a-z0-9][a-z0-9-]{0,30})?$ ]] \
+    || fail 'PUBLIC_ROOT must be empty or one path segment such as /dev or /uat: a / and 1-31 lowercase letters, digits or -, not starting with -, and no / at the end'
+label_pattern='^[A-Za-z0-9 ._()-]{1,40}$'
+[[ -z $ENVIRONMENT_LABEL || $ENVIRONMENT_LABEL =~ $label_pattern ]] \
+    || fail 'ENVIRONMENT_LABEL must be empty or 1-40 letters, digits, spaces and . _ ( ) -'
+# PUBLIC_BASE_URL: the host is dot-separated DNS labels (or an IPv4 address);
+# it becomes the frozen web.base.url, which only Odoo's settings can change.
+url_pattern='^https?://([A-Za-z0-9.-]+)(:[0-9]{1,5})?(/[a-z0-9][a-z0-9-]{0,30})?$'
+host_pattern='^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$'
+if [[ -n $PUBLIC_BASE_URL ]]; then
+    [[ $PUBLIC_BASE_URL =~ $url_pattern ]] \
+        || fail 'PUBLIC_BASE_URL must be empty or http(s)://HOST[:PORT][/PATH] without a / at the end, such as https://stgissrp.perodua.com.my/dev'
+    url_host=${BASH_REMATCH[1]} url_port=${BASH_REMATCH[2]#:} url_path=${BASH_REMATCH[3]}
+    [[ ${#url_host} -le 253 && $url_host =~ $host_pattern ]] \
+        || fail 'PUBLIC_BASE_URL has an invalid host name: labels of letters, digits and - separated by single dots, each starting and ending with a letter or digit'
+    [[ -z $url_port ]] || ((10#$url_port >= 1 && 10#$url_port <= 65535)) || fail 'PUBLIC_BASE_URL has an invalid port'
+    # The page is served at PUBLIC_ROOT and nowhere else, so the address has
+    # exactly that path: none at all when PUBLIC_ROOT is empty.
+    if [[ -n $PUBLIC_ROOT ]]; then
+        [[ $url_path == "$PUBLIC_ROOT" ]] \
+            || fail "PUBLIC_BASE_URL must end with PUBLIC_ROOT ($PUBLIC_ROOT), such as https://HOST$PUBLIC_ROOT"
+    else
+        [[ -z $url_path ]] \
+            || fail "PUBLIC_BASE_URL has the path $url_path but PUBLIC_ROOT is empty: set PUBLIC_ROOT=$url_path, or remove the path"
+    fi
+fi
+if ((PUBLIC_ROOT_SUPPORTED == 0)); then
+    [[ -z $PUBLIC_ROOT ]] \
+        || fail "PUBLIC_ROOT needs Client Stable UIUX v1.0.4 or later, and this scripts folder deploys $RELEASE. Use the scripts folder of v1.0.4 or later, or leave PUBLIC_ROOT empty"
+    [[ -z $ENVIRONMENT_LABEL ]] \
+        || printf 'Warning: ENVIRONMENT_LABEL has no effect on %s; the sign-in page shows it from v1.0.4.\n' "$RELEASE" >&2
+fi
+# Without a frozen base URL, Odoo records the address of every administrator
+# sign-in as web.base.url. Behind the web container that is http:// and has no
+# path (the container removes PUBLIC_ROOT before Odoo), so links Odoo builds
+# would miss the path.
+if [[ -n $PUBLIC_ROOT && -z $PUBLIC_BASE_URL ]]; then
+    printf 'Warning: PUBLIC_ROOT is set without PUBLIC_BASE_URL. Odoo will record http://HOST without %s as its base URL when an administrator signs in; set PUBLIC_BASE_URL, such as https://HOST%s.\n' "$PUBLIC_ROOT" "$PUBLIC_ROOT" >&2
+fi
 [[ -z $DB_PASSWORD_FILE || ( $DB_PASSWORD_FILE == /* && -r $DB_PASSWORD_FILE && -f $DB_PASSWORD_FILE ) ]] || fail 'DB_PASSWORD_FILE must be an absolute path to a readable file'
 if ((NON_INTERACTIVE)) && [[ -z $DB_PASSWORD_FILE && ! -r $DEPLOY_DIR/secrets/db_password ]]; then
     fail 'DB_PASSWORD_FILE is required for the first non-interactive deployment'
@@ -202,6 +258,27 @@ fi
 for helper in uat_guard.py uat_admins.py; do
     [[ -f $SCRIPT_DIR/$helper && ! -L $SCRIPT_DIR/$helper ]] || fail "$helper is missing next to deploy-app.sh; run it from the complete release directory"
 done
+# service.sh reset runs this before it deletes anything, so that settings this
+# release refuses stop the reset while the data is still there. The directory
+# identity is not compared: the reset binds the directory to this release.
+password_problem() {  # why $1 cannot be the database password, if it cannot
+    [[ -n $1 && $1 != *$'\n'* && $1 != *$'\r'* ]] || printf 'Database password must be nonempty and contain no line breaks'
+}
+if ((CHECK_ONLY)); then
+    # A real run reads the password only after the checks above. Read it here
+    # too, from the same file, so that a reset does not delete the data and
+    # then refuse the password.
+    password_source=$DB_PASSWORD_FILE
+    [[ -n $password_source || ! -r $DEPLOY_DIR/secrets/db_password ]] || password_source=$DEPLOY_DIR/secrets/db_password
+    if [[ -n $password_source ]]; then
+        password=$(<"$password_source")
+        problem=$(password_problem "$password")
+        unset password
+        [[ -z $problem ]] || fail "$problem ($password_source)"
+    fi
+    printf 'Configuration valid for %s. Nothing was changed.\n' "$RELEASE"
+    exit 0
+fi
 command -v docker >/dev/null || fail 'Docker is missing. First run install-dependencies.sh --role app on Ubuntu 24.04'
 docker compose version >/dev/null 2>&1 || fail 'Docker Compose v2 is required'
 docker info >/dev/null 2>&1 || fail 'Cannot reach Docker. Start the engine and check your account permissions'
@@ -251,7 +328,8 @@ else
     read -r -s -p 'Database password (hidden): ' password || fail 'Input cancelled'
     printf '\n'
 fi
-[[ -n $password && $password != *$'\n'* && $password != *$'\r'* ]] || fail 'Database password must be nonempty and contain no line breaks'
+problem=$(password_problem "$password")
+[[ -z $problem ]] || fail "$problem"
 printf '%s' "$password" > "$TEMP_DIR/db_password"
 unset password
 # The enclosing secrets directory is 0700. 0444 lets the unprivileged image UID
@@ -307,7 +385,8 @@ pull_image "$ODOO_IMAGE"
 pull_image "$WEB_IMAGE"
 
 cat > "$TEMP_DIR/preflight.py" <<'PY'
-# Modes: check | mark-pending | verify-fresh | stamp. States printed by check:
+# Modes: check | mark-pending | verify-fresh | stamp | public-urls [BASE_URL].
+# States printed by check:
 #   MISSING / MISSING_NO_CREATEDB / EMPTY     nothing initialized yet
 #   SETUP_PENDING                             a fresh UAT initialization whose
 #                                             administrators are not set up yet
@@ -317,7 +396,9 @@ cat > "$TEMP_DIR/preflight.py" <<'PY'
 # perodua.uat_init records the fresh path: 'pending' after modules install,
 # 'complete' once stamped. Databases without it are restored/legacy databases
 # and are held to RESTORED_MODULES exactly as before.
-import ast, hashlib, os, pathlib, sys
+# public-urls, on any initialized database: report.url, and with BASE_URL a
+# frozen web.base.url. Prints PUBLIC_URLS_SET.
+import ast, hashlib, os, pathlib, re, sys
 import psycopg2
 mode = sys.argv[1]
 init_modules = os.environ['INIT_MODULES'].split(',')
@@ -389,6 +470,23 @@ with connect(db) as cn:
             if 'perodua.runtime_profile' not in stored:
                 fail('database contains module changes left by an interrupted installation. If an earlier --init-db stopped part-way, recreate the empty database on the DB server; see docs/DEPLOYMENT.md')
             fail('database contains pending module changes; finish them separately')
+        if mode == 'public-urls':
+            # PDF reports load their styles from this Odoo itself, not through
+            # the front proxy. A frozen base URL is not replaced by the address
+            # an administrator signs in through. Written before the containers
+            # are recreated, so Odoo starts with these values.
+            base_url = sys.argv[2] if len(sys.argv) > 2 else ''
+            label = r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?'
+            url = re.fullmatch(r'https?://(' + label + r'(?:\.' + label + r')*)(?::[0-9]{1,5})?(?:/[a-z0-9][a-z0-9-]{0,30})?', base_url)
+            if base_url and not (url and len(url.group(1)) <= 253):
+                fail('invalid public base URL')
+            put(cur, 'report.url', 'http://127.0.0.1:8069')
+            if base_url:
+                put(cur, 'web.base.url', base_url)
+                put(cur, 'web.base.url.freeze', 'True')
+            cn.commit()
+            print('PUBLIC_URLS_SET')
+            sys.exit(0)
         def excluded_records():
             cur.execute('SELECT count(*) FROM ir_model_data WHERE module=%s', (excluded,))
             return cur.fetchone()[0]
@@ -492,13 +590,18 @@ services:
     environment:
       ODOO_UPSTREAM: odoo:8069
       ODOO_WS_UPSTREAM: odoo:8069
+      PUBLIC_ROOT: "$PUBLIC_ROOT"
+      ENVIRONMENT_LABEL: "$ENVIRONMENT_LABEL"
     depends_on:
       odoo:
         condition: service_healthy
     ports:
       - "$BIND_IP:$HTTP_PORT:80"
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/app/version.json"]
+      # Host: web selects the web container's internal server (v1.0.4), which
+      # serves /app/ at the root path whatever PUBLIC_ROOT is. Earlier web
+      # images answer every host name the same way.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "--header", "Host: web", "http://127.0.0.1/app/version.json"]
       interval: 5s
       timeout: 5s
       retries: 6
@@ -519,11 +622,16 @@ mv -f -- "$TEMP_DIR/db_password" "$DEPLOY_DIR/secrets/db_password"
 mv -f -- "$TEMP_DIR/identity" "$DEPLOY_DIR/.deployment-identity"
 {
     for key in DB_HOST DB_PORT DB_NAME DB_USER PROJECT_NAME HTTP_PORT BIND_IP STARTUP_TIMEOUT INIT_TIMEOUT; do printf '%s=%s\n' "$key" "${!key}"; done
+    # Only when set: empty is their default, and an app.env without them stays
+    # readable by the scripts of v1.0.3 and earlier, which refuse unknown keys.
+    for key in PUBLIC_ROOT ENVIRONMENT_LABEL PUBLIC_BASE_URL; do
+        [[ -z ${!key} ]] || printf '%s=%s\n' "$key" "${!key}"
+    done
     printf 'DB_PASSWORD_FILE=%s/secrets/db_password\n' "$DEPLOY_DIR"
 } > "$DEPLOY_DIR/app.env"
 compose() { docker compose --project-name "$PROJECT_NAME" --file "$DEPLOY_DIR/compose.yml" "$@"; }
 compose config --quiet
-preflight() { compose run --rm --no-deps -T odoo python3 /opt/deploy/preflight.py "$1"; }
+preflight() { compose run --rm --no-deps -T odoo python3 /opt/deploy/preflight.py "$@"; }
 uat_helper() { compose run --rm --no-deps -T odoo python3 /opt/deploy/uat_guard.py "$@"; }
 uat_setup() {
     # Reached only from a fresh initialization or its interrupted resumption,
@@ -627,15 +735,73 @@ with c.cursor() as q:
  if missing: print("Filestore incomplete: restore the matching attachments to the project filestore volume before retrying.",file=sys.stderr); sys.exit(1)
 '
 fi
+# Every run, for a new and an initialized database alike, before the containers
+# are recreated: report.url, and PUBLIC_BASE_URL as the frozen web.base.url.
+# A running Odoo keeps these parameters cached and does not see this direct
+# write, so an administrator sign-in it handles before the recreation below
+# (even one that reached it before the web container stopped) would still
+# overwrite web.base.url, which then stays frozen. Both are stopped first; the
+# write runs in its own one-off container, and the recreation below starts
+# them again anyway.
+compose stop web odoo
+[[ $(preflight public-urls "$PUBLIC_BASE_URL") == PUBLIC_URLS_SET ]] \
+    || fail 'Could not record the report and public addresses in the database. The App is stopped: fix the cause and run deploy-app.sh again'
 STARTED=1
 compose up -d --force-recreate --wait --wait-timeout "$STARTUP_TIMEOUT"
-compose exec -T odoo python3 - "$REVISION" "$STARTUP_TIMEOUT" "$FRESH" <<'PY'
-import http.cookiejar, json, sys, time, urllib.request, urllib.error
+compose exec -T odoo python3 - "$REVISION" "$STARTUP_TIMEOUT" "$PUBLIC_ROOT" "$FRESH" <<'PY'
+import http.cookiejar, json, sys, time, urllib.parse, urllib.request, urllib.error
 revision=sys.argv[1]
-fresh=sys.argv[3] == '1'
+public_root=sys.argv[3]
+fresh=sys.argv[4] == '1'
 def fetch(path):
     with urllib.request.urlopen('http://web' + path, timeout=20) as response:
         return json.load(response)
+class KeepRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None  # report a redirect instead of following it
+public_opener=urllib.request.build_opener(KeepRedirects)
+def public(path):
+    # What a browser behind the front proxy or F5 reaches: the web container's
+    # public server, for any host name but web, the internal one that the
+    # checks above and the health check use (127.0.0.1 and localhost are
+    # public too: a browser on this server or through an SSH tunnel).
+    request=urllib.request.Request('http://web' + path, headers={'Host': 'perodua-public-check'})
+    try:
+        with public_opener.open(request, timeout=20) as response:
+            return response.status, response.headers, response.read()
+    except urllib.error.HTTPError as e:
+        with e:
+            return e.code, e.headers, e.read()
+def public_json(path):
+    status, _, body = public(path)
+    if status != 200:
+        raise ValueError('public ' + path + ' returned HTTP ' + str(status))
+    try:
+        return json.loads(body)
+    except ValueError:
+        raise ValueError('public ' + path + ' did not return JSON')
+def verify_public():
+    if public_json(public_root + '/app/version.json').get('source_revision') != revision:
+        raise ValueError('public ' + public_root + '/app/version.json names another source revision')
+    if public_json(public_root + '/uiux/api/version').get('code') != 0:
+        raise ValueError('public ' + public_root + '/uiux/api/version did not answer')
+    status, _, body = public(public_root + '/app/')
+    if status != 200 or (public_root + '/app/assets/').encode() not in body:
+        raise ValueError('public ' + public_root + '/app/ does not load its files from ' + public_root + '/app/assets/')
+    if b'__PERODUA_' in body:
+        raise ValueError('public ' + public_root + '/app/ still contains a build placeholder')
+    if not public_root:
+        return
+    status, headers, _ = public(public_root + '/')
+    location=urllib.parse.urlsplit(headers.get('Location') or '').path
+    if status not in (301, 302, 303, 307, 308) or location != public_root + '/app/':
+        raise ValueError('public ' + public_root + '/ does not redirect to ' + public_root + '/app/')
+    # Only the page's own paths are open: Odoo's pages, and the page without
+    # its path, are closed.
+    for path in (public_root + '/my', '/app/'):
+        status, _, _ = public(path)
+        if status != 404:
+            raise ValueError('public ' + path + ' returned HTTP ' + str(status) + ' instead of 404')
 def verify():
     frontend=fetch('/app/version.json')
     backend=fetch('/uiux/api/version')['data']
@@ -653,6 +819,7 @@ def verify():
         envelope=json.load(e)
         if envelope.get('code') != 401 or envelope.get('data') is not None:
             raise ValueError('session endpoint did not return its JSON contract')
+    verify_public()
 def verify_uat():
     # Fresh UAT only: every administrator signs in through the workbench's own
     # login, the session reports that user, and one of them loads business data.
@@ -698,6 +865,10 @@ while True:
             sys.exit(1)
         time.sleep(3)
 print('Verified frontend HTML, paired build revisions, API profile and anonymous session endpoint.')
+if public_root:
+    print('Verified the public page under ' + public_root + '/app/, and that other public paths are closed.')
+else:
+    print('Verified the public page at /app/.')
 if fresh:
     try:
         verify_uat()
@@ -712,11 +883,12 @@ if ((FRESH)); then
 fi
 printf '\nDeployment verified: %s (%s)\n' "$RELEASE" "$REVISION"
 if [[ $BIND_IP == 127.0.0.1 ]]; then
-    printf 'HTTP URL: http://127.0.0.1:%s/app/ (this server only). From your computer: ssh -N -L %s:127.0.0.1:%s <user>@<APP_SERVER_IP>, then open http://localhost:%s/app/\n' \
-        "$HTTP_PORT" "$HTTP_PORT" "$HTTP_PORT" "$HTTP_PORT"
+    printf 'HTTP URL: http://127.0.0.1:%s%s/app/ (this server only). From your computer: ssh -N -L %s:127.0.0.1:%s <user>@<APP_SERVER_IP>, then open http://localhost:%s%s/app/\n' \
+        "$HTTP_PORT" "$PUBLIC_ROOT" "$HTTP_PORT" "$HTTP_PORT" "$HTTP_PORT" "$PUBLIC_ROOT"
 else
-    printf 'HTTP URL: http://%s:%s/app/\n' "${BIND_IP/0.0.0.0/<APP_SERVER_IP>}" "$HTTP_PORT"
+    printf 'HTTP URL: http://%s:%s%s/app/\n' "${BIND_IP/0.0.0.0/<APP_SERVER_IP>}" "$HTTP_PORT" "$PUBLIC_ROOT"
 fi
+[[ -z $PUBLIC_BASE_URL ]] || printf 'Public URL (through the front proxy or F5): %s/app/\n' "$PUBLIC_BASE_URL"
 printf 'Compose: %s/compose.yml\nFilestore volume: %s_filestore\n' "$DEPLOY_DIR" "$PROJECT_NAME"
 if ((FRESH)); then
     printf 'UAT administrators (UAT only, fixed password): whadmin, admin1, admin2 / perodua\n'

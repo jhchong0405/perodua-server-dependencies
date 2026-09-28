@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -99,6 +100,10 @@ FAKE_DEPLOY_APP = f'''#!/usr/bin/env bash
 RELEASE={RELEASE}
 REVISION={REVISION}
 ''' + r'''printf '%s %s\n' "$(python3 "$FAKE_LOCKSTATE")" "$*" >> "$FAKE_DEPLOY_LOG"
+if [[ " $* " == *' --check-config '* ]]; then
+    [[ -z ${FAKE_CHECK_CONFIG_STATUS:-} ]] || echo 'Error: fixture refuses the configuration' >&2
+    exit "${FAKE_CHECK_CONFIG_STATUS:-0}"
+fi
 exit "${FAKE_DEPLOY_STATUS:-0}"
 '''
 
@@ -162,6 +167,12 @@ class ServiceAppTests(unittest.TestCase):
     def deploy_calls(self):
         return self.deploys.read_text().splitlines() if self.deploys.exists() else []
 
+    def deployments(self):  # deploy-app.sh calls other than the settings check
+        return [call for call in self.deploy_calls() if not call.endswith(" --check-config")]
+
+    def check_call(self, lock="held"):
+        return f"{lock} --dir {self.app} --init-db --check-config"
+
     def hold_lock(self):
         # Another process takes the lock the way deploy-app.sh does, and keeps it.
         holder = subprocess.Popen(["bash", "-c", 'exec 9>"$1" && flock -n 9 && echo held && exec sleep infinity',
@@ -175,7 +186,7 @@ class ServiceAppTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn(message, result.stderr)
         self.assertEqual(self.docker_calls(), [])
-        self.assertEqual(self.deploy_calls(), [])
+        self.assertEqual(self.deployments(), [])
         self.assertEqual((self.app / ".deployment-identity").read_text(), self.identity)
 
     def test_stop_start_restart_hold_the_lock_and_status_does_not_need_it(self):
@@ -249,9 +260,10 @@ class ServiceAppTests(unittest.TestCase):
         wipe = next(entry for entry in self.docker_log() if "stdin" in entry)
         self.assertEqual(wipe["stdin"], hashlib.sha256((SCRIPTS / "reset_database.py").read_bytes()).hexdigest())
         self.assertEqual({entry["lock"] for entry in self.docker_log()}, {"held"})
-        # deploy-app.sh runs last, with the lock free for it to take, and finds
-        # the directory bound to its own release.
-        self.assertEqual(self.deploy_calls(), [f"free --dir {self.app} --init-db"])
+        # deploy-app.sh checks the settings first, under the reset's lock, and
+        # runs last, with the lock free for it to take, and finds the directory
+        # bound to its own release.
+        self.assertEqual(self.deploy_calls(), [self.check_call(), f"free --dir {self.app} --init-db"])
         self.assertEqual((self.app / ".deployment-identity").read_text(),
                          self.identity.replace("client-stable-uiux-v1.0.2", RELEASE).replace("f" * 40, REVISION))
 
@@ -271,13 +283,44 @@ class ServiceAppTests(unittest.TestCase):
                 self.assertIn(message, result.stderr)
                 self.assertEqual(self.docker_calls()[-2:], [["stop"], WIPE])
                 self.assertIn(FILESTORE, json.loads(self.state.read_text())["volumes"])
-                self.assertEqual(self.deploy_calls(), [])
+                self.assertEqual(self.deployments(), [])
 
     def test_a_failed_initialization_says_to_run_the_reset_again(self):
         result = self.run_script("reset", "--confirm", "perodua", FAKE_DEPLOY_STATUS="1")
         self.assertEqual(result.returncode, 1)
         self.assertIn("deploy-app.sh did not finish", result.stderr)
-        self.assertEqual(len(self.deploy_calls()), 1)
+        self.assertEqual(len(self.deployments()), 1)
+
+    def test_settings_the_release_refuses_stop_the_reset_before_anything_is_deleted(self):
+        # Such as PUBLIC_ROOT=/dev in app.env, reset from the v1.0.3 folder.
+        result = self.run_script("reset", "--confirm", "perodua", FAKE_CHECK_CONFIG_STATUS="1")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Error: fixture refuses the configuration", result.stderr)
+        self.assertIn(f"deploy-app.sh of {RELEASE} refuses {self.app}/app.env", result.stderr)
+        self.assertIn("Nothing was changed.", result.stderr)
+        self.assertNotIn("Reset the App deployment", result.stdout)  # before the plan and the confirmation
+        self.assertEqual(self.docker_calls(), [])
+        self.assertEqual(self.deploy_calls(), [self.check_call()])
+        self.assertEqual((self.app / ".deployment-identity").read_text(), self.identity)
+        self.assertIn(FILESTORE, json.loads(self.state.read_text())["volumes"])
+
+    def test_a_path_environment_reset_from_a_release_without_support_changes_nothing(self):
+        # The real deploy-app.sh of a release without PUBLIC_ROOT (v1.0.3) next
+        # to service.sh, and the app.env of a /dev environment.
+        text = (SCRIPTS / "deploy-app.sh").read_text(encoding="utf-8")
+        line = re.compile(r"^PUBLIC_ROOT_SUPPORTED=[01]$", re.M)
+        self.assertEqual(len(line.findall(text)), 1)
+        (self.bundle / "deploy-app.sh").write_text(line.sub("PUBLIC_ROOT_SUPPORTED=0", text), encoding="utf-8")
+        for helper in ("uat_guard.py", "uat_admins.py"):
+            shutil.copy(SCRIPTS / helper, self.bundle / helper)
+        with (self.app / "app.env").open("a") as app_env:
+            app_env.write("PUBLIC_ROOT=/dev\nPUBLIC_BASE_URL=https://stgissrp.perodua.com.my/dev\n")
+        result = self.run_script("reset", "--confirm", "perodua")
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("PUBLIC_ROOT needs Client Stable UIUX v1.0.4 or later", result.stderr)
+        self.assertIn("Nothing was changed.", result.stderr)
+        self.assertEqual(self.docker_calls(), [])
+        self.assertEqual((self.app / ".deployment-identity").read_text(), self.identity)
 
     def test_reset_is_refused_on_the_database_server(self):
         result = subprocess.run(["bash", str(self.bundle / "service.sh"), "--role", "db", "reset"],

@@ -48,8 +48,8 @@ def die(message):
     sys.exit(f'FAIL: preflight: {message}')
 
 
-def run(mode, expect_ok=True):
-    result = subprocess.run([sys.executable, str(preflight), mode], env=ENV, text=True,
+def run(mode, *args, expect_ok=True):
+    result = subprocess.run([sys.executable, str(preflight), mode, *args], env=ENV, text=True,
                             capture_output=True, timeout=60)
     if expect_ok and result.returncode:
         die(f'{mode} failed unexpectedly: {result.stderr.strip()}')
@@ -75,6 +75,7 @@ def check(condition, message):
 # 1. Nothing initialized yet.
 check(run('check') == 'EMPTY', 'a new empty-mode database must report EMPTY')
 check('still empty' in run('mark-pending', expect_ok=False), 'mark-pending must refuse an empty database')
+check('still empty' in run('public-urls', '', expect_ok=False), 'public-urls must refuse an empty database')
 
 # 2. What `odoo -i` leaves behind on a fresh UAT database.
 sql('''CREATE TABLE ir_module_module (id serial PRIMARY KEY, name varchar UNIQUE NOT NULL,
@@ -151,5 +152,27 @@ sql('UPDATE ir_module_module SET state=%s WHERE name=%s', ('installed', EXCLUDED
 check(run('check') == 'READY 1', 'a restored database with every release module must be READY')
 check('awaiting its UAT setup' in run('verify-fresh', expect_ok=False), 'verify-fresh must refuse a restored database')
 check('carries a release stamp' in run('mark-pending', expect_ok=False), 'a restored database must never be marked fresh')
+
+# 8. The addresses every deployment records before the containers start, on any
+#    initialized database: report.url always, a frozen web.base.url only when given.
+def parameters():
+    return dict(sql("SELECT key, value FROM ir_config_parameter WHERE key LIKE 'web.base.url%' OR key='report.url'"))
+sql("INSERT INTO ir_config_parameter (key, value) VALUES ('web.base.url', 'http://web')")
+check(run('public-urls', '') == 'PUBLIC_URLS_SET', 'public-urls must accept an initialized database')
+check(parameters() == {'report.url': 'http://127.0.0.1:8069', 'web.base.url': 'http://web'},
+      f'public-urls without a base URL must write report.url only: {parameters()}')
+for _ in range(2):  # a rerun changes nothing
+    check(run('public-urls', 'https://stgissrp.perodua.com.my/dev') == 'PUBLIC_URLS_SET',
+          'public-urls must accept a base URL')
+    check(parameters() == {'report.url': 'http://127.0.0.1:8069', 'web.base.url': 'https://stgissrp.perodua.com.my/dev',
+                           'web.base.url.freeze': 'True'},
+          f'public-urls did not commit the frozen base URL: {parameters()}')
+check('invalid public base URL' in run('public-urls', 'https://host/dev/', expect_ok=False),
+      'public-urls must refuse an invalid base URL')
+for host in ('-', 'a..b', 'a-.b', 'a.b.', 'a' * 64):
+    check('invalid public base URL' in run('public-urls', f'https://{host}/dev', expect_ok=False),
+          f'public-urls must refuse the host {host!r}')
+check(parameters()['web.base.url'] == 'https://stgissrp.perodua.com.my/dev', 'a refused base URL must change nothing')
+check(run('check') == 'READY 1', 'recording the addresses must leave the database READY')
 
 print(f'app preflight: {PASSES} checks passed against PostgreSQL')

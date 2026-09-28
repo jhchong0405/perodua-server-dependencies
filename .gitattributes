@@ -4,3 +4,4 @@
 *.conf.example text eol=lf
 *.env.example text eol=lf
 Dockerfile text eol=lf
+*.example.conf text eol=lf

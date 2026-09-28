@@ -52,6 +52,49 @@ gives the host one private and one public address:
   server with a public address needs a "y" (a configuration file gets a
   warning instead).
 
+The page under a path (`PUBLIC_ROOT`, `ENVIRONMENT_LABEL`, `PUBLIC_BASE_URL`).
+The tests run a copy of `deploy-app.sh` with `PUBLIC_ROOT_SUPPORTED` set to 1
+or 0, as a release that does or does not support it. `test_deploy_app.py`
+checks:
+- the three settings are saved in `app.env` when set, and a later run from
+  `app.env` alone saves the same file and `compose.yml`; the web service, and
+  not the Odoo service, gets `PUBLIC_ROOT` and `ENVIRONMENT_LABEL`;
+- empty ones are left out, so `app.env` has only the keys the scripts of
+  v1.0.3 and earlier accept, and clearing one removes it;
+- invalid values (paths with a second segment, a trailing `/`, capitals or
+  shell syntax; labels over 40 characters or with other characters; base URLs
+  with a trailing `/`, another scheme, a user, a query, a bad port or two path
+  segments; hosts that are not host names, such as `-`, `a..b`, `a-.b`, a
+  trailing dot, a label over 63 characters or a name over 253) and a base URL
+  whose path is not `PUBLIC_ROOT` (including `https://dev` for `/dev`) stop
+  before any Docker call, and nothing runs;
+- `PUBLIC_ROOT` without `PUBLIC_BASE_URL` prints a warning;
+- `--check-config` checks `--config` or the directory's `app.env` without any
+  Docker call or file change, refuses what a deployment refuses (such as
+  `PUBLIC_ROOT` on a release without support, or an unknown key), and without
+  settings to check it stops instead of asking;
+- a release without support refuses `PUBLIC_ROOT` before any Docker call and
+  only warns about a label; the pinned release supports `PUBLIC_ROOT` exactly
+  when it is v1.0.4 or later.
+
+`test_deploy_app_uat.py` checks that `preflight.py public-urls` runs once on
+every path (an initialized database with and without `--init-db`, a fresh
+initialization, `SETUP_PENDING`, `SETUP_UNMARKED`), after the fresh checks and
+right before `up`, with `PUBLIC_BASE_URL` as its argument (an empty argument
+without one); that its failure stops before `up`; that the HTTP verification is
+given `PUBLIC_ROOT`; that the web health check sends `Host: web`; and the
+addresses in the final message. It also runs the
+HTTP verification that `deploy-app.sh` sends to the Odoo container, unchanged,
+against a fake web container on `127.0.0.1` that it reaches as an HTTP proxy.
+The fake sees the host names the requests carry and answers as the web
+container's nginx does: `Host: web` is the internal server, every other name
+(`127.0.0.1` and `localhost` included) the public one. Every request goes to
+`web`. A page under `/dev` and a page at the root
+(as v1.0.3 serves it) pass; open `/dev/my` or `/app/` (200, or a redirect,
+which is read and not followed), a page loading files from `/app/assets/`, a
+leftover build placeholder, another revision, a missing or non-JSON answer and
+a wrong redirect of `/dev/` fail with their own message.
+
 `test_deploy_app_uat.py` also covers an attachments volume from an earlier
 deployment of the project. Files in it stop a new system without a terminal
 (with the delete command), and on a terminal they are deleted only after "y".
@@ -133,6 +176,11 @@ script. It checks:
   to the Odoo container on standard input, removes the containers and volumes,
   deletes the anonymous volumes by name, binds the directory to the release next
   to it and runs `deploy-app.sh --dir DIR --init-db` last, with the lock free;
+- before the plan and any Docker call, `reset` runs `deploy-app.sh --dir DIR
+  --init-db --check-config`; when it refuses the settings, nothing changes.
+  With the real `deploy-app.sh` of a release without `PUBLIC_ROOT` support and
+  the `app.env` of a `/dev` environment, the reset stops with its reason and
+  no Docker call;
 - nothing changes after a wrong confirmation, without a terminal and without
   `--confirm`, or without `app.env`;
 - a failed wipe stops before the containers and the attachments volume go, and
@@ -217,7 +265,11 @@ On the empty-mode database, `check_app_preflight.py` then runs the exact
 marker is actually committed; an installed `perodua_demo_client`, records
 loaded under its name, demo data and modules from another release are refused;
 a stamped database is never marked or stamped again; and a restored database
-keeps its previous check, which requires the dataset module.
+keeps its previous check, which requires the dataset module. `public-urls`
+refuses an empty database, writes only `report.url` without a base URL, commits
+`web.base.url` and `web.base.url.freeze` with one (a rerun changes nothing),
+refuses an invalid base URL without changing anything, and leaves the database
+`READY`.
 
 `uninstall.sh --role db` coverage:
 - removing a deployment only after an exact confirmation and with no open
