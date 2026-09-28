@@ -1,6 +1,6 @@
 # Server setup
 
-Client Stable UIUX v1.0.3 on Ubuntu 24.04 amd64 servers with sudo and internet access:
+Client Stable UIUX v1.0.4 on Ubuntu 24.04 amd64 servers with sudo and internet access:
 
 - **DB server**: PostgreSQL 16.
 - **App server**: Odoo and web containers, pulled from `perodua-deploy.novutal.com`.

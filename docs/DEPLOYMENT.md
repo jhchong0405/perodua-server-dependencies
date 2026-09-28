@@ -445,11 +445,13 @@ again under Settings > Technical > Scheduled Actions once real systems are
 connected. Demo Control's Reset & Reseed is refused on such a database, because
 it would load the sample data.
 
-A database initialized with an earlier release (v1.0.0 to v1.0.2) cannot be
-used with v1.0.3: its module fingerprint differs and the App refuses it. Run
-`sudo bash service.sh --role app reset` from the v1.0.3 `scripts` folder on the
-App Server (see [Stop, start and reset](#stop-start-and-reset-servicesh)), or
-uninstall both servers and initialize again.
+A database initialized with v1.0.0 to v1.0.2 cannot be used with v1.0.4: its
+module fingerprint differs and the App refuses it. v1.0.4 has the same Odoo
+modules as v1.0.3, but a deployment directory records its release, so a
+directory deployed with v1.0.3 is refused as well. In both cases run
+`sudo bash service.sh --role app reset` from the v1.0.4 `scripts` folder on the
+App Server (see [Stop, start and reset](#stop-start-and-reset-servicesh); it
+deletes the data), or uninstall both servers and initialize again.
 
 If the initialization stops after the modules are installed, for example on a
 timeout, Ctrl-C, a lost SSH session or a failed sign-in check, the preflight

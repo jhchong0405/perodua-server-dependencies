@@ -5,17 +5,16 @@ set -Eeuo pipefail
 export LC_ALL=C
 umask 077
 
-RELEASE=client-stable-uiux-v1.0.3
-REVISION=86411fb2f695dc36fa5022271dda6e54bf448e34
+RELEASE=client-stable-uiux-v1.0.4
+REVISION=c3a7fdae0ca52b9cdadf98051a8a437b347861d7
 # Published to the private registry only (not GHCR). The Odoo image loads no
 # sample data; both images name REVISION.
-ODOO_IMAGE=perodua-deploy.novutal.com/perodua-odoo:client-stable-uiux-v1.0.3@sha256:45e80bc5a9020aedee15a40dfc5e3c635beb06174664038672556ccfc4430026
-WEB_IMAGE=perodua-deploy.novutal.com/perodua-odoo:client-stable-uiux-web-v1.0.3@sha256:347692f5ea149eefb20677f49cf36ff63ace7f0b6e639b29cb17c3547531b1be
+ODOO_IMAGE=perodua-deploy.novutal.com/perodua-odoo:client-stable-uiux-v1.0.4@sha256:0febf36e6c4150548f1b70b3bcf6195621c665368525f5de825d8fdfd951384c
+WEB_IMAGE=perodua-deploy.novutal.com/perodua-odoo:client-stable-uiux-web-v1.0.4@sha256:d99b16018a5ebca9e62e2517e23d80f464f79183d3156dbf28f069ecd1ae9cbe
 REGISTRY=${ODOO_IMAGE%%/*}
 # Whether the pinned web image serves the page under PUBLIC_ROOT and shows
-# ENVIRONMENT_LABEL (from v1.0.4). v1.0.3 does not; set it to 1 together with
-# the pinned release, images and usage text above when moving to v1.0.4.
-PUBLIC_ROOT_SUPPORTED=0
+# ENVIRONMENT_LABEL: yes from v1.0.4. The scripts folder of v1.0.3 has 0 here.
+PUBLIC_ROOT_SUPPORTED=1
 # --init-db: a fresh UAT database, the release graph without the client
 # demonstration dataset. Before anything is written, uat_guard.py checks the
 # pinned image: nothing Odoo could install may depend on EXCLUDED_MODULE or
@@ -37,7 +36,7 @@ usage() {
     cat <<'HELP'
 Usage: bash deploy-app.sh [--config PATH] [--dir PATH] [--non-interactive] [--init-db]
        bash deploy-app.sh [--config PATH] [--dir PATH] --check-config
-Deploy the pinned Client Stable UIUX v1.0.3 Odoo + Web images using Docker Compose.
+Deploy the pinned Client Stable UIUX v1.0.4 Odoo + Web images using Docker Compose.
 Requires a reachable external PostgreSQL 16 server; does not install or configure it.
 Default: use an already initialized, matching Client Stable UIUX database.
 --init-db initializes a NEW or EMPTY database as a fresh UAT system without
