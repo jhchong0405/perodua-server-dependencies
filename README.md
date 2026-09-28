@@ -4,6 +4,8 @@ Client Stable UIUX v1.0.4 on Ubuntu 24.04 amd64 servers with sudo and internet a
 
 - **DB server**: PostgreSQL 16.
 - **App server**: Odoo and web containers, pulled from `perodua-deploy.novutal.com`.
+- **ISS-Oracle API** (separate): the HTTP service in front of the Oracle EBS
+  database, also pulled from there. See [ISS-Oracle API](#iss-oracle-api).
 
 Both can also run on one server: do steps 2 and 3 on that server. With two
 servers, allow **App → DB port 5432**. Browsers need **App port 8110**.
@@ -18,7 +20,7 @@ there. The DB server needs no step.
 
 | Path | Contents |
 | --- | --- |
-| `scripts/` | `install-dependencies.sh`, `deploy-db.sh`, `deploy-app.sh`, `service.sh`, `uninstall.sh`, the helpers they use (`uat_guard.py`, `uat_admins.py`, `reset_database.py`) and the configuration templates. Your `deploy.conf`, backups and filestore archive also go here. |
+| `scripts/` | `install-dependencies.sh`, `deploy-db.sh`, `deploy-app.sh`, `service.sh`, `uninstall.sh`, the helpers they use (`uat_guard.py`, `uat_admins.py`, `reset_database.py`), `iss-api.sh` (ISS-Oracle API) and the configuration templates. Your `deploy.conf`, backups and filestore archive also go here. |
 | `docs/` | [DEPLOYMENT.md](docs/DEPLOYMENT.md) (full reference) and [RUNBOOK.md](docs/RUNBOOK.md) (self-check after deployment) |
 | `tests/` | Automated checks, see [tests/README.md](tests/README.md) |
 
@@ -275,5 +277,102 @@ the listen address it added, its records and a guided `deploy.conf`. PostgreSQL
 stays installed; `--purge` also uninstalls it and deletes every database on the
 server. Both commands list what they will remove and ask you to type the
 database or project name first.
+
+## ISS-Oracle API
+
+The ISS-Oracle API answers read-only queries on the Perodua Oracle EBS database
+over HTTP and logs every request in the database. `iss-api.sh` runs the pinned
+image `perodua-deploy.novutal.com/iss-oracle-api:v1.0.0` with Docker Compose on
+an Ubuntu 24.04 server that can reach the database, for example the App server.
+The server needs no Oracle client.
+
+Before the first run:
+
+- This server reaches the database port: `timeout 5 bash -c '</dev/tcp/DB_HOST/1521' && echo reachable`
+  prints `reachable`. If not, open the firewall between them.
+- The DBA has created [the request log table](#request-log-table-for-the-dba), and the
+  database user can read the EBS views and tables the API serves.
+- Docker is installed: `sudo bash install-dependencies.sh --role app`, then
+  `sudo systemctl enable --now docker`.
+
+```bash
+sudo bash iss-api.sh install
+```
+
+It asks for the database server, port (1521), service name, user and password,
+then who may call the API:
+
+- **Only this server** (the default): for a reverse proxy or an SSH tunnel on this server.
+- **Every computer that can reach the server.** Put your cloud provider's firewall
+  (security group) in front first: ufw does not filter ports that Docker publishes.
+
+When asked, enter the registry username and password for `perodua-deploy.novutal.com`;
+the login is not kept on the server. Wait for `Deployment verified`: from the
+container, the database was reachable, the request log was written and a request
+without the key was refused; when the install issued a new key, a query with it
+was answered too (`check --key` tests a query with a key you already have). The
+script prints a new **API key once**. Give it to the calling system's backend,
+which sends it in the `X-API-Key` header.
+
+The answers are saved in `/opt/perodua-iss-api/iss-api.env` and the password in
+`/opt/perodua-iss-api/secrets/db_password`, which only root can read on the host
+and which never appears in `docker inspect`. The first install needs a new or
+empty directory; a second deployment on one server needs its own `--dir` and
+`PROJECT_NAME`. Running `install` again reuses the settings and asks nothing; to
+change a setting, edit `iss-api.env` and run `install` again. To change the
+database password, add `DB_PASSWORD_FILE=/root/db-password` (a file that holds
+only the new password) to `iss-api.env` and run `install`: the container is
+recreated with it. If the result does not become healthy, the last release that
+did runs again with its settings and password, and the settings that failed are
+kept in `iss-api.env.failed`. For an unattended install, pass the keys of
+[iss-api.env.example](scripts/iss-api.env.example) with `--config` and add
+`--non-interactive`; without `API_KEY_HASH` there, the deployed key stays.
+
+| Command | What it does |
+| --- | --- |
+| `sudo bash iss-api.sh status` | State, image, listen address and database |
+| `sudo bash iss-api.sh check` | The deployment check again; `--key` also tests a query with a key you enter |
+| `sudo bash iss-api.sh logs` | The service log; `--follow` keeps reading |
+| `sudo bash iss-api.sh stop` / `start` / `restart` | A stopped API stays stopped after a reboot until `start` |
+| `sudo bash iss-api.sh gen-key` | Issues a new API key for the release that runs; the old one stops working at once. It refuses while `iss-api.env` holds changes that `install` has not applied |
+| `sudo bash iss-api.sh uninstall` | After you type the project name, removes the container and the files `install` created in `/opt/perodua-iss-api`; `--purge` also removes the image |
+
+A later version of this repository pins a later image: running its `install`
+upgrades, and if the new image does not become healthy the last release that did
+runs again.
+
+| Symptom | Cause |
+| --- | --- |
+| `FAIL database ... is not reachable from the container` | No network path to the database port: firewall, VPN, or a wrong `DB_HOST` / `DB_PORT` |
+| `FAIL GET / -> 500` | The API cannot sign in (`ORA-01017`), or the request log table or a grant is missing (`ORA-00942`). The error is in `sudo bash iss-api.sh logs` |
+| A query with a key gets 401 | Wrong key. Issue a new one with `gen-key` |
+
+### Request log table for the DBA
+
+Every request, including one without a key, writes a row. Create the table in
+the API user's schema (Oracle 12c or later) and delete old rows on a schedule:
+
+```sql
+CREATE TABLE API_REQUEST_LOG (
+  LOG_ID          NUMBER GENERATED BY DEFAULT ON NULL AS IDENTITY PRIMARY KEY,
+  REQUEST_DATE    DATE NOT NULL,
+  REQUEST_METHOD  VARCHAR2(10),
+  API_MODULE      VARCHAR2(100),
+  API_URL         VARCHAR2(1000),
+  CLIENT_IP       VARCHAR2(64),
+  API_KEY_HASH    VARCHAR2(64),
+  QUERY_STRING    VARCHAR2(4000),
+  RESPONSE_STATUS NUMBER(3),
+  EXECUTION_TIME  NUMBER(10),
+  USER_AGENT      VARCHAR2(1000),
+  REQUEST_BODY    VARCHAR2(4000),
+  ERROR_MESSAGE   VARCHAR2(4000)
+);
+CREATE INDEX API_REQUEST_LOG_DATE_IX ON API_REQUEST_LOG (REQUEST_DATE);
+-- for example daily: DELETE FROM API_REQUEST_LOG WHERE REQUEST_DATE < SYSDATE - 90;
+```
+
+The API queries the EBS objects by their plain names, so the user needs a
+synonym and `SELECT` (`EXECUTE` for functions) for each of them.
 
 [Self-check](docs/RUNBOOK.md) · [Reference](docs/DEPLOYMENT.md) · [Tests](tests/README.md)
