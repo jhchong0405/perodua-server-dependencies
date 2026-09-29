@@ -71,7 +71,9 @@ cleanup() {
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM
-trap 'printf "Deployment failed at line %s.\n" "$LINENO" >&2' ERR
+# Only the main shell reports. A command that fails inside $( ) or <( ) is either
+# checked where its result is used or leaves the deployment going.
+trap '[[ $BASHPID != "$$" ]] || printf "Deployment failed at line %s.\n" "$LINENO" >&2' ERR
 while (($#)); do
     case $1 in
         --config|--dir)
@@ -723,16 +725,36 @@ else
 fi
 if ((attachments > 0)); then
     printf 'Database has %s file attachments. Checking its paired filestore volume.\n' "$attachments"
+    # Exit 3: attachments are missing; it then lists the database folders in the volume.
+    status=0
     compose run --rm --no-deps -T odoo python3 -c '
 import os, pathlib, psycopg2, sys
 p=pathlib.Path("/run/secrets/db_password").read_text()
-c=psycopg2.connect(host=os.environ["DB_HOST"],port=os.environ["DB_PORT"],user=os.environ["DB_USER"],password=p,dbname=os.environ["DB_NAME"],connect_timeout=10)
+db=os.environ["DB_NAME"]
+c=psycopg2.connect(host=os.environ["DB_HOST"],port=os.environ["DB_PORT"],user=os.environ["DB_USER"],password=p,dbname=db,connect_timeout=10)
 with c.cursor() as q:
  q.execute("SELECT store_fname FROM ir_attachment WHERE store_fname IS NOT NULL")
- root=pathlib.Path("/var/lib/odoo/filestore")/os.environ["DB_NAME"]
- missing=sum(not (root/name).is_file() for (name,) in q.fetchall())
- if missing: print("Filestore incomplete: restore the matching attachments to the project filestore volume before retrying.",file=sys.stderr); sys.exit(1)
-'
+ names=[name for (name,) in q.fetchall()]
+base=pathlib.Path("/var/lib/odoo/filestore")
+missing=sum(not (base/db/name).is_file() for name in names)
+if missing:
+ print("%d of the %d attachments of database %s are not in the volume." % (missing, len(names), db), file=sys.stderr)
+ folders=[]
+ try:
+  for d in sorted(base.iterdir()):
+   if d.is_dir():
+    try:
+     n=sum(1 for f in d.rglob("*") if f.is_file())
+     folders.append("%s (%d file%s)" % (d.name, n, "" if n == 1 else "s"))
+    except OSError:
+     folders.append("%s (unreadable)" % d.name)
+ except OSError:
+  pass
+ print("Database folders in the volume: %s." % (", ".join(folders) or "none"), file=sys.stderr)
+ sys.exit(3)
+' || status=$?
+    ((status != 3)) || fail "Filestore incomplete: the attachments volume $FILESTORE_VOLUME does not hold every attachment of database $DB_NAME (above). An App uninstall keeps the volume for the same database; this database's attachments must come from where the database came from (see From a backup in the README). Restore them into the volume, then run deploy-app.sh again"
+    ((status == 0)) || fail "Could not check the attachments volume $FILESTORE_VOLUME against database $DB_NAME (above)"
 fi
 # Every run, for a new and an initialized database alike, before the containers
 # are recreated: report.url, and PUBLIC_BASE_URL as the frozen web.base.url.
