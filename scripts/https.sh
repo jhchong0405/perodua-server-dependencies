@@ -7,6 +7,7 @@ set +x
 set -Eeuo pipefail
 export LC_ALL=C
 umask 077
+PATH=$PATH:/usr/local/sbin:/usr/sbin:/sbin   # cron, su and some sudo setups leave these out; nginx lives there
 
 STATE_DIR=/etc/perodua-https
 NGINX_CONF=/etc/nginx/conf.d/perodua-https.conf
@@ -47,10 +48,10 @@ install-cert  Installs the certificate the issuer returned (PEM, DER or PKCS #7,
 apply         Writes the nginx configuration: port 80 redirects to HTTPS, and on
               443 every host forwards its paths to 127.0.0.1:PORT, the path
               unchanged or, with strip, removed. Every other path answers 404.
-              nginx is installed if needed; no other program may listen on port
-              80 or 443. The change is kept only if nginx -t accepts it and nginx
-              then runs it. Every PORT must be known and the certificate
-              installed.
+              nginx is installed with apt-get if needed; nothing else, not even
+              an nginx of another installation, may listen on port 80 or 443.
+              The change is kept only if nginx -t accepts it and nginx then runs
+              it. Every PORT must be known and the certificate installed.
 status        The certificate, nginx and every route.
 uninstall     Removes the nginx configuration of this script and reloads nginx.
               --purge also deletes the key, certificate, request and routes.
@@ -234,13 +235,14 @@ chain_of() {   # $1 leaf: the certificates to serve after it, in issuing order, 
 # ---------------------------------------------------------------- nginx
 ensure_nginx() {
     command -v nginx > /dev/null && return 0
-    command -v apt-get > /dev/null || die 'nginx is not installed: install it, then run apply again'
-    printf 'Installing nginx...\n'
+    command -v apt-get > /dev/null \
+        || die 'nginx is not installed, and apply installs it with apt-get (Ubuntu), which this server does not have: install nginx so that "nginx" runs from the PATH, then run apply again'
+    printf 'Installing nginx with apt-get...\n'
     export DEBIAN_FRONTEND=noninteractive NEEDRESTART_SUSPEND=1   # never restart other services
     # 9>&-: a service the package starts must not inherit the lock and hold it
     if ! { apt-get install -y -q nginx || { apt-get update -q && apt-get install -y -q nginx; }; } > "$TEMP_DIR/apt.log" 2>&1 9>&-; then
         cat "$TEMP_DIR/apt.log" >&2
-        die 'Could not install nginx'
+        die 'Could not install nginx with apt-get (above). A server without internet access needs an apt proxy or a local package mirror'
     fi
 }
 
@@ -315,11 +317,18 @@ activate() {   # nginx takes the changed files; if it does not, the command fail
         || die 'nginx did not take the change within about 10 seconds (see: sudo journalctl -u nginx, /var/log/nginx/error.log); the previous files are back'
 }
 
-port_takers() {   # the programs other than nginx that listen on port 80 or 443, as PORT: PROGRAM
-    local port
+port_takers() {   # what else listens on port 80 or 443, as PORT: PROGRAM (ITS FILE)
+    # With no nginx on the PATH, a listening nginx is another installation too:
+    # apply would install a second nginx from apt next to it.
+    # Processes by their pid: ss prints their names unescaped, quotes included.
+    local port name pid skip=''
+    if command -v nginx > /dev/null; then skip=nginx; fi
     for port in 80 443; do
-        ss -ltnpH "sport = :$port" 2> /dev/null | grep -o 'users:(("[^"]*"' | cut -d'"' -f2 | sort -u \
-            | grep -vx nginx | sed "s/^/$port: /" || true
+        ss -ltnpH "sport = :$port" 2> /dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u | while IFS= read -r pid; do
+            name=$(cat "/proc/$pid/comm" 2> /dev/null) || name='?'
+            [[ $name != "$skip" ]] || continue
+            printf '%s: %s (%s)\n' "$port" "$name" "$(readlink "/proc/$pid/exe" 2> /dev/null || printf '?')"
+        done | sort -u || true
     done
 }
 
@@ -523,7 +532,7 @@ cmd_apply() {
     missing=$(missing_hosts "$STATE_DIR/fullchain.pem")
     [[ -z $missing ]] || die "The installed certificate does not cover ${missing% }: run csr, have the request signed, then install-cert"
     takers=$(port_takers)
-    [[ -z $takers ]] || die "nginx needs ports 80 and 443, but another program listens there; stop or move it first:"$'\n'"$takers"
+    [[ -z $takers ]] || die "nginx needs ports 80 and 443, but something else listens there; stop or move it first (an nginx listed here is another installation than the one apply installs with apt):"$'\n'"$takers"
     ensure_nginx
     conflicts=$(foreign_names)
     [[ -z $conflicts ]] || die "Another nginx configuration already serves these host names; remove it first:"$'\n'"$conflicts"
@@ -546,7 +555,7 @@ cmd_apply() {
 }
 
 cmd_status() {
-    local i f code listens pending=''
+    local i f code listens takers pending=''
     load_routes
     printf 'Routes:      %s\n' "$ROUTES_FILE"
     f=$STATE_DIR/fullchain.pem
@@ -560,7 +569,11 @@ cmd_status() {
     [[ ! -f $STATE_DIR/key.new.pem ]] || pending=' (a new key waits for its certificate)'
     [[ ! -f $STATE_DIR/request.csr ]] || printf 'Request:     %s%s\n' "$STATE_DIR/request.csr" "$pending"
     if ! command -v nginx > /dev/null; then
-        printf 'nginx:       not installed\n'
+        if command -v apt-get > /dev/null; then
+            printf 'nginx:       not installed yet: apply installs it\n'
+        else
+            printf 'nginx:       not installed, and there is no apt-get to install it: install nginx before apply\n'
+        fi
     elif [[ ! -f $NGINX_CONF ]]; then
         printf 'nginx:       %s not written yet (apply)\n' "$NGINX_CONF"
     elif ! applied; then
@@ -569,6 +582,9 @@ cmd_status() {
         render > "$TEMP_DIR/now.conf"
         printf 'nginx:       %s%s\n' "$NGINX_CONF" "$(cmp -s "$TEMP_DIR/now.conf" "$NGINX_CONF" || printf ' (the routes changed since: apply)')"
     fi
+    takers=$(port_takers)   # what would stop apply
+    [[ -z $takers ]] || printf 'Ports 80/443: in use by what apply cannot work next to; stop or move it first:\n             %s\n' \
+        "${takers//$'\n'/$'\n'             }"
     printf 'Routes:\n'
     for ((i = 0; i < ${#R_HOST[@]}; i++)); do
         listens='-' code='-'

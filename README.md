@@ -445,17 +445,22 @@ nginx configuration all come from it. Run the commands from the `scripts` folder
    sudo bash https.sh status
    ```
 
-   `apply` installs nginx if needed and writes `/etc/nginx/conf.d/perodua-https.conf`:
+   `apply` installs nginx if needed, with apt-get: the server needs the Ubuntu
+   package mirrors, or an apt proxy. It then writes `/etc/nginx/conf.d/perodua-https.conf`:
    port 80 redirects to HTTPS, and on 443 each host forwards its paths to
    `127.0.0.1:PORT` and answers 404 for any other path. The services get the host
    name, `X-Forwarded-Proto: https` and the caller's address in `X-Forwarded-For`
    and `X-Real-IP`, replacing whatever the caller sent. Ports 80 and 443 must be
-   free for nginx, and `apply` refuses host names that another nginx file serves,
-   such as a copy of the HTTP-only `docs/front-proxy.example.conf`: remove that file
-   first. The change is kept only if `nginx -t` accepts it and nginx then runs it;
-   otherwise the previous configuration comes back. If ufw is active, allow ports
-   80 and 443 (`apply` prints the command). `status` shows the certificate, its
-   expiry and every route.
+   free for nginx: another program there, or an nginx of another installation
+   (one that is not on the PATH, such as a build in `/usr/local/nginx`), stops
+   `apply` before anything changes. `apply` also refuses host names that another
+   nginx file serves, such as a copy of the HTTP-only
+   `docs/front-proxy.example.conf`: remove that file first. The change is kept only
+   if `nginx -t` accepts it and nginx then runs it; otherwise the previous
+   configuration comes back. If ufw is active, allow ports 80 and 443 (`apply`
+   prints the command). `status` shows the certificate, its expiry, whether nginx
+   is installed (if not, `apply` installs it), whatever would stop `apply` on ports
+   80 and 443, and every route.
 
 Behind HTTPS, the App's `PUBLIC_BASE_URL` starts with `https://`, and every
 service listens on `127.0.0.1` only (`BIND_IP=127.0.0.1`), so that browsers reach

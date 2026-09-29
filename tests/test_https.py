@@ -77,6 +77,12 @@ import json, os
 print(json.load(open(os.environ["FAKE_STATE"]))["ss"], end="")
 '''
 FAKE_CURL = "#!/bin/sh\nprintf 200\n"
+FAKE_APT = r'''#!/usr/bin/env python3
+import json, os, sys
+with open(os.environ["FAKE_LOG"], "a") as log:
+    log.write(json.dumps(["apt-get"] + sys.argv[1:]) + "\n")
+sys.exit("E: Unable to fetch some archives, maybe run apt-get update or try with --fix-missing?")
+'''
 FAKE_OPENSSL = r'''#!/bin/sh
 if [ "$1" = s_client ]; then
     [ -f "$FAKE_RUNNING.conf" ] || exit 1
@@ -179,9 +185,9 @@ class HttpsTest(unittest.TestCase):
         self.log = self.tmp / "calls.log"
         self.state = self.tmp / "state.json"
         self.set_state()
-        bin_dir = self.tmp / "bin"
+        bin_dir = self.bin_dir = self.tmp / "bin"
         bin_dir.mkdir()
-        fakes = {"nginx": FAKE_NGINX, "systemctl": FAKE_SYSTEMCTL, "ss": FAKE_SS, "curl": FAKE_CURL,
+        fakes = {"nginx": FAKE_NGINX, "systemctl": FAKE_SYSTEMCTL, "ss": FAKE_SS, "curl": FAKE_CURL, "apt-get": FAKE_APT,
                  "openssl": FAKE_OPENSSL.replace("REAL_OPENSSL", shutil.which("openssl"))}
         for name, text in fakes.items():
             (bin_dir / name).write_text(text)
@@ -222,6 +228,29 @@ class HttpsTest(unittest.TestCase):
 
     def files(self, directory=None):
         return sorted(p.name for p in (directory or self.dir).iterdir())
+
+    def without_nginx(self):  # no nginx on the PATH (https.sh adds the sbin directories itself)
+        if any(Path(directory, "nginx").exists() for directory in ("/usr/local/sbin", "/usr/sbin", "/sbin")):
+            self.skipTest("the test host has nginx in an sbin directory")
+        (self.bin_dir / "nginx").unlink()
+
+    def program(self, name):  # a running program of that name, from tmp/local/NAME/sbin/NAME
+        binary = self.tmp / "local" / name / "sbin" / name
+        binary.parent.mkdir(parents=True)
+        shutil.copy("/bin/sleep", binary)
+        process = subprocess.Popen([binary, "300"])
+        self.addCleanup(process.wait)
+        self.addCleanup(process.kill)
+        return binary, process.pid
+
+    def listening(self, *owners):  # what ss reports on the ports: (name as ss prints it, pid) pairs
+        users = ",".join(f'("{name}",pid={pid},fd=6)' for name, pid in owners)
+        self.set_state(ss=f"LISTEN 0 511 0.0.0.0:80 0.0.0.0:* users:({users})\n")
+
+    def other_nginx(self):  # an nginx of another installation, listening on port 80
+        binary, pid = self.program("nginx")
+        self.listening(("nginx", pid))
+        return binary
 
     def signed(self, name="leaf.pem", **dates):  # the issuer's answer to the script's request
         return self.ca.sign(self.dir / "request.csr", self.tmp / name, **dates)
@@ -428,12 +457,45 @@ class HttpsTest(unittest.TestCase):
 
     def test_apply_refuses_ports_another_program_listens_on(self):
         self.installed()
-        self.set_state(ss='LISTEN 0 4096 0.0.0.0:443 0.0.0.0:* users:(("docker-proxy",pid=7,fd=4))\n')
-        self.assertIn("443: docker-proxy", self.refused("apply"))
+        proxy, proxy_pid = self.program("docker-proxy")
+        _, nginx_pid = self.program("nginx")
+        self.listening(("nginx", nginx_pid), ('docker"proxy', proxy_pid))  # ss prints names unescaped
+        stderr = self.refused("apply")
+        self.assertIn(f"80: docker-proxy ({proxy})", stderr)
+        self.assertNotIn("80: nginx", stderr)  # the nginx on the PATH may have them
         self.assertFalse(self.conf.exists())
         self.assertEqual(self.calls(), [])  # before nginx is installed or asked anything
-        self.set_state(ss='LISTEN 0 511 0.0.0.0:80 0.0.0.0:* users:(("nginx",pid=8,fd=6),("nginx",pid=9,fd=6))\n')
-        self.ok("apply")  # nginx itself may have them
+        self.listening(("nginx", nginx_pid))
+        self.ok("apply")
+
+    def test_apply_does_not_install_a_second_nginx(self):
+        self.installed()
+        self.without_nginx()
+        other = self.other_nginx()
+        stderr = self.refused("apply")
+        self.assertIn("an nginx listed here is another installation than the one apply installs with apt", stderr)
+        self.assertIn(f"80: nginx ({other})", stderr)
+        self.assertEqual(self.calls(), [])  # neither apt-get nor nginx
+        self.assertFalse(self.conf.exists())
+
+    def test_apply_explains_a_failed_nginx_installation(self):
+        self.installed()
+        self.without_nginx()
+        stderr = self.refused("apply")
+        self.assertIn("E: Unable to fetch some archives", stderr)  # apt's own words first
+        self.assertIn("Could not install nginx with apt-get (above). A server without internet access needs an apt proxy", stderr)
+        self.assertEqual([call[:2] for call in self.calls()], [["apt-get", "install"], ["apt-get", "update"]])
+        self.assertFalse(self.conf.exists())
+
+    def test_status_says_what_apply_will_meet(self):
+        self.without_nginx()
+        result = self.ok("status")
+        self.assertIn("nginx:       not installed yet: apply installs it\n", result.stdout)
+        self.assertNotIn("Ports 80/443", result.stdout)
+        other = self.other_nginx()
+        result = self.ok("status")
+        self.assertIn("Ports 80/443: in use by what apply cannot work next to", result.stdout)
+        self.assertIn(f"80: nginx ({other})", result.stdout)
 
     def test_a_configuration_nginx_refuses_is_taken_back(self):
         self.installed()
