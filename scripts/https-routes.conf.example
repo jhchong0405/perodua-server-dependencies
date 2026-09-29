@@ -1,0 +1,12 @@
+# Routes for https.sh: one line per host name and path of this server.
+#   HOST    the full host name browsers use; it goes into the certificate request
+#   PATH    starts and ends with /; a / alone takes the whole host
+#   PORT    the port the service listens on at 127.0.0.1, or - while it is not known
+#   strip   optional: remove PATH before forwarding, for a service that expects /
+#           (an API published under /dev/api/). Without it the path is forwarded as is.
+# Other paths of a host answer 404. Everything after # is a comment.
+#
+# HOST                          PATH        PORT   OPTION
+stgissrp.perodua.com.my         /dev/       8110
+stgissrp.perodua.com.my         /uat/       8111
+# api.example.perodua.com.my    /dev/api/   8000   strip

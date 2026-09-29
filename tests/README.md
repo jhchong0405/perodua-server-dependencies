@@ -228,6 +228,79 @@ should not use; only the port the container publishes listens. It checks:
 - while another process holds the lock, `install`, `start`, `stop`, `restart`,
   `gen-key` and `uninstall` stop before any Docker call.
 
+`test_https.py` runs `https.sh` with real openssl against fake `nginx`, `systemctl`,
+`ss` and `curl`. A throwaway root and intermediate sign the requests the script
+makes, the way the certificate issuer would; the fake `nginx` records its calls,
+fails `-t` or `-T` on request and prints for `-T` the files the test gives it. A
+reload through the fake `systemctl` copies the script's configuration and chain to
+what nginx "runs", unless the test says the reload does not take, and
+`openssl s_client` answers from that copy. It checks:
+- every malformed line of the routes table (a short host name, a path without its
+  slashes, a port over 65535, an unknown option, an extra column, a host and path
+  listed twice, no host at all) stops the script before any key is made, and the
+  first run creates the table from the example and stops, making a new `--dir`
+  0700 and leaving the mode of an existing one;
+- `csr` makes a 0600 key and a request whose CN is the first host and whose
+  subject alternative names are all hosts, keeps the key on later runs, takes the
+  organisation from `--subject` but refuses a CN there, and with `--new-key` or
+  `--key FILE` prepares another key while the installed one stays (warning when it
+  replaces a key that waited); `--key` leaves the key in use alone and refuses an
+  encrypted key without a terminal for its pass phrase;
+- `install-cert` reads PEM with a chain file, a DER PKCS #7 bundle with the root
+  and the chain out of order, PEM PKCS #7 labelled `CERTIFICATE` (as Microsoft CAs
+  hand it out), a certificate signed by the root itself, and a lone DER
+  certificate (with a warning about the missing intermediate). It orders the
+  chain and leaves self-signed roots out; a copy of the root cross-signed by an
+  older root is served (a client that trusts only the older root accepts the
+  chain) unless it has expired. It refuses a certificate of another key, one
+  missing a host name, an expired one, one valid only from four minutes later, one
+  that does not verify with the intermediate given (the right name, another key)
+  and one for TLS clients only, with or without its issuer, changing nothing; one
+  that expires within 30 days gets a warning. A new key replaces the installed
+  one only with its certificate;
+- `apply` refuses unknown ports, a missing certificate, a certificate that does
+  not cover a host added later, another program on port 80 or 443 (before nginx is
+  touched), and a host name another nginx file serves, in a one-line server block,
+  quoted on a line of its own, or after a quoted `#`. It writes the redirect, one
+  TLS server per host that sends the services its host name and the caller's
+  address, the generation probe answered to 127.0.0.1 only, paths forwarded as
+  they are or stripped, 404 for other paths (or a route for `/`), runs `nginx -t`
+  and reloads. A configuration `nginx -t` refuses, or one nginx does not take (a
+  first one, and a change of routes with the same certificate), is taken back
+  (reloading again), and a broken configuration stops it before anything is
+  written;
+- a renewed certificate is served at once after `apply`; a certificate `nginx -t`
+  refuses or nginx does not take is taken back with the key and the waiting key,
+  and so is a new chain for the same certificate; `status` reports the
+  certificate and routes changed since `apply`, and nothing right after it;
+  `apply` and `uninstall` leave alone an nginx file written for another `--dir`;
+  `uninstall` needs `--confirm yes`, changes nothing when `nginx -t` fails without
+  its file, when nginx keeps running it, or when nginx does not answer while it
+  still listens on port 443, and `--purge` removes only the script's files; a held
+  lock stops every change.
+
+`check-https.sh` runs `https.sh` end to end with real nginx in a throwaway
+Ubuntu 24.04 container, with echo servers standing in for the services:
+
+```bash
+docker run --rm -v "$PWD:/src:ro" ubuntu:24.04 bash /src/tests/check-https.sh
+```
+
+It makes the request, has a throwaway intermediate sign it, installs the answer
+as a DER PKCS #7 bundle, checks that `apply` refuses to start while another
+program listens on port 443, then lets `apply` install and start nginx, and
+checks with curl, trusting only the throwaway root, that each host and path
+reaches its port with the path kept or removed and `X-Forwarded-Proto: https`,
+that a forged `Host` and `X-Forwarded-For` do not reach the service, that other
+paths answer 404, that `/dev?a=1` redirects to `/dev/?a=1` and `http://` to
+`https://`, and that the generation probe answers 127.0.0.1 but not the
+container's own address. It renews the certificate and changes the key while
+nginx runs, comparing the exact certificate nginx presents, and refuses a second
+nginx file for one of the host names. With another nginx file holding a port
+that a program already has, nginx cannot reload: `apply` must fail and put the
+previous configuration back, and `uninstall` must fail and change nothing. Then
+it uninstalls. It refuses to run outside a container.
+
 `test_uat_guard.py` runs `uat_guard.py` against temporary addon trees shaped
 like the pinned image (literal manifests, code shipped as bare `.pyc`): direct,
 transitive and `auto_install` dependencies on `perodua_demo_client`, XML IDs,
