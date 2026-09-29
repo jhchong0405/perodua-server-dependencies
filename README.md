@@ -20,7 +20,7 @@ there. The DB server needs no step.
 
 | Path | Contents |
 | --- | --- |
-| `scripts/` | `install-dependencies.sh`, `deploy-db.sh`, `deploy-app.sh`, `service.sh`, `uninstall.sh`, the helpers they use (`uat_guard.py`, `uat_admins.py`, `reset_database.py`), `iss-api.sh` (ISS-Oracle API) and the configuration templates. Your `deploy.conf`, backups and filestore archive also go here. |
+| `scripts/` | `install-dependencies.sh`, `deploy-db.sh`, `deploy-app.sh`, `service.sh`, `uninstall.sh`, the helpers they use (`uat_guard.py`, `uat_admins.py`, `reset_database.py`), `iss-api.sh` (ISS-Oracle API), `https.sh` (HTTPS with nginx) and the configuration templates. Your `deploy.conf`, backups and filestore archive also go here. |
 | `docs/` | [DEPLOYMENT.md](docs/DEPLOYMENT.md) (full reference) and [RUNBOOK.md](docs/RUNBOOK.md) (self-check after deployment) |
 | `tests/` | Automated checks, see [tests/README.md](tests/README.md) |
 
@@ -157,7 +157,8 @@ Sign in with the web login from the backup.
 
 Back up the database on the DB server and the filestore volume on the App server.
 Services start again after a reboot, except an App you stopped with `service.sh`.
-This setup serves HTTP only; add HTTPS before production.
+This setup serves HTTP only; add HTTPS before production, for example with
+[https.sh](#https).
 
 ## Two environments on one server
 
@@ -302,7 +303,7 @@ sudo bash iss-api.sh install
 It asks for the database server, port (1521), service name, user and password,
 then who may call the API:
 
-- **Only this server** (the default): for a reverse proxy or an SSH tunnel on this server.
+- **Only this server** (the default): for a reverse proxy such as [https.sh](#https), or an SSH tunnel, on this server.
 - **Every computer that can reach the server.** Put your cloud provider's firewall
   (security group) in front first: ufw does not filter ports that Docker publishes.
 
@@ -374,5 +375,102 @@ CREATE INDEX API_REQUEST_LOG_DATE_IX ON API_REQUEST_LOG (REQUEST_DATE);
 
 The API queries the EBS objects by their plain names, so the user needs a
 synonym and `SELECT` (`EXECUTE` for functions) for each of them.
+
+## HTTPS
+
+`https.sh` puts nginx with HTTPS in front of the services of one server, when the
+host names point at that server directly (A records: nginx listens on IPv4 only).
+One table, `/etc/perodua-https/routes.conf`, lists the server's host names, paths
+and local ports; the certificate request (CSR), the certificate check and the
+nginx configuration all come from it. Run the commands from the `scripts` folder.
+
+### First time
+
+1. **The table.** The first run creates it from
+   [https-routes.conf.example](scripts/https-routes.conf.example) and stops. Fill
+   it in:
+
+   ```bash
+   sudo bash https.sh csr
+   sudo nano /etc/perodua-https/routes.conf
+   ```
+
+   One line per host name and path:
+
+   ```
+   # HOST                          PATH        PORT   OPTION
+   stgissrp.perodua.com.my         /dev/       8110
+   stgissrp.perodua.com.my         /uat/       8111
+   api.example.perodua.com.my      /dev/api/   8000   strip
+   ```
+
+   Paths are forwarded as they are; `strip` removes the path first, for a service
+   that expects `/`, such as the ISS-Oracle API published under `/dev/api/`. A port
+   that is not known yet can be `-` until step 4. Put every host name that needs
+   HTTPS in the table now: the certificate is requested for exactly these names.
+2. **The certificate request (CSR).**
+
+   ```bash
+   sudo bash https.sh csr
+   ```
+
+   It makes the private key `/etc/perodua-https/key.pem` (RSA 2048) and the request
+   `/etc/perodua-https/request.csr` for every host name of the table (the first
+   one is the CN, all of them are subject alternative names), and prints the
+   request. Send only the request to the certificate issuer, never the key;
+   `sudo cat /etc/perodua-https/request.csr` prints it again. `--subject
+   /C=MY/O=NAME` sets the organisation (default `/C=MY/O=Perodua`).
+
+   If a request made by hand, with its own key, was already sent, do not send
+   another: take that key over, so that the certificate the issuer returns fits it
+   (an encrypted key asks for its pass phrase once: nginx needs it unencrypted):
+
+   ```bash
+   sudo bash https.sh csr --key /path/to/that.key
+   ```
+3. **The certificate.** Copy what the issuer returns to the server and install it,
+   with the issuer's chain as a second file if it came separately:
+
+   ```bash
+   sudo bash https.sh install-cert certificate.cer chain.p7b
+   ```
+
+   PEM, DER and PKCS #7 (`.p7b`, also as Microsoft CAs label it) are read. The
+   certificate must belong to the key, cover every host name of the table, be
+   valid now and verify with its chain.
+4. **nginx.** With every port filled in:
+
+   ```bash
+   sudo bash https.sh apply
+   sudo bash https.sh status
+   ```
+
+   `apply` installs nginx if needed and writes `/etc/nginx/conf.d/perodua-https.conf`:
+   port 80 redirects to HTTPS, and on 443 each host forwards its paths to
+   `127.0.0.1:PORT` and answers 404 for any other path. The services get the host
+   name, `X-Forwarded-Proto: https` and the caller's address in `X-Forwarded-For`
+   and `X-Real-IP`, replacing whatever the caller sent. Ports 80 and 443 must be
+   free for nginx, and `apply` refuses host names that another nginx file serves,
+   such as a copy of the HTTP-only `docs/front-proxy.example.conf`: remove that file
+   first. The change is kept only if `nginx -t` accepts it and nginx then runs it;
+   otherwise the previous configuration comes back. If ufw is active, allow ports
+   80 and 443 (`apply` prints the command). `status` shows the certificate, its
+   expiry and every route.
+
+Behind HTTPS, the App's `PUBLIC_BASE_URL` starts with `https://`, and every
+service listens on `127.0.0.1` only (`BIND_IP=127.0.0.1`), so that browsers reach
+it through nginx ([DEPLOYMENT.md](docs/DEPLOYMENT.md)).
+
+### Later
+
+Each is `sudo bash https.sh COMMAND` from the `scripts` folder; `--help` lists them all.
+
+| To | Run |
+|---|---|
+| Renew the certificate before it expires | `csr` (it keeps the key), have the request signed, `install-cert FILE [CHAIN]`. nginx is reloaded and must serve the new certificate, or the previous one comes back. |
+| Change to a new key | `csr --new-key`, have the request signed, `install-cert FILE [CHAIN]`. nginx keeps the old key until then. |
+| Change a path or port | Edit the table, then `apply`. |
+| Add a host name | Add it to the table, `csr`, have the request signed, `install-cert FILE [CHAIN]`, then `apply`. |
+| Remove HTTPS | `uninstall --confirm yes`. With `--purge` it also deletes the key, certificate, request and table. |
 
 [Self-check](docs/RUNBOOK.md) · [Reference](docs/DEPLOYMENT.md) · [Tests](tests/README.md)
