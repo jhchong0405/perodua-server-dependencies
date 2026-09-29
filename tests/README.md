@@ -8,7 +8,13 @@ python3 -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
 The App cases cover argument/configuration validation, literal value handling,
-hidden registry prompts, credential cleanup and registry error handling.
+hidden registry prompts, credential cleanup and registry error handling. The
+error traps of `deploy-app.sh`, `deploy-db.sh` and `install-dependencies.sh` report
+only failures the main shell meets: a command that fails inside `$( )` or `<( )`
+while the script goes on prints nothing, and a real failure (also inside a function
+or an assignment from `$( )`) prints one "failed at line" message. The first
+interactive run below prints none before the fixture stops it, whether or not
+`deploy-db.sh` ever ran on the test host.
 
 `test_deploy_app_uat.py` drives `deploy-app.sh` against a scripted fake Docker
 and checks the order and absence of steps: an initialized (`READY`) database is

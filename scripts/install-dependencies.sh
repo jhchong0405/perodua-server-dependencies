@@ -25,7 +25,9 @@ source /etc/os-release
 [[ ${ID:-} == ubuntu && ${VERSION_ID:-} == 24.04 ]] || fail 'Ubuntu 24.04 is required.'
 [[ $(dpkg --print-architecture) == amd64 ]] || fail 'This installer supports amd64.'
 
-trap 'printf "Installation failed at line %s.\n" "$LINENO" >&2' ERR
+# Only the main shell reports. A command that fails inside $( ) or <( ) is either
+# checked where its result is used or leaves the installation going.
+trap '[[ $BASHPID != "$$" ]] || printf "Installation failed at line %s.\n" "$LINENO" >&2' ERR
 export DEBIAN_FRONTEND=noninteractive
 
 update_packages() {

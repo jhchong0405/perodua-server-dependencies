@@ -386,7 +386,9 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-trap 'printf "Command failed at script line %s (phase: %s).\n" "$LINENO" "$PHASE" >&2' ERR
+# Only the main shell reports. A command that fails inside $( ) or <( ) is either
+# checked where its result is used or leaves the script going.
+trap '[[ $BASHPID != "$$" ]] || printf "Command failed at script line %s (phase: %s).\n" "$LINENO" "$PHASE" >&2' ERR
 
 admin() { runuser -u postgres -- "$PG_BIN/psql" -X -w -h /var/run/postgresql -p "$PG_PORT" -d postgres -v ON_ERROR_STOP=1 -At "$@"; }
 admin_db() { local db=$1; shift; runuser -u postgres -- "$PG_BIN/psql" -X -w -h /var/run/postgresql -p "$PG_PORT" -d "$db" -v ON_ERROR_STOP=1 -At "$@"; }

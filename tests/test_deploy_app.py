@@ -254,6 +254,29 @@ sys.exit(93)
                                         capture_output=True, timeout=10)
                 self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_error_traps_report_only_failures_the_main_shell_meets(self):
+        # A command that fails inside $( ) or <( ) is checked where its result is
+        # used, or the script goes on; it must not print "failed at line" (an App
+        # deployment printed "Deployment failed at line 124" and went on).
+        # Real failures, also those inside functions and $( ), are still reported.
+        for path, prelude in ((SCRIPT, ""), (SCRIPTS / "deploy-db.sh", "PHASE=check\n"),
+                              (SCRIPTS / "install-dependencies.sh", "")):
+            trap = next(line for line in path.read_text().splitlines()
+                        if line.startswith("trap ") and line.endswith(" ERR"))
+            head = "set -Eeuo pipefail\n" + prelude + trap + "\n"
+            with self.subTest(script=path.name):
+                quiet = subprocess.run(
+                    ["bash", "-c", head + "f() { local a=(); mapfile -t a < <(find /nonexistent 2>/dev/null); }\n"
+                     "f\nfor x in $(false); do :; done\nwait\necho reached\n"],
+                    capture_output=True, text=True, timeout=10)
+                self.assertEqual((quiet.stdout, quiet.stderr), ("reached\n", ""))
+                for body in ("false\n", "g() { false; }\ng\n", "x=$(false)\n"):
+                    loud = subprocess.run(["bash", "-c", head + body + "echo reached\n"],
+                                          capture_output=True, text=True, timeout=10)
+                    self.assertNotEqual(loud.returncode, 0, body)
+                    self.assertEqual(loud.stdout, "", body)
+                    self.assertEqual(len(re.findall(r"failed at (?:script )?line \d+", loud.stderr)), 1, body)
+
     def test_deployment_script_has_unix_line_endings(self):
         body = SCRIPT.read_bytes()
         self.assertTrue(body.startswith(b"#!/usr/bin/env bash\n"))
@@ -373,6 +396,9 @@ sys.exit(93)
         code, output = self.interactive_run([b"192.0.2.20"], [(b"Choose [2]: ", b"", True)], port=b"18111")
         self.assertNotEqual(code, 0, "Fake Docker must stop before database operations")
         self.assertIn("Fixture stopped before", output)
+        # Nothing claims a failure before the fixture stops it, whether or not
+        # deploy-db.sh ever ran on the test host.
+        self.assertNotIn("failed at line", output.split("Fixture stopped before")[0])
         self.assertNotIn("fixture-password", output)
         saved = (self.deploy_dir / "app.env").read_text()
         for line in ("DB_HOST=192.0.2.20", "DB_PORT=5432", "DB_NAME=perodua", "DB_USER=odoo", "HTTP_PORT=18111",
