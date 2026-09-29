@@ -129,6 +129,9 @@ code=$(curl -s --cacert /ca/root.pem -o /dev/null -w '%{http_code}' --resolve "a
 
 step 'status'
 bash https.sh status
+env PATH=/usr/bin:/bin bash https.sh status > /tmp/status 2>&1
+grep -qx 'nginx:       /etc/nginx/conf.d/perodua-https.conf' /tmp/status \
+    && pass 'status finds nginx without the sbin directories on the PATH' || fail "$(cat /tmp/status)"
 
 step 'renewal: a new request with the same key, installed while nginx runs'
 bash https.sh csr > /dev/null

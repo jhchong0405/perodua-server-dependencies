@@ -266,7 +266,10 @@ what nginx "runs", unless the test says the reload does not take, and
   one only with its certificate;
 - `apply` refuses unknown ports, a missing certificate, a certificate that does
   not cover a host added later, another program on port 80 or 443 (before nginx is
-  touched), and a host name another nginx file serves, in a one-line server block,
+  touched, named by its pid even when `ss` prints a quote in its name), an nginx of
+  another installation listening there while none is on the
+  PATH (naming its file, and without calling apt-get), and a host name another nginx
+  file serves, in a one-line server block,
   quoted on a line of its own, or after a quoted `#`. It writes the redirect, one
   TLS server per host that sends the services its host name and the caller's
   address, the generation probe answered to 127.0.0.1 only, paths forwarded as
@@ -274,11 +277,14 @@ what nginx "runs", unless the test says the reload does not take, and
   and reloads. A configuration `nginx -t` refuses, or one nginx does not take (a
   first one, and a change of routes with the same certificate), is taken back
   (reloading again), and a broken configuration stops it before anything is
-  written;
+  written. When apt-get cannot install nginx, `apply` shows apt's output and says
+  that a server without internet access needs an apt proxy or a local mirror;
 - a renewed certificate is served at once after `apply`; a certificate `nginx -t`
   refuses or nginx does not take is taken back with the key and the waiting key,
   and so is a new chain for the same certificate; `status` reports the
-  certificate and routes changed since `apply`, and nothing right after it;
+  certificate and routes changed since `apply`, and nothing right after it; before
+  nginx is installed it says that `apply` installs it, and it lists what on port 80
+  or 443 would stop `apply`;
   `apply` and `uninstall` leave alone an nginx file written for another `--dir`;
   `uninstall` needs `--confirm yes`, changes nothing when `nginx -t` fails without
   its file, when nginx keeps running it, or when nginx does not answer while it
@@ -300,7 +306,8 @@ reaches its port with the path kept or removed and `X-Forwarded-Proto: https`,
 that a forged `Host` and `X-Forwarded-For` do not reach the service, that other
 paths answer 404, that `/dev?a=1` redirects to `/dev/?a=1` and `http://` to
 `https://`, and that the generation probe answers 127.0.0.1 but not the
-container's own address. It renews the certificate and changes the key while
+container's own address. `status` finds nginx without the sbin directories on the
+PATH. It renews the certificate and changes the key while
 nginx runs, comparing the exact certificate nginx presents, and refuses a second
 nginx file for one of the host names. With another nginx file holding a port
 that a program already has, nginx cannot reload: `apply` must fail and put the
