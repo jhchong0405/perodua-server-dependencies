@@ -17,7 +17,7 @@ SCRIPT_PATH=$(realpath -- "${BASH_SOURCE[0]}")
 SCRIPT_DIR=${SCRIPT_PATH%/*}
 # The subject GICT asks for in its certificate requests; the CN is the first host of the table.
 DEFAULT_SUBJECT='/C=MY/ST=Selangor/L=Rawang/O=Perusahaan Otomobil Kedua Sdn Bhd/OU=GICT'
-COMMAND='' ROUTES='' ROUTES_FILE='' SUBJECT=$DEFAULT_SUBJECTNEW_KEY=0 KEY_FILE='' CONFIRM='' PURGE=0 TEMP_DIR='' RELOADED=0
+COMMAND='' ROUTES='' ROUTES_FILE='' SUBJECT=$DEFAULT_SUBJECT NEW_KEY=0 KEY_FILE='' CONFIRM='' PURGE=0 TEMP_DIR='' RELOADED=0
 ARGS=() HOSTS=() R_HOST=() R_PATH=() R_PORT=() R_STRIP=() SAVED=()
 # In STATE_DIR: routes.conf (the table), key.pem (the private key nginx uses),
 # key.new.pem (a new key waiting for its certificate), request.csr, fullchain.pem,
