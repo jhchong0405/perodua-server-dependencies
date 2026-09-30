@@ -332,6 +332,100 @@ what nginx "runs", unless the test says the reload does not take, and
   still listens on port 443, and `--purge` removes only the script's files; a held
   lock stops every change.
 
+The script asks systemd only where `/run/systemd/system` exists. In a container
+without systemd (the test image), `test_https.py` makes that directory for its
+tests and removes it after them, so that the fake `systemctl` is used.
+
+For `letsencrypt`, a fake `docker` plays lego: for a host name without an
+acme-dns account it adds one to the accounts file (in lego's format, 0600) and
+fails as lego does, unless the test says that Let's Encrypt reuses its checks of
+the host names (then lego touches no account, as when it solves no challenge);
+with every account there, the throwaway intermediate signs the request it was
+given. A fake `curl` answers the ACME directory and acme-dns (`/health`, and
+`/register` with a new account), and a fake `dig` the CNAME records each test DNS
+server holds. The timer's units and the copy of the script go to temporary
+directories (`--unit-dir`, `--lib-dir`). It checks:
+- the first run makes the key and the request as `csr` does, makes one acme-dns
+  account per host name itself (a POST to `/register` each, without the ACME CA),
+  writes them on one line in lego's format (0600), prints one
+  `_acme-challenge.HOST CNAME FULLDOMAIN` line per host name, and stops with exit
+  status 3 and nothing on stderr: no lego, no DNS look-up of the new records and
+  nothing asked of the ACME server but its directory; later runs stop before lego
+  while a record is missing or points elsewhere, and install the certificate
+  once the records are there; the lego container mounts only lego's own folder,
+  the copy of the accounts, the request and, with `--acme-ca`, the CA copied into
+  the Let's Encrypt folder: none of its mounts holds `acme-dns.json`, the
+  settings or the key (the fake lego finds its files through these mounts only);
+- moving to another acme-dns server, with Let's Encrypt reusing its checks (so
+  lego would make no account): the script makes the new accounts, prints their
+  records and stops, refuses the old records, and runs lego once the new ones are
+  there; an accounts file from elsewhere (spread over lines, fields in another
+  order, an extra field) with an account for every host name is used unchanged,
+  only made 0600, while lego gets the script's own copy of the table's accounts
+  (one line in goacmedns' form, 0600, removed after lego); a file goacmedns could
+  not read (a trailing comma, in the object or in an account, anything after the
+  object, a host name or a field twice, broken JSON), an unusable value, an empty
+  account, and an account without `server_url` or with an empty one are refused,
+  with the file left as it is and neither acme-dns nor lego asked;
+- lego that changes the copy of the accounts it was given (as when it makes an
+  account), whether it then fails or issues a certificate, stops the run: no
+  certificate is installed, `acme-dns.json` is left as it is, and the copy is
+  removed;
+- the certificate goes through the checks of `install-cert` and must also lead
+  to a trusted root: without `--extra-root` the test root is refused and nothing
+  changes; nginx that does not take it brings back the previous certificate, its
+  fingerprint and the options together; a new key waiting takes over with it;
+- a run that fails while the new certificate is installed (a directory in the
+  way of `installed.tmp` or `settings.tmp`) brings the certificate, its
+  fingerprint and the options back, and `--renew` then still renews;
+- a hard stop (the script killed with SIGKILL, so no EXIT trap runs and the
+  `.saved` copies stay) just before the new certificate replaces the old one, and
+  just after it: `installed` holds both fingerprints, the certificate left in
+  place is recognised either way, and `--renew` renews it and leaves one
+  fingerprint and no `.saved` copy; a certificate from `install-cert` is not
+  added by such a stop and stays the operator's;
+- a hard stop after a new certificate valid for 89 days is written and before
+  nginx reloads, so that nginx still serves the old one while nothing is due: a
+  manual run with `nginx -t` refusing the files only warns and goes on to its own
+  installation (which then puts everything back); the `--renew` run fails, says
+  so and changes no file, not even the `.saved` copies, and reloads nothing;
+  once `nginx -t` takes the files, `--renew` reloads nginx, says it was serving an
+  older certificate, asks for no new one, and nginx then serves the installed
+  chain; the next `--renew` reloads nothing;
+- `--renew` does nothing while more than 30 days are left (not even a call to
+  Docker, curl or dig), renews with fewer, and leaves alone a certificate that
+  `install-cert` installed;
+- the first certificate writes the service (`ExecStart` runs the copy in
+  `--lib-dir` with this `--dir`) and the daily timer and enables it; the copy runs
+  after the downloaded folder is deleted and rewrites nothing; a run from a newer
+  folder updates the copy;
+- wrong options (`--server`, `--acme-dns`, `--dns-resolvers`, `--email`,
+  `--extra-root`, `--acme-ca`), `--renew` before any certificate, the staging
+  server without `--extra-root`, terms of service not accepted, a missing or
+  stopped Docker, an ACME server or acme-dns that cannot be reached or does not
+  work, and an image that cannot be pulled stop before anything is written;
+  acme-dns refusing to make an account and a missing `dig` stop before lego;
+  Let's Encrypt options on other commands are refused;
+- `--dns-resolvers` is used for the script's look-ups in its order, and lego gets
+  exactly one DNS server: the first that answered for every record. A server
+  that does not answer is skipped; one that answers one record and fails another
+  (SERVFAIL) is skipped for the next, which lego then gets alone; of two working
+  ones the second is not asked. When no server answers for every record (none
+  answers, or each fails another record), the run stops before lego and says
+  which records each server did not answer. The value is kept, as `--email` is;
+  `--extra-root` and `--acme-ca` are kept only for the ACME server they came
+  with; accounts of another acme-dns server are refused;
+- a lego failure shows lego's own error and the records;
+- the test hooks for a local run against Pebble: `--acme-ca` reaches curl for
+  the ACME directory and, copied into the Let's Encrypt directory, lego
+  (`LEGO_CA_CERTIFICATES`), but not the acme-dns registration; `http://` acme-dns
+  with a warning; `PERODUA_HTTPS_LEGO_NETWORK` as the container's network;
+- `status` shows the Let's Encrypt state, the days left, the timer and a failed
+  last run, and each record with what the DNS answers, or that `dig` is missing;
+  `uninstall` removes the
+  timer, its units and the copy (another `--dir` leaves them alone), keeps the
+  accounts, and `--purge` deletes them.
+
 `check-https.sh` runs `https.sh` end to end with real nginx in a throwaway
 Ubuntu 24.04 container, with echo servers standing in for the services:
 

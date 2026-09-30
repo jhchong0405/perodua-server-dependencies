@@ -2,7 +2,8 @@
 # HTTPS on this server: nginx terminates TLS for the host names in a routes table
 # and forwards each path to a local port. The table drives everything: the
 # certificate request (csr), the certificate check (install-cert) and the nginx
-# configuration (apply).
+# configuration (apply). The certificate comes from an issuer (install-cert), or
+# from Let's Encrypt for the same request (letsencrypt), renewed by a timer.
 set +x
 set -Eeuo pipefail
 export LC_ALL=C
@@ -11,17 +12,56 @@ PATH=$PATH:/usr/local/sbin:/usr/sbin:/sbin   # cron, su and some sudo setups lea
 
 STATE_DIR=/etc/perodua-https
 NGINX_CONF=/etc/nginx/conf.d/perodua-https.conf
-SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+DEFAULT_NGINX_CONF=$NGINX_CONF
+SCRIPT_PATH=$(realpath -- "${BASH_SOURCE[0]}")
+SCRIPT_DIR=${SCRIPT_PATH%/*}
 COMMAND='' ROUTES='' ROUTES_FILE='' SUBJECT='/C=MY/O=Perodua' NEW_KEY=0 KEY_FILE='' CONFIRM='' PURGE=0 TEMP_DIR='' RELOADED=0
 ARGS=() HOSTS=() R_HOST=() R_PATH=() R_PORT=() R_STRIP=() SAVED=()
 # In STATE_DIR: routes.conf (the table), key.pem (the private key nginx uses),
-# key.new.pem (a new key waiting for its certificate), request.csr, fullchain.pem.
+# key.new.pem (a new key waiting for its certificate), request.csr, fullchain.pem,
+# and letsencrypt/ (see LE_DIR).
 STATE_FILES=(key.pem key.new.pem request.csr fullchain.pem routes.conf)
+
+# Let's Encrypt: lego (v5.5.2, pinned by digest) runs in Docker and answers the
+# DNS-01 challenge through acme-dns: the DNS administrator points
+# _acme-challenge.HOST once (CNAME) at an acme-dns account, and lego writes the
+# challenge there. lego sees request.csr only, never the private key.
+LEGO_IMAGE=goacme/lego@sha256:1944e8c36055beec47c7de6f15202b41128be75eea0ffa257f0c14d93c5155fd
+DEFAULT_SERVER=https://acme-v02.api.letsencrypt.org/directory
+DEFAULT_ACME_DNS=https://acmedns.novutal.com
+RENEW_DAYS=30
+SYSTEM_ROOTS=/etc/ssl/certs/ca-certificates.crt
+# The renewal timer runs a copy of this script, which stays when the downloaded
+# scripts folder moves; one Let's Encrypt setup per server, as one nginx file.
+UNIT=perodua-https-renew
+UNIT_DIR=/etc/systemd/system DEFAULT_UNIT_DIR=/etc/systemd/system
+LIB_DIR=/usr/local/lib/perodua-https DEFAULT_LIB_DIR=/usr/local/lib/perodua-https
+# In LE_DIR ($STATE_DIR/letsencrypt, 0700): settings (the options of the run that
+# installed the certificate, for later runs and the timer), acme-dns.json (an acme-dns
+# account for each host name, with its password: 0600), lego/ (lego's ACME account
+# and the certificates it got), extra-root.pem (--extra-root) and installed (the
+# fingerprint of the certificate from Let's Encrypt that was installed last), and
+# acme-ca.pem (--acme-ca). Every file lego reads or writes is under LE_DIR, so
+# the lego container mounts nothing but LE_DIR and request.csr.
+# For a local end-to-end test against Pebble (the ACME test server), a local
+# acme-dns and a test DNS server: --acme-ca (Pebble's HTTPS CA), --acme-dns with
+# http://, and PERODUA_HTTPS_LEGO_NETWORK=NAME in the environment, which runs lego
+# on that Docker network instead of the host's. None of these is needed with
+# Let's Encrypt.
+LE_DIR='' RENEW=0 ACCEPT_TOS=0 TRUST_FILE='' REQUEST_KEY='' LEGO_NETWORK=host LEGO_RESOLVERS='' LEGO_CHANGED_ACCOUNTS=0
+LOOKUP='' RECORDS_BY='' PICK_FAILURE=''
+SERVER='' ACME_DNS='' DNS_RESOLVERS='' EMAIL='' EXTRA_ROOT='' ACME_CA=''
+ACCOUNT_HOSTS=()
+declare -A GIVEN=() SETTINGS=() CNAME_STATE=() ACCOUNT=()
 
 usage() {
     cat <<'HELP'
 Usage: sudo bash https.sh csr [--new-key | --key FILE] [--subject /C=MY/O=NAME]
        sudo bash https.sh install-cert CERT [CHAIN]
+       sudo bash https.sh letsencrypt [--renew] [--accept-tos] [--email ADDRESS]
+                          [--server URL] [--acme-dns URL]
+                          [--dns-resolvers HOST[:PORT],...] [--extra-root FILE]
+                          [--acme-ca FILE]
        sudo bash https.sh apply
        sudo bash https.sh status
        sudo bash https.sh uninstall [--purge] [--confirm yes]
@@ -45,6 +85,44 @@ install-cert  Installs the certificate the issuer returned (PEM, DER or PKCS #7,
               server's key, cover every host name of the table, be valid now and
               verify with its chain. If apply ran before, nginx is reloaded with
               it; if nginx does not then serve it, the previous one comes back.
+letsencrypt   Gets the certificate for the request of csr (made first if there
+              is none) from Let's Encrypt instead of an issuer, and installs it
+              as install-cert does; it must also lead to a root this server
+              trusts. Let's Encrypt checks each host name through the DNS
+              record _acme-challenge.HOST, which the DNS administrator points
+              once (CNAME) at an account on the acme-dns server. The first run
+              makes these accounts, prints the records and stops (exit status
+              3) without asking Let's Encrypt; run it again once they exist.
+              Let's Encrypt is asked only when dig finds every record. After
+              the first certificate, a daily timer (perodua-https-renew.timer)
+              runs --renew. lego runs in Docker; the server needs outbound
+              HTTPS to the ACME server, the acme-dns server and, for the first
+              pull of lego, Docker Hub, and dig (bind9-dnsutils). Every run
+              also reloads nginx if it does not serve the installed certificate
+              (after apply), as after a stop in the middle of an installation.
+              Each run gets a new certificate at once, except:
+  --renew         only when fewer than 30 days are left, and only a certificate
+                  this command installed. Also updates the timer's copy of this
+                  script when run from another scripts folder.
+  --accept-tos    accepts the ACME server's terms of service, which the first
+                  run asks for (it prints their address).
+  --email ADDRESS contact address for the ACME account, used when it is made.
+  --server URL    the ACME directory, default Let's Encrypt; for a test, the
+                  staging one: https://acme-staging-v02.api.letsencrypt.org/directory
+  --acme-dns URL  the acme-dns server, default https://acmedns.novutal.com
+                  (http:// only for a local test: it sends the passwords unencrypted).
+  --dns-resolvers HOST[:PORT],...  the DNS servers that the record checks ask,
+                  in this order, default this server's; lego gets the first one
+                  that answered for every record. '' goes back to the default.
+  --extra-root FILE  a root certificate to trust, besides this server's, only
+                  when the new certificate is checked: for the staging roots,
+                  which no system trusts. Kept only while --server stays the
+                  same; '' removes it.
+  --acme-ca FILE  the CA of a test ACME server's own HTTPS certificate, such as
+                  Pebble's. Let's Encrypt, staging included, never needs it.
+                  Kept, and removed with '', as --extra-root.
+                  The options of the run that installed the certificate are
+                  kept for later runs and the timer.
 apply         Writes the nginx configuration: port 80 redirects to HTTPS, and on
               443 every host forwards its paths to 127.0.0.1:PORT, the path
               unchanged or, with strip, removed. Every other path answers 404.
@@ -52,10 +130,11 @@ apply         Writes the nginx configuration: port 80 redirects to HTTPS, and on
               an nginx of another installation, may listen on port 80 or 443.
               The change is kept only if nginx -t accepts it and nginx then runs
               it. Every PORT must be known and the certificate installed.
-status        The certificate, nginx and every route.
-uninstall     Removes the nginx configuration of this script and reloads nginx.
-              --purge also deletes the key, certificate, request and routes.
-              Type yes to confirm, or pass --confirm yes.
+status        The certificate, Let's Encrypt, nginx and every route.
+uninstall     Removes the nginx configuration of this script and reloads nginx,
+              and the Let's Encrypt renewal timer. --purge also deletes the key,
+              certificate, request and routes, and the Let's Encrypt accounts
+              and certificates. Type yes to confirm, or pass --confirm yes.
 HELP
 }
 
@@ -132,10 +211,12 @@ load_routes() {   # HOST PATH PORT [strip] per line; '#' starts a comment
 }
 
 # ---------------------------------------------------------------- keys and certificates
-pub_of() {   # $1 key or cert, $2 file: SHA-256 of its public key, nothing if it has none
+pub_of() {   # $1 key, req or cert, $2 file: SHA-256 of its public key, nothing if it has none
     local out
     if [[ $1 == key ]]; then
         out=$(openssl pkey -in "$2" -passin pass: -pubout 2> /dev/null) || return 0   # never asks for a pass phrase
+    elif [[ $1 == req ]]; then
+        out=$(openssl req -in "$2" -noout -pubkey 2> /dev/null) || return 0
     else
         out=$(openssl x509 -in "$2" -noout -pubkey 2> /dev/null) || return 0
     fi
@@ -156,6 +237,11 @@ missing_hosts() {   # $1 certificate: the table's host names it does not cover
 }
 field() { openssl x509 -in "$2" -noout "-$1" -nameopt RFC2253 | cut -d= -f2-; }   # subject, issuer, startdate, enddate
 days_left() { echo $(( ($(date -d "$(field enddate "$1")" +%s) - $(date +%s)) / 86400 )); }
+fingerprint() { openssl x509 -in "$1" -noout -fingerprint -sha256 2> /dev/null | cut -d= -f2; }   # of the first certificate
+request_names() {   # the DNS names of a certificate request, lower case, sorted, one per line
+    { openssl req -in "$1" -noout -text 2> /dev/null || true; } | grep -o 'DNS:[^,[:space:]]*' | cut -c5- \
+        | tr '[:upper:]' '[:lower:]' | sort -u
+}
 
 make_key() {   # $1: a new RSA 2048 private key
     if ! openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$1.tmp" 2> /dev/null; then
@@ -432,11 +518,21 @@ NGINX
 
 # ---------------------------------------------------------------- commands
 cmd_csr() {
-    local key san subject='^(/[A-Za-z]+=[^/=]+)+$'
+    local subject='^(/[A-Za-z]+=[^/=]+)+$'
     [[ $SUBJECT =~ $subject ]] || die '--subject looks like /C=MY/O=Company Name'
     [[ ! ${SUBJECT^^} =~ /CN= ]] || die '--subject must not hold CN: the first host name of the table is the CN'
     lock
     load_routes
+    make_request
+    printf 'Certificate request for %s (CN %s), saved as %s.\n' "${HOSTS[*]}" "${HOSTS[0]}" "$STATE_DIR/request.csr"
+    printf 'Send this request to the certificate issuer. The private key (%s) stays on this server:\n\n' "$REQUEST_KEY"
+    cat -- "$STATE_DIR/request.csr"
+    [[ -z $KEY_FILE ]] || printf '\nIf a request made with %s was already sent, wait for its certificate instead of sending this one.\n' "$KEY_FILE"
+    printf '\nWhen the certificate comes back: sudo bash https.sh install-cert FILE [CHAIN]\n'
+}
+
+make_request() {   # request.csr for every host name of the table; REQUEST_KEY: the key it was made with
+    local key san
     mkdir -p -- "$STATE_DIR"
     key=$STATE_DIR/key.pem
     if [[ -n $KEY_FILE ]]; then   # a key made elsewhere, for example one a request was already made with
@@ -462,18 +558,24 @@ cmd_csr() {
         -out "$STATE_DIR/request.csr.tmp" || die 'Could not make the certificate request'
     chmod 0644 -- "$STATE_DIR/request.csr.tmp"
     mv -f -- "$STATE_DIR/request.csr.tmp" "$STATE_DIR/request.csr"
-    printf 'Certificate request for %s (CN %s), saved as %s.\n' "${HOSTS[*]}" "${HOSTS[0]}" "$STATE_DIR/request.csr"
-    printf 'Send this request to the certificate issuer. The private key (%s) stays on this server:\n\n' "$key"
-    cat -- "$STATE_DIR/request.csr"
-    [[ -z $KEY_FILE ]] || printf '\nIf a request made with %s was already sent, wait for its certificate instead of sending this one.\n' "$KEY_FILE"
-    printf '\nWhen the certificate comes back: sudo bash https.sh install-cert FILE [CHAIN]\n'
+    REQUEST_KEY=$key
 }
 
 cmd_install_cert() {
-    local cert=${ARGS[0]:-} chain_file=${ARGS[1]:-} key leaf='' kp f missing top anchor purposes chain=() anchors=() args=()
+    local cert=${ARGS[0]:-} chain_file=${ARGS[1]:-}
     [[ -n $cert ]] || die 'Usage: sudo bash https.sh install-cert CERT [CHAIN]'
     lock
     load_routes
+    install_cert "$cert" "$chain_file"
+}
+
+# $1 the certificate file, $2 its chain file or nothing, $3 optionally a function
+# that saves and writes more files just before the certificate is replaced (the
+# new chain is $TEMP_DIR/fullchain.pem), which then come back with the certificate
+# if the change is not kept. With TRUST_FILE set (the Let's Encrypt path), the
+# chain must also lead to one of the roots in it.
+install_cert() {
+    local cert=$1 chain_file=$2 key leaf='' kp f missing top anchor purposes chain=() anchors=() args=()
     collect_certs "$cert" ${chain_file:+"$chain_file"}
     for key in "$STATE_DIR/key.new.pem" "$STATE_DIR/key.pem"; do   # a waiting new key first
         [[ -f $key ]] || continue
@@ -504,16 +606,653 @@ cmd_install_cert() {
         grep -qx 'SSL server : Yes' <<< "$purposes" || die 'The certificate is not meant for a TLS server (its key usage or extended key usage)'
         warn "No intermediate certificate of $(field issuer "$leaf") was given: pass the issuer's chain file as CHAIN, or browsers without it will refuse the site"
     fi
+    if [[ -n $TRUST_FILE ]]; then   # a public CA: its chain must reach a root that browsers and this server trust
+        args=(-no-CApath -no-CAstore -purpose sslserver -CAfile "$TRUST_FILE")
+        if ((${#chain[@]})); then cat -- "${chain[@]}" > "$TEMP_DIR/served.pem"; args+=(-untrusted "$TEMP_DIR/served.pem"); fi
+        openssl verify "${args[@]}" "$leaf" > "$TEMP_DIR/verify.log" 2>&1 \
+            || die "The certificate does not lead to a root this server trusts ($(grep -m1 '^error' "$TEMP_DIR/verify.log")). A test CA such as the Let's Encrypt staging one needs its root: --extra-root FILE"
+    fi
     { openssl x509 -in "$leaf"; for f in "${chain[@]}"; do openssl x509 -in "$f"; done; } > "$TEMP_DIR/fullchain.pem"
     save "$STATE_DIR/fullchain.pem" "$STATE_DIR/key.pem" "$STATE_DIR/key.new.pem"
+    [[ -z ${3:-} ]] || "$3"   # the caller's own files, saved and written as part of the same change, before the certificate
     install -m 0644 -- "$TEMP_DIR/fullchain.pem" "$STATE_DIR/fullchain.pem.tmp"
     mv -f -- "$STATE_DIR/fullchain.pem.tmp" "$STATE_DIR/fullchain.pem"
     [[ $key != "$STATE_DIR/key.new.pem" ]] || mv -f -- "$STATE_DIR/key.new.pem" "$STATE_DIR/key.pem"
     if applied; then activate; fi   # apply ran before: nginx serves the new certificate now
-    keep
+    keep   # only now: until here, any exit puts every saved file back
     printf 'Installed the certificate for %s, issued by %s, valid until %s (%s days).\n' \
         "$(cert_names "$STATE_DIR/fullchain.pem" | paste -sd ' ' -)" "$(field issuer "$leaf")" "$(field enddate "$leaf")" "$(days_left "$leaf")"
     if applied; then printf 'nginx serves it now.\n'; else printf 'Next: sudo bash https.sh apply\n'; fi
+}
+
+# ---------------------------------------------------------------- Let's Encrypt
+read_settings() {   # the options kept by the run that installed the certificate, into SETTINGS
+    local key value
+    [[ -f $LE_DIR/settings ]] || return 0
+    while IFS='=' read -r key value || [[ -n $key ]]; do
+        case $key in SERVER|ACME_DNS|DNS_RESOLVERS|EMAIL|EXTRA_ROOT_FOR|ACME_CA_FOR|TOS_ACCEPTED) SETTINGS[$key]=$value ;; esac
+    done < "$LE_DIR/settings"
+}
+
+le_url() {   # $1 option, $2 value, $3 an example, $4 the schemes: an address of one of them
+    local url="^($4)://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?(/[A-Za-z0-9._~%/-]*)?$"
+    [[ $2 =~ $url ]] || die "$1 must be an ${4//|/:// or }:// address, such as $3, not $2"
+}
+
+# $1 option key, $2 its file in LE_DIR, $3 its settings key, $4 what it is: the file
+# given, else the one kept for SERVER. A kept file belongs to the ACME server it
+# was given with.
+kept_file() {
+    if [[ -v GIVEN[$1] ]]; then
+        [[ -z ${GIVEN[$1]} ]] || [[ -f ${GIVEN[$1]} ]] || die "No such file: ${GIVEN[$1]}"
+        [[ -z ${GIVEN[$1]} ]] || realpath -- "${GIVEN[$1]}"
+    elif [[ -f $LE_DIR/$2 && ${SETTINGS[$3]:-} == "$SERVER" ]]; then
+        printf '%s\n' "$LE_DIR/$2"
+    elif [[ -f $LE_DIR/$2 ]]; then
+        printf 'The %s kept for %s is not used for %s.\n' "$4" "${SETTINGS[$3]:-another ACME server}" "$SERVER" >&2
+    fi
+}
+
+keep_file() {   # $1 the file in effect, $2 its name in LE_DIR: kept for later runs, or removed
+    if [[ -z $1 ]]; then
+        rm -f -- "$LE_DIR/$2"
+    elif [[ $1 != "$LE_DIR/$2" ]]; then
+        install -m 0600 -- "$1" "$LE_DIR/$2.tmp"
+        mv -f -- "$LE_DIR/$2.tmp" "$LE_DIR/$2"
+    fi
+}
+
+is_root() {   # $1: one self-signed CA certificate, in PEM
+    [[ $(grep -c -- '-----BEGIN CERTIFICATE-----' "$1") == 1 ]] || return 1
+    openssl x509 -in "$1" -noout -ext basicConstraints 2> /dev/null | grep -q 'CA:TRUE' || return 1
+    openssl verify -no-CApath -no-CAstore -CAfile "$1" "$1" > /dev/null 2>&1   # signed by its own key
+}
+
+le_options() {   # the options given, else those kept, else the defaults; checked before anything changes
+    local item port resolvers=()
+    read_settings
+    SERVER=${GIVEN[server]-${SETTINGS[SERVER]:-$DEFAULT_SERVER}}
+    ACME_DNS=${GIVEN[acmedns]-${SETTINGS[ACME_DNS]:-$DEFAULT_ACME_DNS}}
+    while [[ $ACME_DNS == */ ]]; do ACME_DNS=${ACME_DNS%/}; done
+    DNS_RESOLVERS=${GIVEN[resolvers]-${SETTINGS[DNS_RESOLVERS]:-}}
+    EMAIL=${GIVEN[email]-${SETTINGS[EMAIL]:-}}
+    le_url --server "$SERVER" https://acme-staging-v02.api.letsencrypt.org/directory https
+    le_url --acme-dns "$ACME_DNS" "$DEFAULT_ACME_DNS" 'https|http'
+    [[ $ACME_DNS != http://* ]] || warn "--acme-dns $ACME_DNS sends the acme-dns passwords unencrypted: use http:// only for a local test"
+    LEGO_NETWORK=${PERODUA_HTTPS_LEGO_NETWORK:-host}
+    [[ $LEGO_NETWORK =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || die "PERODUA_HTTPS_LEGO_NETWORK must be a Docker network name, not $LEGO_NETWORK"
+    [[ -z $EMAIL || $EMAIL =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]] || die "--email: $EMAIL is not an e-mail address"
+    if [[ -n $DNS_RESOLVERS ]]; then   # HOST[:PORT],... as lego takes them, with the port always written
+        IFS=, read -ra resolvers <<< "$DNS_RESOLVERS"
+        DNS_RESOLVERS=''
+        for item in "${resolvers[@]}"; do
+            [[ $item =~ ^(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]+)(:([0-9]{1,5}))?$ ]] \
+                || die "--dns-resolvers: $item is not HOST or HOST:PORT (an IPv6 address in brackets, like [2001:db8::53]:53)"
+            port=${BASH_REMATCH[3]:-53}
+            ((10#$port >= 1 && 10#$port <= 65535)) || die "--dns-resolvers: $item has no valid port"
+            DNS_RESOLVERS+=${DNS_RESOLVERS:+,}${BASH_REMATCH[1]}:$((10#$port))
+        done
+    fi
+    EXTRA_ROOT=$(kept_file extraroot extra-root.pem EXTRA_ROOT_FOR 'extra root')
+    [[ -z $EXTRA_ROOT ]] || is_root "$EXTRA_ROOT" \
+        || die "--extra-root: $EXTRA_ROOT is not one root certificate (PEM, a CA that signed itself)"
+    ACME_CA=$(kept_file acmeca acme-ca.pem ACME_CA_FOR 'ACME server CA')
+    [[ -z $ACME_CA ]] || openssl x509 -in "$ACME_CA" -noout 2> /dev/null || die "--acme-ca: $ACME_CA holds no PEM certificate"
+}
+
+save_settings() {   # the options of this run, for later runs and the timer
+    local tos=${SETTINGS[TOS_ACCEPTED]:-}
+    ((ACCEPT_TOS == 0)) || [[ " $tos " == *" $SERVER "* ]] || tos+=${tos:+ }$SERVER
+    keep_file "$EXTRA_ROOT" extra-root.pem
+    keep_file "$ACME_CA" acme-ca.pem
+    printf 'SERVER=%s\nACME_DNS=%s\nDNS_RESOLVERS=%s\nEMAIL=%s\nEXTRA_ROOT_FOR=%s\nACME_CA_FOR=%s\nTOS_ACCEPTED=%s\n' \
+        "$SERVER" "$ACME_DNS" "$DNS_RESOLVERS" "$EMAIL" "${EXTRA_ROOT:+$SERVER}" "${ACME_CA:+$SERVER}" "$tos" > "$LE_DIR/settings.tmp"
+    mv -f -- "$LE_DIR/settings.tmp" "$LE_DIR/settings"
+    SETTINGS[TOS_ACCEPTED]=$tos
+}
+
+le_prerequisites() {   # what the server needs to get the certificate, checked before anything changes
+    local tos code
+    command -v docker > /dev/null || die 'letsencrypt runs lego in Docker, which is not installed: sudo bash install-dependencies.sh --role app'
+    docker info > /dev/null 2>&1 || die 'Docker does not run (docker info fails): sudo systemctl enable --now docker'
+    command -v curl > /dev/null || die 'curl is required: sudo apt-get install curl'
+    command -v dig > /dev/null || die 'letsencrypt looks the DNS records up with dig, which is not installed: sudo apt-get install bind9-dnsutils'
+    [[ -s $SYSTEM_ROOTS ]] || die "This server has no CA certificates ($SYSTEM_ROOTS) to check the new certificate with: sudo apt-get install ca-certificates"
+    [[ $SERVER != https://acme-staging-v02.api.letsencrypt.org/* || -n $EXTRA_ROOT ]] \
+        || die "Certificates from the Let's Encrypt staging server lead to its test roots, which no system trusts: pass the one they lead to with --extra-root FILE (see https://letsencrypt.org/docs/staging-environment/)"
+    curl -fsS --max-time 20 ${ACME_CA:+--cacert "$ACME_CA"} -o "$TEMP_DIR/directory.json" -- "$SERVER" 2> "$TEMP_DIR/curl.log" \
+        || die "Could not reach the ACME server $SERVER ($(tail -n 1 "$TEMP_DIR/curl.log")): this server needs outbound HTTPS to it"
+    grep -q '"newOrder"' "$TEMP_DIR/directory.json" || die "$SERVER is not an ACME directory (it has no newOrder)"
+    tos=$(sed -n 's/.*"termsOfService" *: *"\([^"]*\)".*/\1/p' "$TEMP_DIR/directory.json" | head -n 1)
+    if [[ -n $tos ]] && ((ACCEPT_TOS == 0)) && [[ " ${SETTINGS[TOS_ACCEPTED]:-} " != *" $SERVER "* ]]; then
+        die "The terms of service of $SERVER apply to the account this server gets there: $tos. Read them; to accept them, run the same command with --accept-tos"
+    fi
+    code=$(curl -sS --max-time 20 -o /dev/null -w '%{http_code}' -- "$ACME_DNS/health" 2> "$TEMP_DIR/curl.log") \
+        || die "Could not reach the acme-dns server $ACME_DNS ($(tail -n 1 "$TEMP_DIR/curl.log")): this server needs outbound HTTPS to it"
+    [[ $code != 5* ]] || die "The acme-dns server $ACME_DNS answers HTTP $code: it does not work at the moment"
+    if ! docker image inspect "$LEGO_IMAGE" > /dev/null 2>&1; then
+        printf 'Pulling lego (%s)...\n' "$LEGO_IMAGE"
+        if ! docker pull -q "$LEGO_IMAGE" > "$TEMP_DIR/pull.log" 2>&1; then
+            cat "$TEMP_DIR/pull.log" >&2
+            die "Could not pull $LEGO_IMAGE (above): this server needs outbound HTTPS to Docker Hub (registry-1.docker.io), or the image loaded with docker load"
+        fi
+    fi
+}
+
+# The acme-dns accounts are kept in LE_DIR/acme-dns.json, one per host name:
+#   {"HOST":{"fulldomain":"...","subdomain":"...","username":"...","password":"...","server_url":"..."},...}
+# on one line when this script writes it, as goacmedns (lego's acme-dns library)
+# does. A file made elsewhere, such as one from the acme-dns operator, may be
+# spread over lines, hold the fields in another order and hold more of them (such
+# as allowfrom, a list); it is used as it is. lego never gets it: it gets a copy
+# the script writes (lego_accounts). goacmedns reads a file it cannot parse as no
+# accounts at all, and would then make new ones over it, so the file must be
+# exactly this JSON: no trailing comma, nothing after the object, each host name
+# and each field once. Values are names, UUIDs and passwords: no backslash, no
+# control character.
+json_pairs() {   # $1 such a file: a HOST<TAB><TAB> line per host name, then HOST<TAB>FIELD<TAB>VALUE per text field; fails on anything else
+    awk '
+        function fail() { failed = 1; exit 1 }
+        function blank() { while (pos <= n && index(" \t\r\n", substr(s, pos, 1))) pos++ }
+        function next_char() { blank(); return substr(s, pos, 1) }
+        function expect(c) { if (next_char() != c) fail(); pos++ }
+        function text(   start, c) {   # a string, without escapes
+            if (next_char() != "\"") fail()
+            start = ++pos
+            while (pos <= n) {
+                c = substr(s, pos, 1)
+                if (c == "\"") { pos++; return substr(s, start, pos - start - 1) }
+                if (c == "\\" || c < " ") fail()
+                pos++
+            }
+            fail()
+        }
+        function scalar(   start, word) {   # a number, true, false or null
+            blank()
+            start = pos
+            while (pos <= n && substr(s, pos, 1) ~ /[A-Za-z0-9.+-]/) pos++
+            word = substr(s, start, pos - start)
+            if (word !~ /^(true|false|null|-?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?)$/) fail()
+        }
+        function list(   c) {   # [ strings or scalars ], such as allowfrom
+            expect("[")
+            if (next_char() == "]") { pos++; return }
+            for (;;) {
+                if (next_char() == "\"") text(); else scalar()
+                c = next_char(); pos++
+                if (c == "]") return
+                if (c != ",") fail()
+            }
+        }
+        { s = s $0 "\n" }
+        END {
+            if (failed) exit 1
+            n = length(s); pos = 1
+            expect("{")
+            if (next_char() == "}") pos++
+            else for (;;) {
+                host = text()
+                if (host in hosts) fail()
+                hosts[host] = 1
+                out = out host "\t\t\n"
+                expect(":"); expect("{")
+                if (next_char() == "}") pos++
+                else for (;;) {
+                    field = text()
+                    if ((host SUBSEP field) in fields) fail()
+                    fields[host, field] = 1
+                    expect(":")
+                    c = next_char()
+                    if (c == "\"") out = out host "\t" field "\t" text() "\n"
+                    else if (c == "[") list()
+                    else scalar()
+                    c = next_char(); pos++
+                    if (c == "}") break
+                    if (c != ",") fail()
+                }
+                c = next_char(); pos++
+                if (c == "}") break
+                if (c != ",") fail()
+            }
+            blank()
+            if (pos <= n) fail()   # something after the object
+            printf "%s", out
+        }' "$1"
+}
+
+load_accounts() {   # acme-dns.json into ACCOUNT[HOST/FIELD], and ACCOUNT_HOSTS (every host name in it)
+    local host field value
+    ACCOUNT=() ACCOUNT_HOSTS=()
+    [[ -f $LE_DIR/acme-dns.json ]] || return 0
+    json_pairs "$LE_DIR/acme-dns.json" > "$TEMP_DIR/accounts" \
+        || die "$LE_DIR/acme-dns.json is not a file of acme-dns accounts this script can read: one JSON object {\"HOST\":{\"fulldomain\":\"...\",...},...}, each host name and field once, no trailing comma and nothing after it. It was left as it is"
+    while IFS=$'\t' read -r host field value; do
+        [[ " ${ACCOUNT_HOSTS[*]} " == *" $host "* ]] || ACCOUNT_HOSTS+=("$host")
+        [[ -z $field ]] || ACCOUNT[$host/$field]=$value
+    done < "$TEMP_DIR/accounts"
+}
+
+acme_dns_field() { printf '%s' "${ACCOUNT[$1/$2]:-}"; }   # $1 host name, $2 field of its acme-dns account
+
+write_accounts() {   # $1 file, then host names: their accounts from ACCOUNT as goacmedns writes them: one line, 0600, at once
+    local file=$1 host line='' field value
+    shift
+    while IFS= read -r host; do
+        line+="${line:+,}\"$host\":{"
+        for field in fulldomain subdomain username password server_url; do
+            value=${ACCOUNT[$host/$field]:-}
+            line+="\"$field\":\"$value\"$([[ $field == server_url ]] || printf ,)"
+        done
+        line+='}'
+    done < <(printf '%s\n' "$@" | sort)
+    printf '{%s}' "$line" > "$file.tmp"
+    chmod 0600 -- "$file.tmp"
+    mv -f -- "$file.tmp" "$file"
+}
+
+register_account() {   # $1 host name: a new account on the acme-dns server, written to acme-dns.json at once
+    local code field value safe='^[A-Za-z0-9._-]+$'
+    # as goacmedns registers: POST /register without a body; the answer is
+    # {"username":"...","password":"...","fulldomain":"...","subdomain":"...","allowfrom":[]}
+    code=$(curl -sS --max-time 30 -X POST -H 'Accept: application/json' -o "$TEMP_DIR/register.json" -w '%{http_code}' \
+        -- "$ACME_DNS/register" 2> "$TEMP_DIR/curl.log") \
+        || die "Could not reach the acme-dns server $ACME_DNS to make the account of $1 ($(tail -n 1 "$TEMP_DIR/curl.log"))"
+    [[ $code == 2?? ]] || die "The acme-dns server $ACME_DNS did not make an account for $1 (HTTP $code: $(head -c 200 "$TEMP_DIR/register.json" 2> /dev/null)). If it makes accounts only for its operator, put the file of accounts they give in $LE_DIR/acme-dns.json"
+    { printf '{"%s":' "$1"; cat -- "$TEMP_DIR/register.json"; printf '}'; } > "$TEMP_DIR/registered.json"
+    json_pairs "$TEMP_DIR/registered.json" > "$TEMP_DIR/registered" || die "The acme-dns server $ACME_DNS gave an answer that is not an account"
+    while IFS=$'\t' read -r _ field value; do
+        case $field in fulldomain|subdomain|username|password) ACCOUNT[$1/$field]=$value ;; esac
+    done < "$TEMP_DIR/registered"
+    for field in fulldomain subdomain username password; do
+        [[ ${ACCOUNT[$1/$field]:-} =~ $safe ]] || die "The acme-dns server $ACME_DNS gave an account without a usable $field"
+    done
+    ACCOUNT[$1/server_url]=$ACME_DNS   # as goacmedns records it
+    ACCOUNT_HOSTS+=("$1")
+    write_accounts "$LE_DIR/acme-dns.json" "${ACCOUNT_HOSTS[@]}"
+}
+
+# $1 a DNS server (HOST:PORT, an IPv6 address in brackets; '' for this server's
+# DNS), $2 host name, $3 the name its record must point to. Sets LOOKUP to found,
+# missing, other:NAME (it points elsewhere), unknown (the server did not answer:
+# no reply, SERVFAIL, REFUSED) or nodig.
+lookup_at() {
+    local name=_acme-challenge.$2 out status cname args
+    LOOKUP=unknown
+    command -v dig > /dev/null || { LOOKUP=nodig; return 0; }
+    args=(+time=3 +tries=2 +noall +answer +comments -t CNAME "$name")
+    if [[ -n $1 ]]; then
+        out=${1%:*}
+        out=${out#\[}
+        args+=("@${out%\]}" -p "${1##*:}")
+    fi
+    out=$(dig "${args[@]}" 2> /dev/null) || return 0
+    status=$(sed -n 's/.*status: \([A-Z]*\).*/\1/p' <<< "$out" | head -n 1)
+    [[ $status == NOERROR || $status == NXDOMAIN ]] || return 0   # this one cannot tell
+    cname=$(awk -v name="${name,,}." 'tolower($1) == name && $4 == "CNAME" { print tolower($5); exit }' <<< "$out")
+    cname=${cname%.}
+    if [[ -z $cname ]]; then LOOKUP=missing; elif [[ $cname == "${3,,}" ]]; then LOOKUP=found; else LOOKUP=other:$cname; fi
+}
+
+lookup() {   # $1 host name, $2 its target: LOOKUP from the first DNS server of --dns-resolvers that answers, else this server's
+    local resolver resolvers=('')
+    [[ -z $DNS_RESOLVERS ]] || IFS=, read -ra resolvers <<< "$DNS_RESOLVERS"
+    for resolver in "${resolvers[@]}"; do
+        lookup_at "$resolver" "$1" "$2"
+        [[ $LOOKUP == unknown ]] || return 0
+    done
+}
+
+# For letsencrypt: the records of the host names in $@ as ONE DNS server sees them,
+# into CNAME_STATE, and that server into LEGO_RESOLVERS (nothing for this server's
+# DNS). lego checks the TXT record of every host name on every DNS server it is
+# given, and fails on one that does not answer, so it gets the first server of
+# --dns-resolvers that answered for every host name. Fails, with what each server
+# did not answer, when none did.
+pick_resolver() {
+    local resolver name host failed words='' own="this server's DNS" resolvers=('')
+    [[ -z $DNS_RESOLVERS ]] || IFS=, read -ra resolvers <<< "$DNS_RESOLVERS"
+    for resolver in "${resolvers[@]}"; do
+        failed='' name=$resolver
+        [[ -n $name ]] || name=$own
+        for host in "$@"; do
+            lookup_at "$resolver" "$host" "${ACCOUNT[$host/fulldomain]}"
+            CNAME_STATE[$host]=$LOOKUP
+            [[ $LOOKUP != unknown ]] || failed+="${failed:+, }_acme-challenge.$host"
+        done
+        if [[ -z $failed ]]; then
+            LEGO_RESOLVERS=$resolver RECORDS_BY=$name
+            return 0
+        fi
+        words+="${words:+; }$name did not answer for $failed"
+    done
+    PICK_FAILURE=$words
+    return 1
+}
+
+state_words() {   # $1 a LOOKUP value, or new: in words
+    case $1 in
+        found) printf 'found' ;;
+        missing) printf 'NOT FOUND' ;;
+        new) printf 'NOT FOUND (its account was made now)' ;;
+        other:*) printf 'WRONG: it points to %s' "${1#other:}" ;;
+        nodig) printf 'not looked up: dig is not installed (apt-get install bind9-dnsutils)' ;;
+        *) printf 'not looked up: no DNS server answered' ;;
+    esac
+}
+
+print_records() {   # the CNAME records the DNS administrator creates, and what the DNS shows of them now
+    local host target state
+    printf "\nLet's Encrypt checks each host name through a DNS record. The DNS administrator\n"
+    printf 'creates these CNAME records once, in the DNS that the internet sees:\n\n'
+    for host in "${HOSTS[@]}"; do
+        target=$(acme_dns_field "$host" fulldomain)
+        [[ -z $target ]] || printf '_acme-challenge.%s CNAME %s\n' "$host" "$target"
+    done
+    local by=$RECORDS_BY
+    [[ -n $by ]] || by=$DNS_RESOLVERS
+    [[ -n $by ]] || by="this server's DNS"
+    printf '\nWhat %s answers now:\n' "$by"
+    for host in "${HOSTS[@]}"; do
+        target=$(acme_dns_field "$host" fulldomain)
+        [[ -n $target ]] || continue
+        state=${CNAME_STATE[$host]:-}
+        [[ -n $state ]] || { lookup "$host" "$target"; state=$LOOKUP; }
+        printf '  _acme-challenge.%s: %s\n' "$host" "$(state_words "$state")"
+    done
+    printf "If this server's DNS keeps its own internal view of these names, the records go there\n"
+    printf 'too, or name DNS servers that see the public records with --dns-resolvers.\n'
+}
+
+run_lego() {   # lego gets the certificate for request.csr into LE_DIR/lego/certificates/perodua-https.crt
+    # --renew-force: a certificate lego has already got for this name would be skipped until
+    # lego finds it due; this script decides when to renew. --dns.propagation.disable-ans: acme-dns
+    # serves the TXT record as soon as it takes it, and a query to the authoritative servers
+    # needs outbound port 53, which private networks often block; the record is still checked
+    # through the resolvers. --dns.resolvers: the one DNS server that answered this script's
+    # look-up of every record (LEGO_RESOLVERS, see pick_resolver); none for this server's DNS.
+    local ca status=0 env=() args=(run --path /data/lego --server "$SERVER" --accept-tos --account-id perodua-https
+                --cert.name perodua-https --csr /request.csr --dns acmedns --dns.propagation.disable-ans
+                --renew-force --ari-disable)
+    # The container sees only what lego reads and writes, all of it under --dir: its own
+    # folder (its ACME account and certificates), the copy of the accounts, the request and
+    # the ACME server's CA. Not acme-dns.json, not the rest of LE_DIR, never the private key.
+    install -d -m 0700 -- "$LE_DIR/lego"
+    local mounts=(-v "$LE_DIR/lego:/data/lego" -v "$LE_DIR/acme-dns.lego.json:/data/acme-dns.lego.json"
+                  -v "$STATE_DIR/request.csr:/request.csr:ro")
+    [[ -z $EMAIL ]] || args+=(--email "$EMAIL")
+    [[ -z $LEGO_RESOLVERS ]] || args+=(--dns.resolvers "$LEGO_RESOLVERS")
+    if [[ -n $ACME_CA ]]; then   # into LE_DIR first, when given from elsewhere
+        ca=$LE_DIR/acme-ca.pem
+        [[ $ACME_CA == "$ca" ]] || { ca=$LE_DIR/acme-ca.run.pem; install -m 0600 -- "$ACME_CA" "$ca"; }
+        mounts+=(-v "$ca:/data/acme-ca.pem:ro")
+        env=(-e LEGO_CA_CERTIFICATES=/data/acme-ca.pem)
+    fi
+    # lego gets a copy of the table's accounts, written here as goacmedns writes them, never
+    # acme-dns.json: when an account does not work for it, lego makes another and saves its
+    # storage over the file. A copy that changed tells that (LEGO_CHANGED_ACCOUNTS).
+    write_accounts "$LE_DIR/acme-dns.lego.json" "${HOSTS[@]}"
+    cp -- "$LE_DIR/acme-dns.lego.json" "$TEMP_DIR/acme-dns.lego.json"
+    docker run --rm --network "$LEGO_NETWORK" "${mounts[@]}" \
+        -e LEGO_LOG_FORMAT=text -e "ACME_DNS_API_BASE=$ACME_DNS" -e ACME_DNS_STORAGE_PATH=/data/acme-dns.lego.json "${env[@]}" \
+        "$LEGO_IMAGE" "${args[@]}" > "$TEMP_DIR/lego.log" 2>&1 || status=$?
+    LEGO_CHANGED_ACCOUNTS=0
+    cmp -s -- "$LE_DIR/acme-dns.lego.json" "$TEMP_DIR/acme-dns.lego.json" || LEGO_CHANGED_ACCOUNTS=1
+    rm -f -- "$LE_DIR/acme-ca.run.pem" "$LE_DIR/acme-dns.lego.json"
+    return "$status"
+}
+
+lego_errors() {   # lego's error lines, else the end of what it printed
+    grep 'level=ERROR' "$TEMP_DIR/lego.log" || tail -n 20 "$TEMP_DIR/lego.log"
+}
+
+renewal_dir() {   # the --dir the renewal timer works on; nothing without a timer
+    [[ -f $UNIT_DIR/$UNIT.service ]] || return 0
+    sed -n 's/^ExecStart=.* --dir \([^ ]*\).*/\1/p' "$UNIT_DIR/$UNIT.service" | head -n 1
+}
+
+renewal_args() {   # what the timer passes to the copy: this --dir, and the other paths when not the default
+    local words=(--dir "$STATE_DIR")
+    [[ -z $ROUTES ]] || words+=(--routes "$ROUTES")
+    [[ $NGINX_CONF == "$DEFAULT_NGINX_CONF" ]] || words+=(--nginx-conf "$NGINX_CONF")
+    [[ $UNIT_DIR == "$DEFAULT_UNIT_DIR" ]] || words+=(--unit-dir "$UNIT_DIR")
+    [[ $LIB_DIR == "$DEFAULT_LIB_DIR" ]] || words+=(--lib-dir "$LIB_DIR")
+    printf '%s\n' "${words[*]}"
+}
+
+unit_files() {   # the service and the timer, into $TEMP_DIR/units
+    mkdir -p -- "$TEMP_DIR/units"
+    cat > "$TEMP_DIR/units/$UNIT.service" << UNIT
+# Written by https.sh letsencrypt; removed by https.sh uninstall.
+[Unit]
+Description=Renew the Let's Encrypt certificate of https.sh when fewer than $RENEW_DAYS days are left
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash $LIB_DIR/https.sh letsencrypt --renew $(renewal_args)
+UNIT
+    cat > "$TEMP_DIR/units/$UNIT.timer" << UNIT
+# Written by https.sh letsencrypt; removed by https.sh uninstall.
+[Unit]
+Description=Daily renewal check of the Let's Encrypt certificate of https.sh
+
+[Timer]
+OnCalendar=*-*-* 02:00:00
+RandomizedDelaySec=4h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UNIT
+}
+
+# The timer runs a copy of this script in LIB_DIR, which stays when the downloaded
+# scripts folder is moved or deleted. A run from another folder (a newer release)
+# updates the copy; the timer's own run changes nothing of it.
+setup_renewal() {
+    local name changed=0 new=0
+    [[ $SCRIPT_PATH != "$LIB_DIR/https.sh" ]] || return 0
+    [[ -f $UNIT_DIR/$UNIT.timer ]] || new=1
+    install -d -m 0755 -- "$LIB_DIR"
+    if ! cmp -s -- "$SCRIPT_PATH" "$LIB_DIR/https.sh"; then
+        install -m 0755 -- "$SCRIPT_PATH" "$LIB_DIR/https.sh.tmp"
+        mv -f -- "$LIB_DIR/https.sh.tmp" "$LIB_DIR/https.sh"
+        ((new)) || printf 'Updated the copy of this script that the renewal timer runs: %s\n' "$LIB_DIR/https.sh"
+    fi
+    if [[ -f $SCRIPT_DIR/https-routes.conf.example ]] && ! cmp -s -- "$SCRIPT_DIR/https-routes.conf.example" "$LIB_DIR/https-routes.conf.example"; then
+        install -m 0644 -- "$SCRIPT_DIR/https-routes.conf.example" "$LIB_DIR/https-routes.conf.example"
+    fi
+    unit_files
+    mkdir -p -- "$UNIT_DIR"
+    for name in "$UNIT.service" "$UNIT.timer"; do
+        if cmp -s -- "$TEMP_DIR/units/$name" "$UNIT_DIR/$name"; then continue; fi
+        install -m 0644 -- "$TEMP_DIR/units/$name" "$UNIT_DIR/$name.tmp"
+        mv -f -- "$UNIT_DIR/$name.tmp" "$UNIT_DIR/$name"
+        changed=1
+    done
+    if [[ -d /run/systemd/system ]]; then
+        ((changed == 0)) || systemctl daemon-reload
+        systemctl enable --now --quiet "$UNIT.timer"
+        ((new == 0)) || printf 'Renewal: %s runs %s daily and renews the certificate when fewer than %s days are left.\n' \
+            "$UNIT.timer" "$LIB_DIR/https.sh" "$RENEW_DAYS"
+    else
+        warn "systemd does not run here, so $UNIT.timer is written but not started: renew with sudo bash $LIB_DIR/https.sh letsencrypt --renew, for example daily from cron"
+    fi
+}
+
+remove_renewal() {   # the timer, its units and the copy of this script, when they work on this --dir
+    local owner
+    owner=$(renewal_dir)
+    if [[ -n $owner && $owner != "$STATE_DIR" ]]; then
+        printf 'The Let'\''s Encrypt renewal timer works on %s: it is left alone.\n' "$owner"
+        return 0
+    fi
+    if [[ -f $UNIT_DIR/$UNIT.timer || -f $UNIT_DIR/$UNIT.service ]]; then
+        if [[ -d /run/systemd/system ]]; then systemctl disable --now --quiet "$UNIT.timer" 2> /dev/null || true; fi
+        rm -f -- "$UNIT_DIR/$UNIT.timer" "$UNIT_DIR/$UNIT.service"
+        if [[ -d /run/systemd/system ]]; then systemctl daemon-reload; fi
+        printf 'Removed the Let'\''s Encrypt renewal timer.\n'
+    fi
+    rm -f -- "$LIB_DIR/https.sh" "$LIB_DIR/https-routes.conf.example"
+    rmdir -- "$LIB_DIR" 2> /dev/null || true
+}
+
+from_letsencrypt() {   # whether the installed certificate is one letsencrypt installed: its fingerprint is a line of LE_DIR/installed
+    [[ -f $LE_DIR/installed && -f $STATE_DIR/fullchain.pem ]] || return 1
+    grep -qxF -- "$(fingerprint "$STATE_DIR/fullchain.pem")" "$LE_DIR/installed"
+}
+
+renewal_due() {   # for --renew: whether the certificate is to be renewed now; if not, says why
+    local f=$STATE_DIR/fullchain.pem
+    [[ -f $LE_DIR/installed && -f $f ]] || die 'No certificate from Let'\''s Encrypt is installed here yet: run sudo bash https.sh letsencrypt first'
+    if ! from_letsencrypt; then
+        printf 'The installed certificate, issued by %s, was not installed by letsencrypt: --renew leaves it alone.\n' "$(field issuer "$f")"
+        return 1
+    fi
+    if openssl x509 -in "$f" -noout -checkend $((RENEW_DAYS * 86400)) > /dev/null; then
+        printf 'The certificate is valid until %s (%s days): it is renewed when fewer than %s days are left.\n' \
+            "$(field enddate "$f")" "$(days_left "$f")" "$RENEW_DAYS"
+        return 1
+    fi
+    printf 'The certificate expires on %s (%s days left): renewing it.\n' "$(field enddate "$f")" "$(days_left "$f")"
+}
+
+# For install_cert, before the certificate is replaced: the options it comes with,
+# and what the renewal knows it by. An ordinary failure puts all of it back. A hard
+# stop (a kill, a power cut) runs nothing more, so LE_DIR/installed holds, until
+# the change is kept, the fingerprint of the certificate in place (when it is one
+# from letsencrypt) and that of the new one: whichever of the two such a stop
+# leaves in place, the renewal still knows it.
+# A stop between the certificate and nginx's reload (a kill, a power cut) leaves
+# nginx serving the certificate it had, while the renewal finds the new one on
+# disk valid and would never reload nginx. So every letsencrypt run checks, as
+# apply and install-cert do, that nginx serves the installed chain for every host
+# name, and reloads it if not. $1 strict: when nginx -t then refuses the files,
+# fail without changing anything (the timer run shows as failed); otherwise only
+# warn, as the installation of the same run checks nginx again.
+nginx_serves_installed() {
+    applied && [[ -f $STATE_DIR/fullchain.pem ]] || return 0   # no nginx file of this --dir
+    command -v nginx > /dev/null && nginx_running || return 0   # it reads the files when it starts
+    ! active || return 0
+    if ! nginx -t > "$TEMP_DIR/nginx-t.log" 2>&1; then
+        cat -- "$TEMP_DIR/nginx-t.log" >&2
+        if [[ $1 != strict ]]; then
+            warn "nginx does not serve the installed certificate, and nginx -t refuses the files (above): this run's installation checks them again"
+            return 0
+        fi
+        die "nginx does not serve the installed certificate $STATE_DIR/fullchain.pem, and nginx -t refuses the files (above), so nginx was not reloaded and nothing was changed. A stop in the middle of an installation can leave the key and the certificate apart: get and install a new certificate with sudo bash https.sh letsencrypt"
+    fi
+    reload_nginx
+    within_10s active \
+        || die 'nginx was reloaded but, after about 10 seconds, still does not serve the installed certificate (see: sudo journalctl -u nginx, /var/log/nginx/error.log)'
+    printf 'nginx was serving an older certificate than %s: it was reloaded and serves that one now.\n' "$STATE_DIR/fullchain.pem"
+}
+
+le_record() {
+    local new
+    save "$LE_DIR/installed" "$LE_DIR/settings" "$LE_DIR/extra-root.pem" "$LE_DIR/acme-ca.pem"
+    new=$(fingerprint "$TEMP_DIR/fullchain.pem")
+    { if from_letsencrypt; then fingerprint "$STATE_DIR/fullchain.pem"; fi; printf '%s\n' "$new"; } > "$LE_DIR/installed.tmp"
+    mv -f -- "$LE_DIR/installed.tmp" "$LE_DIR/installed"
+    save_settings
+}
+
+le_recorded() {   # after the change is kept: installed names the new certificate only
+    fingerprint "$STATE_DIR/fullchain.pem" > "$LE_DIR/installed.tmp"
+    mv -f -- "$LE_DIR/installed.tmp" "$LE_DIR/installed"
+}
+
+cmd_letsencrypt() {
+    local path owner host before crt url waiting=0 checked=()
+    LE_DIR=$STATE_DIR/letsencrypt
+    le_options
+    for path in "$STATE_DIR" "$ROUTES" "$NGINX_CONF" "$UNIT_DIR" "$LIB_DIR"; do   # they go into the renewal unit
+        [[ -z $path || $path =~ ^/[A-Za-z0-9._/-]+$ ]] || die "The renewal timer takes paths of letters, digits and . _ - / only, not $path"
+    done
+    lock
+    load_routes
+    owner=$(renewal_dir)
+    [[ -z $owner || $owner == "$STATE_DIR" ]] \
+        || die "The renewal timer ($UNIT_DIR/$UNIT.service) works on $owner: one Let's Encrypt setup per server"
+    if ((RENEW)) && ! renewal_due; then
+        nginx_serves_installed strict   # nothing else in this run would reload nginx
+        setup_renewal
+        return 0
+    fi
+    nginx_serves_installed lenient
+    le_prerequisites
+    install -d -m 0700 -- "$LE_DIR"
+    [[ ! -f $LE_DIR/acme-dns.json ]] || chmod 0600 -- "$LE_DIR/acme-dns.json"   # it holds the accounts' passwords
+    load_accounts
+    for host in "${HOSTS[@]}"; do   # the accounts there are used as they are, if they are complete and of this acme-dns server
+        [[ " ${ACCOUNT_HOSTS[*]} " == *" $host "* ]] || continue
+        for path in fulldomain subdomain username password; do
+            [[ ${ACCOUNT[$host/$path]:-} =~ ^[A-Za-z0-9._-]+$ ]] \
+                || die "The acme-dns account of $host in $LE_DIR/acme-dns.json has no usable $path. The file was left as it is"
+        done
+        url=${ACCOUNT[$host/server_url]:-}
+        while [[ $url == */ ]]; do url=${url%/}; done
+        [[ -n $url ]] \
+            || die "The acme-dns account of $host in $LE_DIR/acme-dns.json does not say which acme-dns server it is on (server_url). If the file came from an older tool, add \"server_url\":\"$ACME_DNS\" to each account in it. The file was left as it is"
+        [[ $url == "$ACME_DNS" ]] \
+            || die "The acme-dns accounts in $LE_DIR/acme-dns.json were made on $url, not $ACME_DNS. To move to $ACME_DNS, delete that file and run letsencrypt again: it makes accounts there and prints their records, which the DNS administrator puts in place of the old ones"
+    done
+    # The table's request, as csr makes it: every host name, with key.pem or a new key waiting.
+    if [[ ! -f $STATE_DIR/request.csr || $(request_names "$STATE_DIR/request.csr") != "$(printf '%s\n' "${HOSTS[@]}" | sort -u)" ]] \
+        || ! { [[ -f $STATE_DIR/key.new.pem && $(pub_of req "$STATE_DIR/request.csr") == "$(pub_of key "$STATE_DIR/key.new.pem")" ]] \
+               || [[ -f $STATE_DIR/key.pem && $(pub_of req "$STATE_DIR/request.csr") == "$(pub_of key "$STATE_DIR/key.pem")" ]]; }; then
+        make_request
+        printf 'Made the certificate request for %s with %s (it stays on this server).\n' "${HOSTS[*]}" "$REQUEST_KEY"
+    fi
+    # An account for every host name, made here: lego would make one only while it solves a
+    # challenge, which Let's Encrypt skips for a host name it checked a short while ago.
+    for host in "${HOSTS[@]}"; do
+        [[ " ${ACCOUNT_HOSTS[*]} " != *" $host "* ]] || continue
+        register_account "$host"
+        CNAME_STATE[$host]=new   # its record cannot exist yet: not looked up, so no DNS server keeps its absence
+        waiting=1
+    done
+    for host in "${HOSTS[@]}"; do   # lego runs only once every record points at its account
+        [[ -n ${CNAME_STATE[$host]:-} ]] || checked+=("$host")
+    done
+    if ((${#checked[@]})) && ! pick_resolver "${checked[@]}"; then
+        print_records
+        die "No DNS server answered for every record, and lego checks each record on each DNS server it is given: $PICK_FAILURE. Check these DNS servers, or name one that answers for all of them with --dns-resolvers"
+    fi
+    for host in "${checked[@]}"; do
+        [[ ${CNAME_STATE[$host]} == found ]] || waiting=1
+    done
+    if ((waiting)); then   # Let's Encrypt would not find them either
+        print_records
+        printf 'When the records exist, run the same command again.\n'
+        exit 3
+    fi
+    crt=$LE_DIR/lego/certificates/perodua-https.crt
+    before=$( [[ ! -f $crt ]] || fingerprint "$crt")
+    printf 'Asking %s for a certificate for %s (lego, this takes a minute or two)...\n' "$SERVER" "${HOSTS[*]}"
+    if ! run_lego; then
+        lego_errors >&2
+        ((LEGO_CHANGED_ACCOUNTS == 0)) \
+            || die "lego made or changed an acme-dns account in the copy of the accounts it was given, which it does when one does not work for it (its messages above). $LE_DIR/acme-dns.json was left as it is"
+        print_records
+        die "Let's Encrypt did not issue the certificate (lego's messages above)"
+    fi
+    if ((LEGO_CHANGED_ACCOUNTS)); then
+        cat "$TEMP_DIR/lego.log" >&2
+        die "lego made or changed an acme-dns account in the copy of the accounts it was given (its messages above). The new certificate was not installed, and $LE_DIR/acme-dns.json was left as it is"
+    fi
+    if [[ ! -f $crt || $(fingerprint "$crt") == "$before" ]]; then
+        cat "$TEMP_DIR/lego.log" >&2
+        die 'lego ended without a new certificate (its messages above)'
+    fi
+    TRUST_FILE=$TEMP_DIR/trust.pem
+    cat -- "$SYSTEM_ROOTS" ${EXTRA_ROOT:+"$EXTRA_ROOT"} > "$TRUST_FILE"
+    # The certificate, the key, the fingerprint the renewal knows it by and the options it
+    # came with change together: if any step fails or is interrupted, all of them come back.
+    install_cert "$crt" '' le_record
+    le_recorded
+    setup_renewal
 }
 
 cmd_apply() {
@@ -568,6 +1307,7 @@ cmd_status() {
     fi
     [[ ! -f $STATE_DIR/key.new.pem ]] || pending=' (a new key waits for its certificate)'
     [[ ! -f $STATE_DIR/request.csr ]] || printf 'Request:     %s%s\n' "$STATE_DIR/request.csr" "$pending"
+    le_status
     if ! command -v nginx > /dev/null; then
         if command -v apt-get > /dev/null; then
             printf 'nginx:       not installed yet: apply installs it\n'
@@ -601,12 +1341,64 @@ cmd_status() {
     done
 }
 
+le_status() {   # the Let's Encrypt lines of status
+    local f=$STATE_DIR/fullchain.pem host target owner timer result
+    LE_DIR=$STATE_DIR/letsencrypt
+    if [[ ! -d $LE_DIR ]]; then
+        printf "Let's Encrypt: not used (letsencrypt gets the certificate from it)\n"
+        return 0
+    fi
+    read_settings
+    if [[ -f $LE_DIR/acme-dns.json ]] && ! json_pairs "$LE_DIR/acme-dns.json" > /dev/null; then
+        printf '             %s cannot be read: letsencrypt says why\n' "$LE_DIR/acme-dns.json"
+    else
+        load_accounts
+    fi
+    DNS_RESOLVERS=${SETTINGS[DNS_RESOLVERS]:-}
+    printf "Let's Encrypt: %s, acme-dns %s%s\n" "${SETTINGS[SERVER]:-$DEFAULT_SERVER}" "${SETTINGS[ACME_DNS]:-$DEFAULT_ACME_DNS}" \
+        "${DNS_RESOLVERS:+, DNS checks with $DNS_RESOLVERS}"
+    if [[ ! -f $LE_DIR/installed ]]; then
+        printf '             no certificate from it installed yet\n'
+    elif from_letsencrypt; then
+        printf '             enabled: the installed certificate is from it, %s days left; renewed when fewer than %s are left\n' \
+            "$(days_left "$f")" "$RENEW_DAYS"
+    else
+        printf '             the installed certificate is another one (install-cert): the renewal leaves it alone\n'
+    fi
+    owner=$(renewal_dir)
+    if [[ -z $owner ]]; then
+        printf '             renewal timer: none yet (the first certificate from letsencrypt sets it up)\n'
+    elif [[ $owner != "$STATE_DIR" ]]; then
+        printf '             renewal timer: works on %s\n' "$owner"
+    elif [[ -d /run/systemd/system ]]; then
+        timer=$(systemctl is-active "$UNIT.timer" 2> /dev/null || true)
+        result=$(systemctl show -p Result --value "$UNIT.service" 2> /dev/null || true)
+        printf '             renewal timer: %s, runs %s%s\n' "${timer:-unknown}" "$LIB_DIR/https.sh" \
+            "$([[ -z $result || $result == success ]] || printf '; the last run failed (%s): sudo journalctl -u %s.service' "$result" "$UNIT")"
+    else
+        printf '             renewal timer: written, but systemd does not run here\n'
+    fi
+    printf 'DNS records: %s\n' "$([[ -n $DNS_RESOLVERS ]] && printf 'as %s answers' "$DNS_RESOLVERS" || printf "as this server's DNS answers")"
+    for host in "${HOSTS[@]}"; do
+        target=$(acme_dns_field "$host" fulldomain)
+        if [[ -n $target ]]; then
+            lookup "$host" "$target"
+            printf '  _acme-challenge.%s CNAME %s  (%s)\n' "$host" "$target" "$(state_words "$LOOKUP")"
+        else
+            printf '  %s: no acme-dns account yet (letsencrypt makes one)\n' "$host"
+        fi
+    done
+}
+
 cmd_uninstall() {
-    local f host generation
+    local f host generation owner timer=''
     lock
     [[ ! -e $NGINX_CONF ]] || applied || die "$NGINX_CONF was not written by apply for $STATE_DIR: it is left alone. Nothing was changed."
-    printf 'This removes %s and reloads nginx: HTTPS stops for its host names%s.\n' "$NGINX_CONF" \
-        "$( ((PURGE)) && printf ', and deletes the key, certificate, request and routes in %s' "$STATE_DIR")"
+    owner=$(renewal_dir)
+    [[ -z $owner || $owner != "$STATE_DIR" ]] || timer=", removes the Let's Encrypt renewal timer"
+    printf 'This removes %s and reloads nginx: HTTPS stops for its host names%s%s.\n' "$NGINX_CONF" "$timer" \
+        "$( ((PURGE)) && printf ', and deletes the key, certificate, request and routes in %s%s' "$STATE_DIR" \
+            "$([[ ! -d $STATE_DIR/letsencrypt ]] || printf ", and the Let's Encrypt accounts and certificates")")"
     if [[ -z $CONFIRM ]]; then
         [[ -t 0 ]] || die 'No terminal to confirm on: pass --confirm yes. Nothing was changed.'
         read -r -p 'Type yes to confirm: ' CONFIRM || die 'Cancelled'
@@ -631,10 +1423,12 @@ cmd_uninstall() {
         fi
         keep
     fi
+    remove_renewal
     if ((PURGE)); then   # only this script's files: never the whole of --dir
         for f in "${STATE_FILES[@]}"; do
             rm -f -- "${STATE_DIR:?}/$f" "${STATE_DIR:?}/$f.tmp" "${STATE_DIR:?}/$f.saved"
         done
+        rm -rf -- "${STATE_DIR:?}/letsencrypt"   # all of it this script's and lego's
         rmdir -- "$STATE_DIR" 2> /dev/null || true
     fi
     printf 'Removed.\n'
@@ -646,7 +1440,7 @@ shift
 case $COMMAND in -h|--help|help) usage; exit 0 ;; esac
 while (($#)); do
     case $1 in
-        --routes|--dir|--nginx-conf|--subject|--key|--confirm)
+        --routes|--dir|--nginx-conf|--subject|--key|--confirm|--server|--acme-dns|--dns-resolvers|--email|--extra-root|--acme-ca|--unit-dir|--lib-dir)
             (($# >= 2)) || die "Missing value for $1"
             case $1 in
                 --routes) ROUTES=$2 ;;
@@ -655,10 +1449,20 @@ while (($#)); do
                 --subject) SUBJECT=$2 ;;
                 --key) KEY_FILE=$2 ;;
                 --confirm) CONFIRM=$2 ;;
+                --server) GIVEN[server]=$2 ;;
+                --acme-dns) GIVEN[acmedns]=$2 ;;
+                --dns-resolvers) GIVEN[resolvers]=$2 ;;
+                --email) GIVEN[email]=$2 ;;
+                --extra-root) GIVEN[extraroot]=$2 ;;
+                --acme-ca) GIVEN[acmeca]=$2 ;;
+                --unit-dir) UNIT_DIR=$2 ;;   # --unit-dir and --lib-dir: for the tests
+                --lib-dir) LIB_DIR=$2 ;;
             esac
             shift 2 ;;
         --new-key) NEW_KEY=1; shift ;;
         --purge) PURGE=1; shift ;;
+        --renew) RENEW=1; shift ;;
+        --accept-tos) ACCEPT_TOS=1; shift ;;
         -*) die "Unknown option: $1 (see: bash https.sh --help)" ;;
         *) ARGS+=("$1"); shift ;;
     esac
@@ -666,12 +1470,16 @@ done
 [[ $COMMAND == csr ]] || [[ $NEW_KEY == 0 && -z $KEY_FILE && $SUBJECT == '/C=MY/O=Perodua' ]] || die '--new-key, --key and --subject belong to csr'
 [[ $NEW_KEY == 0 || -z $KEY_FILE ]] || die 'Use --new-key or --key, not both'
 [[ $COMMAND == uninstall ]] || [[ $PURGE == 0 && -z $CONFIRM ]] || die '--purge and --confirm belong to uninstall'
+[[ $COMMAND == letsencrypt ]] || [[ ${#GIVEN[@]} == 0 && $RENEW == 0 && $ACCEPT_TOS == 0 ]] \
+    || die '--renew, --accept-tos, --email, --server, --acme-dns, --dns-resolvers, --extra-root and --acme-ca belong to letsencrypt'
 [[ $COMMAND == install-cert ]] || ((${#ARGS[@]} == 0)) || die "Unexpected argument: ${ARGS[0]}"
 ((${#ARGS[@]} <= 2)) || die 'install-cert takes a certificate file and, optionally, a chain file'
 [[ $STATE_DIR == /* ]] || die '--dir must be an absolute path'
 STATE_DIR=$(realpath -m -- "$STATE_DIR")
 [[ $STATE_DIR != / ]] || die '--dir cannot be /'
 [[ -z $ROUTES ]] || ROUTES=$(realpath -m -- "$ROUTES")
+[[ $UNIT_DIR == /* && $LIB_DIR == /* ]] || die '--unit-dir and --lib-dir must be absolute paths'
+UNIT_DIR=$(realpath -m -- "$UNIT_DIR") LIB_DIR=$(realpath -m -- "$LIB_DIR")
 [[ -z $KEY_FILE ]] || [[ -f $KEY_FILE ]] || die "No such file: $KEY_FILE"
 [[ $EUID -eq 0 ]] || die 'Run with sudo or as root.'
 command -v openssl > /dev/null || die 'openssl is required'
@@ -680,6 +1488,7 @@ TEMP_DIR=$(mktemp -d)
 case $COMMAND in
     csr) cmd_csr ;;
     install-cert) cmd_install_cert ;;
+    letsencrypt) cmd_letsencrypt ;;
     apply) cmd_apply ;;
     status) cmd_status ;;
     uninstall) cmd_uninstall ;;
