@@ -23,7 +23,7 @@ there. The DB server needs no step.
 
 | Path | Contents |
 | --- | --- |
-| `scripts/` | `install-dependencies.sh`, `deploy-db.sh`, `deploy-app.sh`, `service.sh`, `uninstall.sh`, the helpers they use (`uat_guard.py`, `uat_admins.py`, `reset_database.py`), `iss-api.sh` (ISS-Oracle API), `rp-adapter.sh` (RP adapter), `https.sh` (HTTPS with nginx) and the configuration templates. Your `deploy.conf`, backups and filestore archive also go here. |
+| `scripts/` | `install-dependencies.sh`, `deploy-db.sh`, `deploy-app.sh`, `service.sh`, `uninstall.sh`, the helpers they use (`uat_guard.py`, `uat_admins.py`, `reset_database.py`), `iss-api.sh` (ISS-Oracle API), `rp-adapter.sh` (RP adapter), `https.sh` (HTTPS with nginx, the certificate from an issuer or Let's Encrypt) and the configuration templates. Your `deploy.conf`, backups and filestore archive also go here. |
 | `docs/` | [DEPLOYMENT.md](docs/DEPLOYMENT.md) (full reference) and [RUNBOOK.md](docs/RUNBOOK.md) (self-check after deployment) |
 | `tests/` | Automated checks, see [tests/README.md](tests/README.md) |
 
@@ -575,6 +575,25 @@ nginx configuration all come from it. Run the commands from the `scripts` folder
    PEM, DER and PKCS #7 (`.p7b`, also as Microsoft CAs label it) are read. The
    certificate must belong to the key, cover every host name of the table, be
    valid now and verify with its chain.
+
+   **Or from Let's Encrypt**, instead of steps 2 and 3: `letsencrypt` gets the
+   certificate for the same table, key and request, and a daily timer renews it.
+   Let's Encrypt checks each host name through a DNS record that the customer's
+   DNS administrator creates once. The first run prints these records and stops:
+
+   ```bash
+   sudo bash https.sh letsencrypt --accept-tos
+   ```
+
+   ```
+   _acme-challenge.stgissrp.perodua.com.my CNAME 3f0c7a1e-5b2d-4c3e-9a8f-0d1e2f3a4b5c.acme.novutal.com
+   ```
+
+   Once the records exist, run the same command again. The server needs Docker,
+   `dig` and outbound HTTPS to Let's Encrypt and `acmedns.novutal.com`. The private key
+   stays on the server; the host names become public in the Certificate
+   Transparency logs. See
+   [DEPLOYMENT.md](docs/DEPLOYMENT.md#https-certificate-from-lets-encrypt).
 4. **nginx.** With every port filled in:
 
    ```bash
@@ -610,9 +629,11 @@ Each is `sudo bash https.sh COMMAND` from the `scripts` folder; `--help` lists t
 | To | Run |
 |---|---|
 | Renew the certificate before it expires | `csr` (it keeps the key), have the request signed, `install-cert FILE [CHAIN]`. nginx is reloaded and must serve the new certificate, or the previous one comes back. |
-| Change to a new key | `csr --new-key`, have the request signed, `install-cert FILE [CHAIN]`. nginx keeps the old key until then. |
+| Renew a certificate from Let's Encrypt | Nothing: `perodua-https-renew.timer` renews it when fewer than 30 days are left. After downloading a newer `scripts` folder, run `letsencrypt --renew` from it, which updates the copy of the script that the timer runs. |
+| Change to a new key | `csr --new-key`, have the request signed, `install-cert FILE [CHAIN]` (or `letsencrypt`). nginx keeps the old key until then. |
 | Change a path or port | Edit the table, then `apply`. |
-| Add a host name | Add it to the table, `csr`, have the request signed, `install-cert FILE [CHAIN]`, then `apply`. |
-| Remove HTTPS | `uninstall --confirm yes`. With `--purge` it also deletes the key, certificate, request and table. |
+| Add a host name | Add it to the table, `csr`, have the request signed, `install-cert FILE [CHAIN]`, then `apply`. With Let's Encrypt: add it to the table, `letsencrypt` (it prints the new record), have the record created, `letsencrypt` again, then `apply`. |
+| Go back from Let's Encrypt to the issuer | `csr`, have the request signed, `install-cert FILE [CHAIN]`. The timer leaves that certificate alone. |
+| Remove HTTPS | `uninstall --confirm yes`, which also removes the Let's Encrypt timer. With `--purge` it also deletes the key, certificate, request and table, and the Let's Encrypt accounts and certificates. |
 
 [Self-check](docs/RUNBOOK.md) · [Reference](docs/DEPLOYMENT.md) · [Tests](tests/README.md)

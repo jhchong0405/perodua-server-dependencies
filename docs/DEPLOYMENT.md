@@ -824,6 +824,234 @@ server's private address when F5 connects to the web ports directly.
   This is acceptable for test data. When UAT holds real data or real accounts,
   give it a host name of its own instead.
 
+## HTTPS certificate from Let's Encrypt
+
+`https.sh` (see HTTPS in the [README](../README.md#https)) installs the
+certificate that an issuer, such as the customer's own CA, signs for its
+request (`csr`, then `install-cert`). `https.sh letsencrypt` gets the
+certificate from Let's Encrypt instead, for the same routes table, key and
+request, and a timer renews it. `apply`, `status` and `uninstall` work as
+before.
+
+### How the host names are checked
+
+Let's Encrypt issues a certificate only for host names it has checked. The host
+names of the App server point to a private address, so Let's Encrypt cannot
+reach the server to check them over HTTP. It checks them through DNS instead
+(the DNS-01 challenge): for each host name it looks up the TXT record
+`_acme-challenge.HOST`, whose value changes at every issuance.
+
+The customer's DNS is not changed by any script. Instead, the DNS
+administrator points each `_acme-challenge.HOST` name once, with a CNAME
+record, at a name of the acme-dns server `acmedns.novutal.com`, which answers
+DNS queries for `acme.novutal.com`. At each issuance lego (the ACME client, run
+in Docker) writes the TXT value to acme-dns, and Let's Encrypt follows the
+CNAME to it. acme-dns can only change those TXT values, one account per host
+name; it cannot change any other record of the customer's domain.
+
+### First time
+
+1. The routes table, as for any HTTPS setup (README, HTTPS, step 1). Every host
+   name in it gets a record in step 3.
+2. On the App server, from the `scripts` folder:
+
+   ```bash
+   sudo bash https.sh letsencrypt --accept-tos --email ops@example.com
+   ```
+
+   `--accept-tos` accepts the terms of service of Let's Encrypt; without it the
+   script prints their address and stops. `--email` is optional. If there is no
+   key and request yet, the script makes them as `csr` does. On this first run
+   the script makes one account per host name on the acme-dns server, prints the
+   records, one line per host name, and stops with exit status 3. It does not
+   ask Let's Encrypt for anything yet:
+
+   ```
+   _acme-challenge.stgissrp.perodua.com.my CNAME 3f0c7a1e-5b2d-4c3e-9a8f-0d1e2f3a4b5c.acme.novutal.com
+   ```
+
+   `sudo bash https.sh status` prints them again. Before the first certificate,
+   `status` looks them up only through this server's DNS (it takes no
+   `--dns-resolvers`): on a server whose DNS gives an internal view, it can show
+   NOT FOUND while the public records exist. Until then, the `letsencrypt` run
+   itself is the check of the records: it looks them up with the DNS servers
+   given and stops before it asks Let's Encrypt for anything.
+3. The customer's DNS administrator creates these CNAME records once, in the
+   DNS that the internet sees (the public view of `perodua.com.my`). If the App
+   server's own DNS gives an internal view of these names, create them there
+   too, or give the script DNS servers that see the public records with
+   `--dns-resolvers`. If the domain has CAA records, they must allow
+   `letsencrypt.org`.
+4. Run the same command again. The script first looks the records up with `dig`:
+   while one is missing or points elsewhere, it says which and stops again,
+   without asking Let's Encrypt. When no DNS server answers for every record, it
+   says which records each one did not answer and stops.
+   With the records in place, lego gets the certificate, and the
+   script installs it as `install-cert` does: it must belong to the key, cover
+   every host name, be valid now and verify with its chain, and also lead to a
+   root that this server trusts. If `apply` ran before, nginx is reloaded and
+   must serve the new certificate, or the previous one comes back. The
+   certificate, the record of it that the renewal uses and the options it came
+   with change together: when a step fails or the run is interrupted, all of them
+   come back. A power cut or a kill in the middle can leave the old certificate
+   or the new one in place; the renewal knows either. Otherwise run
+   `sudo bash https.sh apply` next.
+
+Each run without `--renew` gets a new certificate at once. Let's Encrypt issues
+at most 5 certificates for the same set of host names per week.
+
+### Renewal
+
+The first certificate also sets up the systemd timer `perodua-https-renew.timer`.
+It runs every day between 02:00 and 06:00 (a random time), and after a boot if
+the server was off at that time. It runs `https.sh letsencrypt --renew`, which
+renews only when fewer than 30 days are left, with the same checks and nginx
+reload. The records stay as they are, so the DNS administrator has nothing more
+to do. Certificates from Let's Encrypt are at present valid for 90 days, so the
+renewal comes about every 60 days; with shorter certificates it comes more often.
+
+The timer runs a copy of the script, `/usr/local/lib/perodua-https/https.sh`,
+so the downloaded `scripts` folder can be moved or deleted. After downloading a
+newer `scripts` folder, run `sudo bash https.sh letsencrypt --renew` from it: it
+updates the copy, and renews only if due.
+
+Each run, the daily one included and whether or not a renewal is due, also
+checks that nginx serves the installed certificate for every host name, once
+`apply` has run. A power cut or a kill between the new certificate and nginx's
+reload can leave nginx serving the previous one. The run then checks the files
+with `nginx -t`, reloads nginx and says so. If `nginx -t` refuses the files, the
+daily run fails and changes nothing, and `status` shows its last run as failed;
+`sudo bash https.sh letsencrypt` then gets and installs a new certificate.
+
+`status` shows the days left, whether the timer is active and whether its last
+run failed; the log of the runs: `sudo journalctl -u perodua-https-renew.service`.
+
+`--renew` renews only the certificate that `letsencrypt` installed. After
+`install-cert` installs another one, for example from the customer's CA again,
+the timer leaves it alone. `uninstall` removes the timer and the copy;
+`uninstall --purge` also deletes `/etc/perodua-https/letsencrypt/`.
+
+### What the App server needs
+
+- Docker (`sudo bash install-dependencies.sh --role app`), running. The first
+  run pulls lego (`goacme/lego` v5.5.2, pinned by its digest) from Docker Hub.
+- Outbound HTTPS (port 443) to `acme-v02.api.letsencrypt.org` (Let's Encrypt),
+  `acmedns.novutal.com` (acme-dns) and, for the first pull, Docker Hub
+  (`registry-1.docker.io` and the hosts it downloads from). The script checks
+  Let's Encrypt, acme-dns and Docker before it changes anything. Nothing needs
+  to reach the App server from the internet.
+- DNS look-ups of the `_acme-challenge` records through the server's DNS
+  servers, or those of `--dns-resolvers`. With `--dns-resolvers`, the script
+  asks them in their order and takes the first one that answers for every
+  record; lego then checks on that one DNS server that the TXT record is
+  visible, before Let's Encrypt checks it (lego checks each record on each server
+  it is given, so a server that fails one record would stop it). lego does not
+  query the authoritative servers of the domains, so outbound port 53 to the
+  internet is needed only when `--dns-resolvers` names servers on the internet.
+- `dig` (package `bind9-dnsutils`, part of `ubuntu-standard`; if `command -v dig`
+  finds nothing: `sudo apt-get install bind9-dnsutils`). `letsencrypt` stops
+  without it.
+
+### The private key and public logs
+
+- The private key is made on the App server and stays in
+  `/etc/perodua-https/key.pem`. lego gets only the certificate request: its
+  container mounts lego's own folder `/etc/perodua-https/letsencrypt/lego`, the
+  copy of the accounts it needs and the request, and nothing else of the server:
+  not the key, not `acme-dns.json`.
+- `/etc/perodua-https/letsencrypt/` (root only) holds the acme-dns accounts with
+  their passwords (`acme-dns.json`), the Let's Encrypt account and its key, and
+  the certificates lego received. With `acme-dns.json`, anyone can get a
+  certificate for these host names from a public CA: keep it as secret as the
+  private key.
+- Every certificate that a public CA issues, Let's Encrypt included, is
+  published in the Certificate Transparency logs with all its host names, and
+  anyone can search these logs (for example at crt.sh). The host names of the
+  table therefore become public, although they point to a private address. A
+  certificate from the customer's own CA is not published.
+
+### Options
+
+| Option | Meaning |
+| --- | --- |
+| `--accept-tos` | Accepts the terms of service of the ACME server; needed on the first run with each ACME server. |
+| `--email ADDRESS` | Contact address for the ACME account, given when the account is made. |
+| `--server URL` | The ACME directory. Default: Let's Encrypt, `https://acme-v02.api.letsencrypt.org/directory`. |
+| `--acme-dns URL` | The acme-dns server. Default: `https://acmedns.novutal.com`. |
+| `--dns-resolvers HOST[:PORT],...` | The DNS servers for the look-ups of the records, asked in their order; lego gets the first one that answered for every record. Default: the server's. `''` goes back to the default. |
+| `--extra-root FILE` | A root certificate to trust, besides the server's, only when the new certificate is checked. For the staging test. |
+| `--acme-ca FILE` | The CA of a local ACME test server's own HTTPS certificate, such as Pebble's. Never needed with Let's Encrypt. |
+| `--renew` | Renews only when fewer than 30 days are left (what the timer runs). |
+
+The options of the run that installed the certificate are kept in
+`/etc/perodua-https/letsencrypt/settings`, and later runs and the timer use
+them; an option given again replaces the kept value. `--extra-root` and
+`--acme-ca` are kept only with the `--server` they were given with.
+
+### The acme-dns accounts
+
+The accounts are kept in `/etc/perodua-https/letsencrypt/acme-dns.json`, one
+per host name, in the format lego reads:
+
+```
+{"HOST":{"fulldomain":"...","subdomain":"...","username":"...","password":"...","server_url":"..."},...}
+```
+
+- The script makes the account of a host name that has none (a new one in the
+  table) and prints its record.
+- A file made elsewhere, for example by the operator of the acme-dns server,
+  with an account for every host name, can be put there before the first run
+  (in a folder `/etc/perodua-https/letsencrypt` made with `sudo install -d -m 0700`).
+  It is used as it is: the script makes no account, and only limits the file to
+  root (0600). This is the way when the acme-dns server makes accounts only for
+  its operator. The file may be spread over lines, hold the fields in any order
+  and hold more of them (such as `allowfrom`). It must be exactly one JSON
+  object: no trailing comma, nothing after it, each host name and each field
+  once, and every account with a `server_url` that is the acme-dns server in
+  use (`https://acmedns.novutal.com`). If a file from an older tool has no
+  `server_url`, add `"server_url":"https://acmedns.novutal.com"` to each account.
+  The script refuses any other file and leaves it as it is.
+- lego never reads or writes `acme-dns.json`. It gets a copy of the accounts of
+  the table's host names, which the script writes for each run and removes
+  after it. If lego changes that copy, which it does when an account does not
+  work for it, the script stops without installing anything.
+- An account belongs to the acme-dns server that made it. To move to another
+  acme-dns server, delete `acme-dns.json` and run
+  `sudo bash https.sh letsencrypt --acme-dns URL`. It makes new accounts there,
+  prints their records and stops. The DNS administrator puts the new records in
+  place of the old ones; run the same command again to get the certificate.
+
+### Limits
+
+- If the process dies (a kill, a power cut) during a run that changes to another
+  ACME server (`--server`, `--acme-ca`), while it replaces the kept settings and
+  `acme-ca.pem`, the two may not match until the same `letsencrypt` command is
+  run again. Until then the daily runs fail, and `status` shows the last run as
+  failed.
+
+### A test with the Let's Encrypt staging server
+
+The staging server of Let's Encrypt issues test certificates that no browser
+trusts. They lead to the staging roots listed at
+<https://letsencrypt.org/docs/staging-environment/> (for this RSA key,
+`letsencrypt-stg-root-x1.pem`, "(STAGING) Pretend Pear X1"). Download that root
+to the server, then:
+
+```bash
+sudo bash https.sh letsencrypt --accept-tos \
+    --server https://acme-staging-v02.api.letsencrypt.org/directory --extra-root letsencrypt-stg-root-x1.pem
+```
+
+`--extra-root` adds the root to the script's own check of the certificate only;
+it is not added to the system or to nginx. To change to real certificates,
+run `sudo bash https.sh letsencrypt --accept-tos --server https://acme-v02.api.letsencrypt.org/directory`:
+the staging root is no longer used, and the acme-dns accounts and records stay
+the same.
+
+For a local test with Pebble, a local acme-dns and a test DNS server, the
+environment variable `PERODUA_HTTPS_LEGO_NETWORK=NAME` runs lego on that Docker
+network instead of the host's.
+
 ## Isolated verification
 
 The integration suite uses real PostgreSQL 16 in a fresh Ubuntu 24.04 container.
