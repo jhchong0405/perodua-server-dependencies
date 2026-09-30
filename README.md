@@ -6,6 +6,9 @@ Client Stable UIUX v1.0.4 on Ubuntu 24.04 amd64 servers with sudo and internet a
 - **App server**: Odoo and web containers, pulled from `perodua-deploy.novutal.com`.
 - **ISS-Oracle API** (separate): the HTTP service in front of the Oracle EBS
   database, also pulled from there. See [ISS-Oracle API](#iss-oracle-api).
+- **RP adapter** (separate): the RP integration gateway's read-only command line
+  for the Oracle EBS database (health check, survey, exports), also pulled from
+  there. See [RP adapter](#rp-adapter).
 
 Both can also run on one server: do steps 2 and 3 on that server. With two
 servers, allow **App → DB port 5432**. Browsers need **App port 8110**.
@@ -20,7 +23,7 @@ there. The DB server needs no step.
 
 | Path | Contents |
 | --- | --- |
-| `scripts/` | `install-dependencies.sh`, `deploy-db.sh`, `deploy-app.sh`, `service.sh`, `uninstall.sh`, the helpers they use (`uat_guard.py`, `uat_admins.py`, `reset_database.py`), `iss-api.sh` (ISS-Oracle API), `https.sh` (HTTPS with nginx) and the configuration templates. Your `deploy.conf`, backups and filestore archive also go here. |
+| `scripts/` | `install-dependencies.sh`, `deploy-db.sh`, `deploy-app.sh`, `service.sh`, `uninstall.sh`, the helpers they use (`uat_guard.py`, `uat_admins.py`, `reset_database.py`), `iss-api.sh` (ISS-Oracle API), `rp-adapter.sh` (RP adapter), `https.sh` (HTTPS with nginx) and the configuration templates. Your `deploy.conf`, backups and filestore archive also go here. |
 | `docs/` | [DEPLOYMENT.md](docs/DEPLOYMENT.md) (full reference) and [RUNBOOK.md](docs/RUNBOOK.md) (self-check after deployment) |
 | `tests/` | Automated checks, see [tests/README.md](tests/README.md) |
 
@@ -375,6 +378,119 @@ CREATE INDEX API_REQUEST_LOG_DATE_IX ON API_REQUEST_LOG (REQUEST_DATE);
 
 The API queries the EBS objects by their plain names, so the user needs a
 synonym and `SELECT` (`EXECUTE` for functions) for each of them.
+
+## RP adapter
+
+The RP adapter is the RP integration gateway's command line. It reads the Oracle
+EBS database directly and read-only: a health check for monitoring, a survey of
+every object the RP integrations use (columns, Oracle types, row counts, sample
+rows) and exports of whole datasets. It can also check the ISS-Oracle API.
+`rp-adapter.sh` runs the pinned image `perodua-deploy.novutal.com/rp-adapter:v0.1.0`,
+one short-lived container per command, on an Ubuntu 24.04 server that can reach
+the database, for example the App server. Nothing keeps running and the server
+needs no Oracle client. The adapter runs only its own reviewed queries, each in a
+read-only transaction; it never runs SQL typed at run time.
+
+Before the first run:
+
+- This server reaches the database port: `timeout 5 bash -c '</dev/tcp/DB_HOST/1521' && echo reachable`
+  prints `reachable`.
+- A database account for the adapter. **One with `SELECT` grants only is
+  safest**: read-only transactions refuse writes, but a PL/SQL function with its
+  own (autonomous) transaction could still write with a more powerful account.
+  It needs a synonym and `SELECT` (`EXECUTE` for `GEN_GET_PART_MODEL`) for the
+  objects in `sudo bash rp-adapter.sh run db datasets`, like the API's user.
+- Docker is installed: `sudo bash install-dependencies.sh --role app`, then
+  `sudo systemctl enable --now docker`.
+
+```bash
+sudo bash rp-adapter.sh install
+```
+
+It asks for the database server, port (1521), service name, user and password,
+and, optionally, the ISS-Oracle API's address and key (when [iss-api.sh](#iss-oracle-api)
+runs on this server: `http://127.0.0.1:8000`). When asked, enter the registry
+username and password for `perodua-deploy.novutal.com`; the login is not kept on
+the server. It ends with the database health check from the container; wait for
+`Set up and verified`. A `1` in that check (some objects or datasets failed) is
+usually a missing grant: the setup is kept, fix the grant and run `health`.
+
+The answers are saved in `/opt/perodua-rp-adapter/rp-adapter.env`, the password
+(and API key) in `/opt/perodua-rp-adapter/secrets/`, which only root can read on
+the host; they reach the container as mounted files, never as arguments or
+environment variables. Results go to `/opt/perodua-rp-adapter/output/`, readable
+only by root. To change a setting, edit `rp-adapter.env` and run `install` again;
+to change the password, add `DB_PASSWORD_FILE=/root/new-password` (a file that
+holds only the password) to `rp-adapter.env` and run `install`: the password is
+stored and the line removed. For an unattended install, pass the keys of
+[rp-adapter.env.example](scripts/rp-adapter.env.example) with `--config` and add
+`--non-interactive`.
+
+| Command | What it does |
+| --- | --- |
+| `sudo bash rp-adapter.sh health` | Database health check: connection, sign-in, every object and dataset. `--deep` reads one row of each dataset; `--json` for tools |
+| `sudo bash rp-adapter.sh survey` | The first look at the database: a report folder under `output/survey/` (`survey.md` to read, `survey.json` for tools, sample CSVs). `--exact` also counts every row (slow on large views); `--rows N` sample size |
+| `sudo bash rp-adapter.sh export --all` | Every dataset to CSV (`--format jsonl` for JSON Lines) under `output/export/`, with `manifest.json` (row counts, sha256, column types). Name datasets instead of `--all` for fewer; `--max-rows N` to cap each |
+| `sudo bash rp-adapter.sh api-health` | The ISS-Oracle API's health check (when set up with its address and key) |
+| `sudo bash rp-adapter.sh run ...` | Any other adapter command: `run db datasets`, `run db objects`, `run db columns ISS_CUSTOMERS_V`, `run db size --exact`, `run db sample customers --rows 5` |
+| `sudo bash rp-adapter.sh status` | Settings (no secrets), image, latest survey and export |
+| `sudo bash rp-adapter.sh uninstall` | After you type the directory, removes the settings and secrets; the results stay unless `--purge`, which also removes the image |
+
+A later version of this repository pins a later image; its commands pull it on
+first use.
+
+### Scripts and monitoring
+
+`health`, `survey`, `export`, `api-health` and `run` return the adapter's exit
+code, and with `--json` the adapter prints one JSON document on stdout (messages
+go to stderr). `install` returns 0 once the setup is in place (its database
+check was OK or WARNING, as it prints) and 3 when it is not. Errors of the script
+itself print no JSON:
+
+| Exit code | `health` | `survey`, `export`, `run` |
+| --- | --- | --- |
+| 0 | OK | done |
+| 1 | WARNING: the database answers, some object or dataset failed | done, some parts failed |
+| 2 | CRITICAL: not reachable, sign-in refused | nothing usable |
+| 3 | UNKNOWN: settings or usage, no setup, or another install/uninstall running | the same |
+
+Other codes come from Docker itself (125 to 127: the container could not start).
+Keep stdout and stderr apart when a tool reads the JSON: a first run may print
+pull progress on stderr.
+
+A health check every 15 minutes, logging problems to the system journal
+(`/etc/cron.d/rp-adapter-health`):
+
+```bash
+*/15 * * * * root bash /root/perodua-server-dependencies/scripts/rp-adapter.sh health --json > /var/log/rp-adapter-health.json 2>> /var/log/rp-adapter-health.err || logger -t rp-adapter "health exit $?"
+```
+
+A nightly export for another job to pick up (`/etc/cron.d/rp-adapter-export`):
+
+```bash
+30 2 * * * root bash /root/perodua-server-dependencies/scripts/rp-adapter.sh export --all --format jsonl >> /var/log/rp-adapter-export.log 2>&1
+```
+
+Health checks and exports may run at the same time; while `install` or
+`uninstall` changes the setup, other commands stop at once with exit 3.
+
+Each survey or export writes a new folder, named by UTC time, under
+`output/survey/` or `output/export/`. The command prints the folder with the
+results (`Results on this server: ...`) and `status` shows the latest; the
+`manifest.json` there lists the files. Old folders are not deleted
+automatically. A `--json` health result carries `overall`, `exit_code` and one
+entry per check (`name`, `group`, `status`, `detail`).
+
+If an install is stopped while it replaces the settings (a reboot, `kill -9`),
+the other commands refuse to run with exit 3 until you run `install` again; it
+first puts the previous settings and secrets back.
+
+| Symptom | Cause |
+| --- | --- |
+| `login ... ORA-01017` | Wrong user or password: `install --config` with a new `DB_PASSWORD_FILE` |
+| `tcp ... not reachable` | No network path to the database port: firewall, VPN, or a wrong `DB_HOST` / `DB_PORT` |
+| An object `is not visible to this account` | The user lacks the synonym or the `SELECT` grant on it |
+| `Oracle call timed out` | A query ran longer than `CALL_TIMEOUT` seconds (`rp-adapter.env`); raise it for `--exact` on large views |
 
 ## HTTPS
 

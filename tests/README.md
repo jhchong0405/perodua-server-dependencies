@@ -234,6 +234,47 @@ should not use; only the port the container publishes listens. It checks:
 - while another process holds the lock, `install`, `start`, `stop`, `restart`,
   `gen-key` and `uninstall` stop before any Docker call.
 
+`test_rp_adapter.py` runs `rp-adapter.sh` against a fake Docker CLI that records
+every call and, for `docker run`, what the container would read from its mounted
+settings and secret files; when the adapter is told to write to `/output` it
+creates a run folder there. It checks:
+- an install from `--config` pulls the pinned image, writes the database password
+  (with `$`, `#`, quotes, a backslash and a backtick) and the API key only to
+  `secrets/`, 0444 in a 0700 directory, and they reach the container only as
+  mounted files: no Docker argument contains them. `rp-adapter.env` is 0600 without
+  the `*_FILE` lines, `adapter.conf` holds container paths and no secret, and
+  `output/` is 0700 for the image's uid 10001. Every run is `--read-only`, drops
+  all capabilities, runs as 10001 on the configured network, and the install ends
+  with the database health check (and the API's connection check when set up);
+- a rerun asks nothing, keeps the password and pulls nothing; a new
+  `DB_PASSWORD_FILE` (with a Windows line break) replaces the password;
+- a first unattended install without a password file, an unknown key, invalid
+  values and a loopback database host outside the host network stop before any
+  Docker call; a non-empty directory it did not create is refused; a database
+  that fails the check at install keeps the settings; a registry that wants a
+  login without a terminal says `docker login`;
+- `health` passes its options and returns the adapter's exit code with the
+  adapter's stdout untouched; `survey` and `export` write under `output/` and
+  print the host folder; `export` needs datasets or `--all`; `--config` and
+  `--out`, which the script sets, are refused; `run` passes any adapter command;
+  `api-health` needs `API_URL`; commands without a setup point to `install`;
+  `status` shows no secret;
+- `uninstall` with a wrong `--confirm` changes nothing, keeps `output/` unless
+  `--purge` (which also removes the image), and a later `install` into a folder
+  holding only `output/` is allowed;
+- each survey or export gets a folder of its own even when another run is writing,
+  prints the adapter's folder with `manifest.json` in it, and `status` shows the
+  newest by version order (`-p10` after `-p9`);
+- a first install whose pull fails leaves nothing staged and can be run again or
+  uninstalled; a move that fails (a fake `mv`) puts the previous settings and
+  password back; an install killed half-way (the fake `mv` kills it) leaves the
+  other commands refusing to run until the next install puts the previous files
+  back. That next install does not publish what the killed one had only staged
+  (a new password next to the old user), and when it is killed too while putting
+  the files back (a fake `cp`), the one after it still restores them all;
+- usage errors and a local step that fails (a file where a folder must go) exit 3,
+  which monitoring reads as UNKNOWN, not WARNING or CRITICAL.
+
 `test_https.py` runs `https.sh` with real openssl against fake `nginx`, `systemctl`,
 `ss` and `curl`. A throwaway root and intermediate sign the requests the script
 makes, the way the certificate issuer would; the fake `nginx` records its calls,
