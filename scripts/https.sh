@@ -29,6 +29,10 @@ STATE_FILES=(key.pem key.new.pem request.csr fullchain.pem routes.conf)
 # _acme-challenge.HOST once (CNAME) at an acme-dns account, and lego writes the
 # challenge there. lego sees request.csr only, never the private key.
 LEGO_IMAGE=goacme/lego@sha256:1944e8c36055beec47c7de6f15202b41128be75eea0ffa257f0c14d93c5155fd
+# letsencrypt --manual: acme.sh v3.1.6, whose manual DNS mode prints every TXT record at once.
+ACMESH_IMAGE=neilpang/acme.sh@sha256:34d0c9a75e0f5222b9bab885cbb3c0c01ae4414f4bebbc16bdbc2298140970ef
+# The public DNS servers the manual records are checked with before Let's Encrypt is asked.
+PUBLIC_RESOLVERS=8.8.8.8:53,1.1.1.1:53
 DEFAULT_SERVER=https://acme-v02.api.letsencrypt.org/directory
 DEFAULT_ACME_DNS=https://acmedns.novutal.com
 RENEW_DAYS=30
@@ -50,7 +54,7 @@ LIB_DIR=/usr/local/lib/perodua-https DEFAULT_LIB_DIR=/usr/local/lib/perodua-http
 # http://, and PERODUA_HTTPS_LEGO_NETWORK=NAME in the environment, which runs lego
 # on that Docker network instead of the host's. None of these is needed with
 # Let's Encrypt.
-LE_DIR='' RENEW=0 ACCEPT_TOS=0 TRUST_FILE='' REQUEST_KEY='' LEGO_NETWORK=host LEGO_RESOLVERS='' LEGO_CHANGED_ACCOUNTS=0
+LE_DIR='' RENEW=0 MANUAL=0 NO_DNS_CHECK=0 ACCEPT_TOS=0 TRUST_FILE='' REQUEST_KEY='' LEGO_NETWORK=host LEGO_RESOLVERS='' LEGO_CHANGED_ACCOUNTS=0
 LOOKUP='' RECORDS_BY='' PICK_FAILURE=''
 SERVER='' ACME_DNS='' DNS_RESOLVERS='' EMAIL='' EXTRA_ROOT='' ACME_CA=''
 ACCOUNT_HOSTS=()
@@ -60,6 +64,8 @@ usage() {
     cat <<'HELP'
 Usage: sudo bash https.sh csr [--new-key | --key FILE] [--subject /C=MY/O=NAME]
        sudo bash https.sh install-cert CERT [CHAIN]
+       sudo bash https.sh letsencrypt --manual [--accept-tos] [--dns-resolvers HOST[:PORT],...]
+                          [--no-dns-check]
        sudo bash https.sh letsencrypt [--renew] [--accept-tos] [--email ADDRESS]
                           [--server URL] [--acme-dns URL]
                           [--dns-resolvers HOST[:PORT],...] [--extra-root FILE]
@@ -729,14 +735,19 @@ le_prerequisites() {   # what the server needs to get the certificate, checked b
     if [[ -n $tos ]] && ((ACCEPT_TOS == 0)) && [[ " ${SETTINGS[TOS_ACCEPTED]:-} " != *" $SERVER "* ]]; then
         die "The terms of service of $SERVER apply to the account this server gets there: $tos. Read them; to accept them, run the same command with --accept-tos"
     fi
-    code=$(curl -sS --max-time 20 -o /dev/null -w '%{http_code}' -- "$ACME_DNS/health" 2> "$TEMP_DIR/curl.log") \
-        || die "Could not reach the acme-dns server $ACME_DNS ($(tail -n 1 "$TEMP_DIR/curl.log")): this server needs outbound HTTPS to it"
-    [[ $code != 5* ]] || die "The acme-dns server $ACME_DNS answers HTTP $code: it does not work at the moment"
-    if ! docker image inspect "$LEGO_IMAGE" > /dev/null 2>&1; then
-        printf 'Pulling lego (%s)...\n' "$LEGO_IMAGE"
-        if ! docker pull -q "$LEGO_IMAGE" > "$TEMP_DIR/pull.log" 2>&1; then
+    local image=$LEGO_IMAGE
+    if ((MANUAL)); then   # the records go into the domain's own DNS: no acme-dns server
+        image=$ACMESH_IMAGE
+    else
+        code=$(curl -sS --max-time 20 -o /dev/null -w '%{http_code}' -- "$ACME_DNS/health" 2> "$TEMP_DIR/curl.log") \
+            || die "Could not reach the acme-dns server $ACME_DNS ($(tail -n 1 "$TEMP_DIR/curl.log")): this server needs outbound HTTPS to it. Without an acme-dns server, use letsencrypt --manual: the DNS administrator puts the records in by hand"
+        [[ $code != 5* ]] || die "The acme-dns server $ACME_DNS answers HTTP $code: it does not work at the moment"
+    fi
+    if ! docker image inspect "$image" > /dev/null 2>&1; then
+        printf 'Pulling %s...\n' "$image"
+        if ! docker pull -q "$image" > "$TEMP_DIR/pull.log" 2>&1; then
             cat "$TEMP_DIR/pull.log" >&2
-            die "Could not pull $LEGO_IMAGE (above): this server needs outbound HTTPS to Docker Hub (registry-1.docker.io), or the image loaded with docker load"
+            die "Could not pull $image (above): this server needs outbound HTTPS to Docker Hub (registry-1.docker.io), or the image loaded with docker load"
         fi
     fi
 }
@@ -1165,6 +1176,104 @@ le_recorded() {   # after the change is kept: installed names the new certificat
     mv -f -- "$LE_DIR/installed.tmp" "$LE_DIR/installed"
 }
 
+table_request() {   # the table's request, as csr makes it: every host name, with key.pem or a new key waiting
+    if [[ ! -f $STATE_DIR/request.csr || $(request_names "$STATE_DIR/request.csr") != "$(printf '%s\n' "${HOSTS[@]}" | sort -u)" ]] \
+        || ! { [[ -f $STATE_DIR/key.new.pem && $(pub_of req "$STATE_DIR/request.csr") == "$(pub_of key "$STATE_DIR/key.new.pem")" ]] \
+               || [[ -f $STATE_DIR/key.pem && $(pub_of req "$STATE_DIR/request.csr") == "$(pub_of key "$STATE_DIR/key.pem")" ]]; }; then
+        make_request
+        printf 'Made the certificate request for %s with %s (it stays on this server).\n' "${HOSTS[*]}" "$REQUEST_KEY"
+    fi
+}
+
+# letsencrypt --manual: the DNS administrator puts the TXT records of Let's
+# Encrypt's DNS check into the domain's own public DNS by hand, instead of
+# through acme-dns. acme.sh does it in two runs. The first asks Let's Encrypt
+# for the checks of every host name and prints all the records at once; they
+# are kept in LE_DIR/manual-records with the request they belong to. The next
+# run looks the records up in public DNS first (a check that fails would spend
+# them) and, once all are there, lets Let's Encrypt check them and installs the
+# certificate. The order waits in acme.sh's own state (LE_DIR/manual) meanwhile.
+# There is no timer: to renew, run the same command again, which starts over.
+run_acmesh() {   # acme.sh in Docker, with only its own state and the request
+    docker run --rm --network "$LEGO_NETWORK" -v "$LE_DIR/manual:/acme.sh" \
+        -v "$STATE_DIR/request.csr:/request.csr:ro" ${ACME_CA:+-v "$ACME_CA:/acme-ca.pem:ro"} \
+        "$ACMESH_IMAGE" acme.sh "$@" --server "$SERVER" ${ACME_CA:+--ca-bundle /acme-ca.pem} \
+        --yes-I-know-dns-manual-mode-enough-go-ahead-please > "$TEMP_DIR/acmesh.log" 2>&1
+}
+
+manual_lookup() {   # $1 record name, $2 value: whether a public DNS server returns it; MANUAL_ASKED names the servers asked
+    local item host port answer servers=()
+    IFS=, read -ra servers <<< "${DNS_RESOLVERS:-$PUBLIC_RESOLVERS}"
+    MANUAL_ASKED=${DNS_RESOLVERS:-$PUBLIC_RESOLVERS}
+    for item in "${servers[@]}"; do
+        port=${item##*:} host=${item%:*} host=${host#[} host=${host%]}
+        answer=$(dig +short +time=3 +tries=2 -p "$port" TXT "$1" "@$host" 2> /dev/null) || continue
+        [[ $answer != *';;'* ]] || continue   # no answer from that server
+        grep -qxF -- "\"$2\"" <<< "$answer" && return 0
+        return 1   # this server answered, without the value
+    done
+    return 1
+}
+
+le_manual() {
+    local cn=${HOSTS[0]} records=$LE_DIR/manual-records request name value missing=0 status=0 crt
+    install -d -m 0700 -- "$LE_DIR/manual"
+    table_request
+    request=$(openssl req -in "$STATE_DIR/request.csr" -outform DER | sha256sum | cut -c1-64)
+    crt=$LE_DIR/manual/$cn/fullchain.cer
+    if [[ -f $records && $(head -n 1 "$records") == "request $request" ]]; then
+        # The second run: the records of this request's order.
+        printf 'The TXT records Let'\''s Encrypt checks, in the public DNS of the domain:\n'
+        while read -r name value; do
+            if ((NO_DNS_CHECK)); then
+                printf '  %s TXT "%s"\n' "$name" "$value"
+            elif manual_lookup "$name" "$value"; then
+                printf '  %s TXT "%s"  (found)\n' "$name" "$value"
+            else
+                printf '  %s TXT "%s"  (NOT FOUND)\n' "$name" "$value"
+                missing=1
+            fi
+        done < <(tail -n +2 "$records")
+        if ((missing)); then
+            printf 'Looked up with %s. When every record is there, run the same command again. If this server cannot reach public DNS servers, name one with --dns-resolvers, or, once the records are there, skip the look-up with --no-dns-check.\n' "$MANUAL_ASKED"
+            exit 3
+        fi
+        printf 'Asking %s to check them and issue the certificate (acme.sh)...\n' "$SERVER"
+        run_acmesh --renew -d "$cn" || status=$?
+        if ((status != 0)) || [[ ! -f $crt ]] || [[ $crt -ot $records ]]; then
+            tail -n 25 "$TEMP_DIR/acmesh.log" >&2
+            rm -f -- "$records"   # a failed check spends the order: the next run starts a new one
+            die "Let's Encrypt did not issue the certificate (acme.sh's messages above). Run the same command again: it starts a new order with new records"
+        fi
+    else
+        # The first run: a new order, and its records.
+        run_acmesh --sign-csr --csr /request.csr --dns --force || status=$?
+        awk -F"'" '/ Domain: / { name = $2 } / TXT value: / { if (name != "") print name, $2; name = "" }' \
+            "$TEMP_DIR/acmesh.log" > "$TEMP_DIR/records"
+        if ((status == 0)) && [[ -f $crt && ! -s $TEMP_DIR/records ]]; then
+            :   # Let's Encrypt checked these names a short while ago and issued at once
+        elif [[ -s $TEMP_DIR/records ]]; then
+            { printf 'request %s\n' "$request"; cat -- "$TEMP_DIR/records"; } > "$records.tmp"
+            mv -f -- "$records.tmp" "$records"
+            printf 'Let'\''s Encrypt checks each host name through a TXT record. The DNS administrator creates\n'
+            printf 'these in the public DNS of the domain (TTL 60 or 300 is fine):\n\n'
+            while read -r name value; do printf '%s TXT "%s"\n' "$name" "$value"; done < "$TEMP_DIR/records"
+            printf '\nWhen they exist, run the same command again. They are for this order only: another run of\n'
+            printf 'the first step would give new values. Let'\''s Encrypt keeps the order for a few days.\n'
+            exit 3
+        else
+            tail -n 25 "$TEMP_DIR/acmesh.log" >&2
+            die "acme.sh did not start the order (its messages above)"
+        fi
+    fi
+    TRUST_FILE=$TEMP_DIR/trust.pem
+    cat -- "$SYSTEM_ROOTS" ${EXTRA_ROOT:+"$EXTRA_ROOT"} > "$TRUST_FILE"
+    install_cert "$crt" ''
+    rm -f -- "$records"
+    printf 'To renew, run sudo bash https.sh letsencrypt --manual again within the last 30 days before %s: it prints new records.\n' \
+        "$(field enddate "$STATE_DIR/fullchain.pem")"
+}
+
 cmd_letsencrypt() {
     local path owner host before crt url waiting=0 checked=()
     LE_DIR=$STATE_DIR/letsencrypt
@@ -1185,6 +1294,10 @@ cmd_letsencrypt() {
     nginx_serves_installed lenient
     le_prerequisites
     install -d -m 0700 -- "$LE_DIR"
+    if ((MANUAL)); then
+        le_manual
+        return 0
+    fi
     [[ ! -f $LE_DIR/acme-dns.json ]] || chmod 0600 -- "$LE_DIR/acme-dns.json"   # it holds the accounts' passwords
     load_accounts
     for host in "${HOSTS[@]}"; do   # the accounts there are used as they are, if they are complete and of this acme-dns server
@@ -1200,13 +1313,7 @@ cmd_letsencrypt() {
         [[ $url == "$ACME_DNS" ]] \
             || die "The acme-dns accounts in $LE_DIR/acme-dns.json were made on $url, not $ACME_DNS. To move to $ACME_DNS, delete that file and run letsencrypt again: it makes accounts there and prints their records, which the DNS administrator puts in place of the old ones"
     done
-    # The table's request, as csr makes it: every host name, with key.pem or a new key waiting.
-    if [[ ! -f $STATE_DIR/request.csr || $(request_names "$STATE_DIR/request.csr") != "$(printf '%s\n' "${HOSTS[@]}" | sort -u)" ]] \
-        || ! { [[ -f $STATE_DIR/key.new.pem && $(pub_of req "$STATE_DIR/request.csr") == "$(pub_of key "$STATE_DIR/key.new.pem")" ]] \
-               || [[ -f $STATE_DIR/key.pem && $(pub_of req "$STATE_DIR/request.csr") == "$(pub_of key "$STATE_DIR/key.pem")" ]]; }; then
-        make_request
-        printf 'Made the certificate request for %s with %s (it stays on this server).\n' "${HOSTS[*]}" "$REQUEST_KEY"
-    fi
+    table_request
     # An account for every host name, made here: lego would make one only while it solves a
     # challenge, which Let's Encrypt skips for a host name it checked a short while ago.
     for host in "${HOSTS[@]}"; do
@@ -1465,6 +1572,8 @@ while (($#)); do
         --purge) PURGE=1; shift ;;
         --renew) RENEW=1; shift ;;
         --accept-tos) ACCEPT_TOS=1; shift ;;
+        --manual) MANUAL=1; shift ;;
+        --no-dns-check) NO_DNS_CHECK=1; shift ;;
         -*) die "Unknown option: $1 (see: bash https.sh --help)" ;;
         *) ARGS+=("$1"); shift ;;
     esac
@@ -1472,8 +1581,10 @@ done
 [[ $COMMAND == csr ]] || [[ $NEW_KEY == 0 && -z $KEY_FILE && $SUBJECT == "$DEFAULT_SUBJECT" ]] || die '--new-key, --key and --subject belong to csr'
 [[ $NEW_KEY == 0 || -z $KEY_FILE ]] || die 'Use --new-key or --key, not both'
 [[ $COMMAND == uninstall ]] || [[ $PURGE == 0 && -z $CONFIRM ]] || die '--purge and --confirm belong to uninstall'
-[[ $COMMAND == letsencrypt ]] || [[ ${#GIVEN[@]} == 0 && $RENEW == 0 && $ACCEPT_TOS == 0 ]] \
-    || die '--renew, --accept-tos, --email, --server, --acme-dns, --dns-resolvers, --extra-root and --acme-ca belong to letsencrypt'
+[[ $COMMAND == letsencrypt ]] || [[ ${#GIVEN[@]} == 0 && $RENEW == 0 && $ACCEPT_TOS == 0 && $MANUAL == 0 && $NO_DNS_CHECK == 0 ]] \
+    || die '--renew, --manual, --no-dns-check, --accept-tos, --email, --server, --acme-dns, --dns-resolvers, --extra-root and --acme-ca belong to letsencrypt'
+((RENEW == 0 || MANUAL == 0)) || die '--manual has no --renew: to renew, run letsencrypt --manual again, and it prints new records'
+((NO_DNS_CHECK == 0 || MANUAL == 1)) || die '--no-dns-check belongs to --manual'
 [[ $COMMAND == install-cert ]] || ((${#ARGS[@]} == 0)) || die "Unexpected argument: ${ARGS[0]}"
 ((${#ARGS[@]} <= 2)) || die 'install-cert takes a certificate file and, optionally, a chain file'
 [[ $STATE_DIR == /* ]] || die '--dir must be an absolute path'

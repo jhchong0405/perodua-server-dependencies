@@ -577,6 +577,27 @@ nginx configuration all come from it. Run the commands from the `scripts` folder
    certificate must belong to the key, cover every host name of the table, be
    valid now and verify with its chain.
 
+   **Or from Let's Encrypt with records by hand**, instead of steps 2 and 3, when
+   there is no acme-dns server: the DNS administrator adds one TXT record per host
+   name in the domain's public DNS for each certificate. The first run prints all
+   of them and stops:
+
+   ```bash
+   sudo bash https.sh letsencrypt --manual --accept-tos
+   ```
+
+   ```
+   _acme-challenge.stgiss.perodua.com.my TXT "rgTepGogD-f1UpXVImshaGXVoJ6X4KLkT8kzuZbYXzg"
+   ```
+
+   Once they are in public DNS, run the same command again: it looks them up with
+   public DNS servers (8.8.8.8, 1.1.1.1, or `--dns-resolvers`), then has Let's
+   Encrypt check them and installs the certificate (valid 90 days). `--no-dns-check`
+   skips that look-up when this server cannot reach public DNS. There is no timer:
+   to renew, run the same command again in the last 30 days; it prints new records.
+   The server needs Docker and outbound HTTPS to Let's Encrypt and Docker Hub
+   (acme.sh image); the private key stays on the server.
+
    **Or from Let's Encrypt**, instead of steps 2 and 3: `letsencrypt` gets the
    certificate for the same table, key and request, and a daily timer renews it.
    Let's Encrypt checks each host name through a DNS record that the customer's
