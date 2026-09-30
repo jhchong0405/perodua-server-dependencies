@@ -555,8 +555,9 @@ nginx configuration all come from it. Run the commands from the `scripts` folder
    `/etc/perodua-https/request.csr` for every host name of the table (the first
    one is the CN, all of them are subject alternative names), and prints the
    request. Send only the request to the certificate issuer, never the key;
-   `sudo cat /etc/perodua-https/request.csr` prints it again. `--subject
-   /C=MY/O=NAME` sets the organisation (default `/C=MY/O=Perodua`).
+   `sudo cat /etc/perodua-https/request.csr` prints it again. The subject is the one GICT
+   asks for (`/C=MY/ST=Selangor/L=Rawang/O=Perusahaan Otomobil Kedua Sdn Bhd/OU=GICT`);
+   `--subject` sets another one, without the CN.
 
    If a request made by hand, with its own key, was already sent, do not send
    another: take that key over, so that the certificate the issuer returns fits it

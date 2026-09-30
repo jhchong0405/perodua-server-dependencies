@@ -15,7 +15,9 @@ NGINX_CONF=/etc/nginx/conf.d/perodua-https.conf
 DEFAULT_NGINX_CONF=$NGINX_CONF
 SCRIPT_PATH=$(realpath -- "${BASH_SOURCE[0]}")
 SCRIPT_DIR=${SCRIPT_PATH%/*}
-COMMAND='' ROUTES='' ROUTES_FILE='' SUBJECT='/C=MY/O=Perodua' NEW_KEY=0 KEY_FILE='' CONFIRM='' PURGE=0 TEMP_DIR='' RELOADED=0
+# The subject GICT asks for in its certificate requests; the CN is the first host of the table.
+DEFAULT_SUBJECT='/C=MY/ST=Selangor/L=Rawang/O=Perusahaan Otomobil Kedua Sdn Bhd/OU=GICT'
+COMMAND='' ROUTES='' ROUTES_FILE='' SUBJECT=$DEFAULT_SUBJECTNEW_KEY=0 KEY_FILE='' CONFIRM='' PURGE=0 TEMP_DIR='' RELOADED=0
 ARGS=() HOSTS=() R_HOST=() R_PATH=() R_PORT=() R_STRIP=() SAVED=()
 # In STATE_DIR: routes.conf (the table), key.pem (the private key nginx uses),
 # key.new.pem (a new key waiting for its certificate), request.csr, fullchain.pem,
@@ -528,7 +530,7 @@ cmd_csr() {
     printf 'Send this request to the certificate issuer. The private key (%s) stays on this server:\n\n' "$REQUEST_KEY"
     cat -- "$STATE_DIR/request.csr"
     [[ -z $KEY_FILE ]] || printf '\nIf a request made with %s was already sent, wait for its certificate instead of sending this one.\n' "$KEY_FILE"
-    printf '\nWhen the certificate comes back: sudo bash https.sh install-cert FILE [CHAIN]\n'
+    printf '\nWhen the certificate comes back: sudo bash https.sh install-cert FILE [CHAIN], then sudo bash https.sh apply\n'
 }
 
 make_request() {   # request.csr for every host name of the table; REQUEST_KEY: the key it was made with
@@ -1467,7 +1469,7 @@ while (($#)); do
         *) ARGS+=("$1"); shift ;;
     esac
 done
-[[ $COMMAND == csr ]] || [[ $NEW_KEY == 0 && -z $KEY_FILE && $SUBJECT == '/C=MY/O=Perodua' ]] || die '--new-key, --key and --subject belong to csr'
+[[ $COMMAND == csr ]] || [[ $NEW_KEY == 0 && -z $KEY_FILE && $SUBJECT == "$DEFAULT_SUBJECT" ]] || die '--new-key, --key and --subject belong to csr'
 [[ $NEW_KEY == 0 || -z $KEY_FILE ]] || die 'Use --new-key or --key, not both'
 [[ $COMMAND == uninstall ]] || [[ $PURGE == 0 && -z $CONFIRM ]] || die '--purge and --confirm belong to uninstall'
 [[ $COMMAND == letsencrypt ]] || [[ ${#GIVEN[@]} == 0 && $RENEW == 0 && $ACCEPT_TOS == 0 ]] \
