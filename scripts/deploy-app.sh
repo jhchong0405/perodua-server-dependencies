@@ -31,6 +31,10 @@ DB_HOST='' DB_PORT=5432 DB_NAME=perodua DB_USER=odoo DB_PASSWORD_FILE=''
 PROJECT_NAME=perodua-client-uiux HTTP_PORT=8110 BIND_IP=0.0.0.0
 STARTUP_TIMEOUT=600 INIT_TIMEOUT=3600
 PUBLIC_ROOT='' ENVIRONMENT_LABEL='' PUBLIC_BASE_URL=''
+# The settings the configuration file gives a value, and whether that file is an
+# app.env written by hand in the deployment directory before its first run.
+declare -A SET=()
+PREPARED=0
 
 usage() {
     cat <<'HELP'
@@ -47,6 +51,11 @@ password "perodua". Prepare the empty database on the DB server
 with deploy-db.sh DB_MODE=empty. It never reinitializes or upgrades an
 initialized database.
 --dir defaults to /opt/perodua-app; existing configuration is reused there.
+Before the first deployment it may hold an app.env written by hand, such as
+only PUBLIC_ROOT and the other settings of the page: on a terminal, the run
+asks for the database settings that a configuration without DB_HOST leaves out.
+Until a first deployment has used its database, a rerun may change the
+database settings and asks for the password again.
 --config accepts literal KEY=VALUE lines (see app.env.example), never shell code.
 --check-config reads --config, or app.env in --dir, checks every setting the
 way a deployment does and stops before Docker is used; nothing is changed.
@@ -89,7 +98,12 @@ while (($#)); do
 done
 [[ $DEPLOY_DIR == /* && $DEPLOY_DIR != / && $DEPLOY_DIR != *$'\n'* ]] || fail '--dir must be an absolute directory path, not /'
 [[ ! -L $DEPLOY_DIR ]] || fail 'Deployment directory must not be a symbolic link'
-if [[ -z $CONFIG && -f $DEPLOY_DIR/app.env ]]; then CONFIG=$DEPLOY_DIR/app.env; fi
+if [[ -z $CONFIG && -f $DEPLOY_DIR/app.env ]]; then
+    CONFIG=$DEPLOY_DIR/app.env
+    # Before the first deployment, app.env can only be the operator's: every
+    # run of this script writes it together with .deployment-identity.
+    if [[ ! -e $DEPLOY_DIR/.deployment-identity && ! -L $DEPLOY_DIR/app.env ]]; then PREPARED=1; fi
+fi
 if [[ -n $CONFIG ]]; then
     [[ -r $CONFIG ]] || fail 'Configuration file is not readable'
     while IFS= read -r line || [[ -n $line ]]; do
@@ -99,7 +113,8 @@ if [[ -n $CONFIG ]]; then
         key=${BASH_REMATCH[1]} value=${BASH_REMATCH[2]}
         case $key in
             DB_HOST|DB_PORT|DB_NAME|DB_USER|DB_PASSWORD_FILE|PROJECT_NAME|HTTP_PORT|BIND_IP|STARTUP_TIMEOUT|INIT_TIMEOUT|PUBLIC_ROOT|ENVIRONMENT_LABEL|PUBLIC_BASE_URL)
-                printf -v "$key" '%s' "$value" ;;
+                printf -v "$key" '%s' "$value"
+                [[ -z $value ]] || SET[$key]=1 ;;
             *) fail "Unknown configuration key: $key" ;;
         esac
     done < "$CONFIG"
@@ -116,6 +131,8 @@ prompt() {
 }
 db_host_problem() {  # why DB_HOST cannot be used, if it cannot
     case $DB_HOST in
+        '')
+            printf 'DB_HOST is empty: it is the IP address of the database server, which deploy-db.sh prints at the end.' ;;
         localhost|127.*|::1|0.0.0.0)
             printf '%s would be the App container itself, not the database. With the database on this server, use the DB_HOST that deploy-db.sh printed (Docker'"'"'s address of this server, usually 172.17.0.1).' "$DB_HOST" ;;
         *) [[ $DB_HOST =~ ^[A-Za-z0-9][A-Za-z0-9_.:-]*$ ]] || printf 'DB_HOST must be an IP address or hostname (no URL or shell syntax).' ;;
@@ -126,7 +143,8 @@ local_database() {  # the settings deploy-db.sh recorded, when it set up exactly
     mapfile -t records < <(find /var/lib/perodua-db-deploy -mindepth 3 -maxdepth 3 -name connection.txt 2>/dev/null)
     ((${#records[@]} == 1)) || return 1
     while IFS= read -r line || [[ -n $line ]]; do
-        if [[ $line =~ ^(DB_HOST|DB_PORT|DB_NAME|DB_USER)=([A-Za-z0-9_.:-]+)$ ]]; then
+        # A value the configuration file gives stays.
+        if [[ $line =~ ^(DB_HOST|DB_PORT|DB_NAME|DB_USER)=([A-Za-z0-9_.:-]+)$ && -z ${SET[${BASH_REMATCH[1]}]:-} ]]; then
             printf -v "${BASH_REMATCH[1]}" '%s' "${BASH_REMATCH[2]}"
         fi
     done < "${records[0]}"
@@ -178,8 +196,7 @@ choose_bind_ip() {
         [[ ${answer:-n} != [Yy]* ]] || break
     done
 }
-# Supplying a complete configuration avoids repeated prompts on subsequent runs.
-if [[ -z $CONFIG ]]; then
+ask_database() {  # the database questions of a first interactive run
     if ((NON_INTERACTIVE == 0)) && local_database; then
         printf 'deploy-db.sh set up the database on this server: its settings are the defaults below.\n'
     fi
@@ -194,8 +211,21 @@ if [[ -z $CONFIG ]]; then
     prompt DB_PORT 'Database port'
     prompt DB_NAME 'Application database name'
     prompt DB_USER 'Database username'
+}
+# Supplying a complete configuration avoids repeated prompts on subsequent runs.
+if [[ -z $CONFIG ]]; then
+    ask_database
     prompt HTTP_PORT 'Web port that browsers open on this server'
     ((NON_INTERACTIVE)) || choose_bind_ip
+elif [[ -z $DB_HOST ]]; then
+    # A configuration without the database settings, such as an app.env written
+    # by hand with only PUBLIC_ROOT and the other settings of the page: a run on
+    # a terminal asks the database questions, with the file's values as defaults.
+    if ((CHECK_ONLY || NON_INTERACTIVE)) || [[ ! -t 0 ]]; then
+        fail "$CONFIG has no DB_HOST. Add DB_HOST=<IP address of the database server> (deploy-db.sh prints it at the end), or run sudo bash deploy-app.sh on a terminal without --check-config and --non-interactive: it asks for the database settings that the file leaves out"
+    fi
+    printf '%s has no database settings: answer the questions below. They are saved in %s/app.env.\n' "$CONFIG" "$DEPLOY_DIR"
+    ask_database
 fi
 problem=$(db_host_problem)
 [[ -z $problem ]] || fail "$problem"
@@ -288,8 +318,16 @@ engine=$(docker info --format '{{.OSType}}/{{.Architecture}}')
 mkdir -p -- "$DEPLOY_DIR"
 DEPLOY_DIR=$(cd -- "$DEPLOY_DIR" && pwd -P)
 [[ $DEPLOY_DIR != / && $DEPLOY_DIR != *$'\n'* ]] || fail 'Unsupported directory path'
+# A first deployment that has not used its database yet: it stopped before (a
+# wrong DB_HOST or password, a firewall, a DB server that refused this server).
+# Until then its database settings, password and release may change; its
+# project may not, because its Docker network and volume carry that name.
+UNVERIFIED=$DEPLOY_DIR/.deployment-unverified
 if [[ ! -e $DEPLOY_DIR/.deployment-identity ]]; then
-    [[ -z $(find "$DEPLOY_DIR" -mindepth 1 -maxdepth 1 ! -name .deploy.lock -print -quit) ]] || fail 'Use an empty deployment directory; keep your initial config and password files elsewhere'
+    others=(! -name .deploy.lock ! -name .deployment-unverified)
+    ((PREPARED == 0)) || others+=(! -name app.env)
+    [[ -z $(find "$DEPLOY_DIR" -mindepth 1 -maxdepth 1 "${others[@]}" -print -quit) ]] \
+        || fail 'Use an empty deployment directory. Before the first deployment it may hold only app.env, as the settings that a run without --config reads; keep password files elsewhere'
 fi
 chmod 0700 "$DEPLOY_DIR"
 exec 9>"$DEPLOY_DIR/.deploy.lock"
@@ -297,8 +335,12 @@ flock -n 9 || fail 'Another deployment is running in this directory'
 TEMP_DIR=$(mktemp -d "$DEPLOY_DIR/.deploy.XXXXXXXX")
 printf '%s\n' "release=$RELEASE" "revision=$REVISION" "project=$PROJECT_NAME" "host=$DB_HOST" "port=$DB_PORT" "database=$DB_NAME" "user=$DB_USER" > "$TEMP_DIR/identity"
 if [[ -e $DEPLOY_DIR/.deployment-identity ]]; then
-    cmp -s "$TEMP_DIR/identity" "$DEPLOY_DIR/.deployment-identity" || fail 'Directory belongs to a different database, project, or release. Use a separate deployment directory'
-elif [[ -e $DEPLOY_DIR/compose.yml || -e $DEPLOY_DIR/secrets || -e $DEPLOY_DIR/app.env ]]; then
+    if ! cmp -s "$TEMP_DIR/identity" "$DEPLOY_DIR/.deployment-identity"; then
+        [[ -f $UNVERIFIED && $(grep -x 'project=.*' "$TEMP_DIR/identity") == "$(grep -x 'project=.*' "$DEPLOY_DIR/.deployment-identity")" ]] \
+            || fail 'Directory belongs to a different database, project, or release. Use a separate deployment directory'
+        printf 'The earlier first run in %s stopped before it used its database, so its settings may still change: using the ones of this run.\n' "$DEPLOY_DIR"
+    fi
+elif [[ -e $DEPLOY_DIR/compose.yml || -e $DEPLOY_DIR/secrets ]] || { [[ -e $DEPLOY_DIR/app.env ]] && ((PREPARED == 0)); }; then
     fail 'Unmanaged deployment files already exist in this directory; use an empty directory'
 fi
 containers=$(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT_NAME")
@@ -319,7 +361,13 @@ fi
 # Whether the volume, and so perhaps attachments, existed before this run.
 LEFTOVER=0
 if docker volume inspect "$FILESTORE_VOLUME" >/dev/null 2>&1; then LEFTOVER=1; fi
-if [[ -n $DB_PASSWORD_FILE ]]; then
+if [[ -f $UNVERIFIED && ( -z $DB_PASSWORD_FILE || $DB_PASSWORD_FILE -ef $DEPLOY_DIR/secrets/db_password ) ]] \
+        && ((NON_INTERACTIVE == 0)) && [[ -t 0 && -r $DEPLOY_DIR/secrets/db_password ]]; then
+    # The password the earlier first run saved may be the reason it stopped.
+    read -r -s -p 'Database password (hidden; Enter keeps the one entered before): ' password || fail 'Input cancelled'
+    printf '\n'
+    [[ -n $password ]] || password=$(<"$DEPLOY_DIR/secrets/db_password")
+elif [[ -n $DB_PASSWORD_FILE ]]; then
     password=$(<"$DB_PASSWORD_FILE")
 elif [[ -r $DEPLOY_DIR/secrets/db_password ]]; then
     password=$(<"$DEPLOY_DIR/secrets/db_password")
@@ -418,10 +466,16 @@ def connect(db):
         category = 'authentication / access / network failure'
         detail = str(exc).lower()
         if exc.pgcode == '28P01' or 'password authentication failed' in detail:
-            category = 'incorrect username or password'
-        elif 'no pg_hba.conf entry' in detail: category = 'DB Server pg_hba.conf does not allow this connection'
-        elif 'connection refused' in detail: category = 'connection refused; verify IP, port and listening service'
-        elif 'timeout' in detail: category = 'connection timed out; verify routing and firewall'
+            category = 'incorrect username or password: use the DB_USER and the password set with deploy-db.sh'
+        elif 'no pg_hba.conf entry' in detail:
+            category = ('the DB server does not accept connections from this App server: on the DB server, APP_CIDR in'
+                        ' deploy.conf must contain the App server address that the DB server sees; correct it and run deploy-db.sh again')
+        elif 'connection refused' in detail:
+            category = ('connection refused: nothing listens at DB_HOST port DB_PORT; DB_HOST is the address deploy-db.sh'
+                        ' printed (DB_LISTEN_IP on the DB server), and PostgreSQL must be running there')
+        elif 'timeout' in detail:
+            category = ('connection timed out: a firewall between the servers, or on the DB server (ufw, a cloud security group),'
+                        ' blocks TCP DB_PORT from this App server')
         elif 'could not translate host name' in detail: category = 'hostname could not be resolved'
         elif exc.pgcode == '42501': category = 'insufficient database permissions'
         fail('cannot connect to ' + db + ' (' + category + '). Check DB Server and pg_hba.conf.')
@@ -620,6 +674,8 @@ for helper in uat_guard.py uat_admins.py; do install -m 0444 -- "$SCRIPT_DIR/$he
 install -d -m 0700 "$DEPLOY_DIR/secrets"
 for file in compose.yml preflight.py uat_guard.py uat_admins.py; do mv -f -- "$TEMP_DIR/$file" "$DEPLOY_DIR/$file"; done
 mv -f -- "$TEMP_DIR/db_password" "$DEPLOY_DIR/secrets/db_password"
+# A first deployment stays unverified until it uses its database (bind_directory).
+[[ -e $DEPLOY_DIR/.deployment-identity ]] || : > "$UNVERIFIED"
 mv -f -- "$TEMP_DIR/identity" "$DEPLOY_DIR/.deployment-identity"
 {
     for key in DB_HOST DB_PORT DB_NAME DB_USER PROJECT_NAME HTTP_PORT BIND_IP STARTUP_TIMEOUT INIT_TIMEOUT; do printf '%s=%s\n' "$key" "${!key}"; done
@@ -669,12 +725,19 @@ clear_leftover_attachments() {
     docker volume rm "$FILESTORE_VOLUME" >/dev/null || fail "Could not delete $FILESTORE_VOLUME"
     printf 'Deleted %s.\n' "$FILESTORE_VOLUME"
 }
-state=$(preflight check)
+bind_directory() {  # from here on, this directory belongs to this database
+    rm -f -- "$UNVERIFIED"
+}
+if ! state=$(preflight check); then
+    [[ -f $UNVERIFIED ]] || fail 'The database check above failed. Fix the cause and run deploy-app.sh again'
+    fail "The database check above failed, before this deployment used the database. This App server's addresses: $(server_addresses | paste -sd ' ' -). Correct DB_HOST, DB_PORT, DB_NAME or DB_USER in $DEPLOY_DIR/app.env, or the settings on the DB server (the App server address it accepts, its firewall), then run deploy-app.sh again: on a terminal it asks for the database password again"
+fi
 FRESH=0
 case $state in
     MISSING|EMPTY|MISSING_NO_CREATEDB)
         ((INIT_DB)) || fail 'Database is missing or empty. Restore a matching database, or create an empty one with deploy-db.sh DB_MODE=empty and rerun with --init-db'
         [[ $state != MISSING_NO_CREATEDB ]] || fail "Database $DB_NAME does not exist and $DB_USER may not create databases (by design). On the DB server run deploy-db.sh with DB_MODE=empty to create it, then rerun with --init-db"
+        bind_directory
         ((LEFTOVER == 0)) || clear_leftover_attachments
         printf 'Initializing NEW UAT database %s without %s and without Odoo demo data.\n' "$DB_NAME" "$EXCLUDED_MODULE"
         printf 'Checking the pinned image before anything is written to the database...\n'
@@ -701,6 +764,7 @@ case $state in
     SETUP_PENDING|SETUP_UNMARKED)
         ((INIT_DB)) || fail 'A fresh UAT initialization installed its modules but stopped before its administrators were set up. Rerun with --init-db to finish it; modules are not reinstalled'
         printf 'Finishing the interrupted UAT setup of %s; modules are not reinstalled.\n' "$DB_NAME"
+        bind_directory
         STARTED=1
         if [[ $state == SETUP_UNMARKED ]]; then
             [[ $(preflight mark-pending) == PENDING ]] || fail 'Initialized database failed the fresh UAT checks'
@@ -709,6 +773,7 @@ case $state in
         FRESH=1 ;;
     READY\ *)
         printf 'Existing initialized database accepted; initialization and module upgrades are skipped.\n'
+        bind_directory
         if ((ADOPTED)); then
             printf 'Using the attachments volume %s that an earlier deployment of this project left; it is checked against the database below.\n' "$FILESTORE_VOLUME"
         fi ;;

@@ -702,4 +702,5 @@ if [[ $DB_MODE == empty ]] && ((ONE_SERVER)); then
     printf 'Next, on this server: sudo bash deploy-app.sh --init-db (it offers the settings above as defaults).\n'
 elif [[ $DB_MODE == empty ]]; then
     printf 'Next, on App Server: sudo bash deploy-app.sh --init-db (initializes Odoo, its modules and the UAT administrators).\n'
+    printf 'It asks for the database server: enter %s, and the password set above. In an app.env written beforehand, that is DB_HOST=%s.\n' "$DB_LISTEN_IP" "$DB_LISTEN_IP"
 fi

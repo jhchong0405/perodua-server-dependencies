@@ -321,6 +321,37 @@ explained and asked again: inside the App container it would be the container
 itself. On one server, use Docker's address (the `DB_HOST` `deploy-db.sh`
 printed).
 
+**An `app.env` written beforehand.** Before the first run, the deployment
+directory (`/opt/perodua-app`) may hold an `app.env` written by hand, and
+nothing else. The run reads it as its configuration: settings that are there
+are not asked, for example `PUBLIC_ROOT` and the other settings of
+[Two environments on one server](#two-environments-on-one-server-by-path-dev-uat),
+`HTTP_PORT` and `BIND_IP`. When the file has no `DB_HOST`, a run on a terminal
+asks the database questions, with the file's values as defaults, and saves the
+answers in the same file. `--check-config`, `--non-interactive` and a run
+without a terminal stop instead and name the missing `DB_HOST`. With `--config`,
+the deployment directory must still be empty.
+
+**A first run that stopped before it used the database.** The deployment
+directory is bound to its database (`DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`)
+and its release once the run has used the database: when it initializes an
+empty one, finishes an interrupted setup, or accepts an initialized one. Until
+then (for example after a wrong `DB_HOST`, a DB server firewall that blocks
+port 5432, a DB server whose `APP_CIDR` does not contain this App server, a
+wrong password, or a missing database), `.deployment-unverified` in the
+directory marks it as not bound yet:
+
+- The failed database check prints this App server's addresses, which the DB
+  server must accept.
+- A rerun may change the database settings and the release (a newer `scripts`
+  folder). `PROJECT_NAME` must stay the same, because the project's Docker
+  network and volume carry that name.
+- On a terminal, the rerun asks for the database password again; Enter keeps the
+  one entered before. Without a terminal, or with `DB_PASSWORD_FILE` naming a
+  file of your own, the password is read as before.
+
+Deployments set up by earlier scripts have no such file and stay bound.
+
 It then asks who may open the web page, and saves the answer as `BIND_IP`:
 
 | Choice | `BIND_IP` | Reached from |
@@ -640,9 +671,11 @@ to that deployment's web port.
 
 ### Settings
 
-The three settings below are read only from the configuration file (`--config`)
-and, on later runs, from `app.env` in the deployment directory. The questions of
-a first interactive run do not ask for them. Each run saves the ones that are
+The three settings below are read only from the configuration file (`--config`),
+from an `app.env` written beforehand in the empty deployment directory (see
+[Initialize a fresh UAT system](#initialize-a-fresh-uat-system-on-the-app-server)),
+and, on later runs, from the `app.env` there. The questions of a first
+interactive run do not ask for them. Each run saves the ones that are
 set in `app.env`. Empty is their default and is left out, so a deployment that
 does not use them keeps an `app.env` that the scripts of v1.0.3 and earlier can
 still read.
