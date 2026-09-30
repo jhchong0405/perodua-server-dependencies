@@ -189,6 +189,27 @@ class ServiceAppTests(unittest.TestCase):
         self.assertEqual(self.deployments(), [])
         self.assertEqual((self.app / ".deployment-identity").read_text(), self.identity)
 
+    def test_a_first_deployment_that_never_used_its_database_is_left_to_deploy_app(self):
+        # deploy-app.sh may still point such a directory at another database:
+        # service.sh neither starts it nor deletes the data of the one it names.
+        marker = self.app / ".deployment-unverified"
+        for kind in ("file", "symlink"):
+            marker.unlink(missing_ok=True)
+            if kind == "file":
+                marker.touch()
+            else:
+                marker.symlink_to(self.app / "nowhere")
+            for action in (("start",), ("restart",), ("reset", "--confirm", "perodua")):
+                with self.subTest(kind=kind, action=action[0]):
+                    result = self.run_script(*action)
+                    self.assert_nothing_changed(result, "stopped before it used its database")
+                    self.assertIn("sudo bash deploy-app.sh --dir", result.stderr)
+                    self.assertEqual(self.deploy_calls(), [])
+        # stop and status act on the containers only.
+        result = self.run_script("stop")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.docker_calls(), [["stop"]])
+
     def test_stop_start_restart_hold_the_lock_and_status_does_not_need_it(self):
         up = ["up", "--detach", "--no-recreate", "--wait", "--wait-timeout", "600"]
         for action, expected in (("stop", [["stop"]]), ("start", [CHECK, up]), ("restart", [CHECK, ["stop"], up])):

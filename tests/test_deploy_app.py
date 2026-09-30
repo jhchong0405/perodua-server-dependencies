@@ -798,6 +798,28 @@ sys.exit(93)
         result = self.run_script("--non-interactive")
         self.assertIn("Directory belongs to a different database, project, or release", result.stdout)
 
+    def test_a_marker_that_is_not_a_regular_file_is_neither_written_through_nor_trusted(self):
+        outside = self.base / "outside-file"
+        outside.write_text("keep")
+        self.pulls_succeed()
+        # In an empty directory it is not ignored: the run stops, and the target stays.
+        self.deploy_dir.mkdir()
+        (self.deploy_dir / ".deployment-unverified").symlink_to(outside)
+        result = self.run_script("--non-interactive")
+        self.assertIn("Use an empty deployment directory", result.stdout)
+        self.assertEqual(outside.read_text(), "keep")
+        (self.deploy_dir / ".deployment-unverified").unlink()
+        # Next to an identity, a symlink does not make the directory unverified.
+        self.assertIn("Fixture stopped before", self.run_script("--non-interactive").stdout)
+        marker = self.deploy_dir / ".deployment-unverified"
+        self.assertTrue(marker.is_file() and not marker.is_symlink())
+        marker.unlink()
+        marker.symlink_to(outside)
+        self.write_config(DB_HOST="192.0.2.21")
+        result = self.run_script("--non-interactive")
+        self.assertIn("Directory belongs to a different database, project, or release", result.stdout)
+        self.assertEqual(outside.read_text(), "keep")
+
     def test_a_deployment_that_used_its_database_keeps_its_settings(self):
         self.pulls_succeed()
         self.assertIn("Fixture stopped before", self.run_script("--non-interactive").stdout)

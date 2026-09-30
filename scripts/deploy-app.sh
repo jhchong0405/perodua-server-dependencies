@@ -323,8 +323,9 @@ DEPLOY_DIR=$(cd -- "$DEPLOY_DIR" && pwd -P)
 # Until then its database settings, password and release may change; its
 # project may not, because its Docker network and volume carry that name.
 UNVERIFIED=$DEPLOY_DIR/.deployment-unverified
+unverified() { [[ -f $UNVERIFIED && ! -L $UNVERIFIED ]]; }
 if [[ ! -e $DEPLOY_DIR/.deployment-identity ]]; then
-    others=(! -name .deploy.lock ! -name .deployment-unverified)
+    others=(! -name .deploy.lock)
     ((PREPARED == 0)) || others+=(! -name app.env)
     [[ -z $(find "$DEPLOY_DIR" -mindepth 1 -maxdepth 1 "${others[@]}" -print -quit) ]] \
         || fail 'Use an empty deployment directory. Before the first deployment it may hold only app.env, as the settings that a run without --config reads; keep password files elsewhere'
@@ -336,7 +337,7 @@ TEMP_DIR=$(mktemp -d "$DEPLOY_DIR/.deploy.XXXXXXXX")
 printf '%s\n' "release=$RELEASE" "revision=$REVISION" "project=$PROJECT_NAME" "host=$DB_HOST" "port=$DB_PORT" "database=$DB_NAME" "user=$DB_USER" > "$TEMP_DIR/identity"
 if [[ -e $DEPLOY_DIR/.deployment-identity ]]; then
     if ! cmp -s "$TEMP_DIR/identity" "$DEPLOY_DIR/.deployment-identity"; then
-        [[ -f $UNVERIFIED && $(grep -x 'project=.*' "$TEMP_DIR/identity") == "$(grep -x 'project=.*' "$DEPLOY_DIR/.deployment-identity")" ]] \
+        unverified && [[ $(grep -x 'project=.*' "$TEMP_DIR/identity") == "$(grep -x 'project=.*' "$DEPLOY_DIR/.deployment-identity")" ]] \
             || fail 'Directory belongs to a different database, project, or release. Use a separate deployment directory'
         printf 'The earlier first run in %s stopped before it used its database, so its settings may still change: using the ones of this run.\n' "$DEPLOY_DIR"
     fi
@@ -361,7 +362,7 @@ fi
 # Whether the volume, and so perhaps attachments, existed before this run.
 LEFTOVER=0
 if docker volume inspect "$FILESTORE_VOLUME" >/dev/null 2>&1; then LEFTOVER=1; fi
-if [[ -f $UNVERIFIED && ( -z $DB_PASSWORD_FILE || $DB_PASSWORD_FILE -ef $DEPLOY_DIR/secrets/db_password ) ]] \
+if unverified && [[ -z $DB_PASSWORD_FILE || $DB_PASSWORD_FILE -ef $DEPLOY_DIR/secrets/db_password ]] \
         && ((NON_INTERACTIVE == 0)) && [[ -t 0 && -r $DEPLOY_DIR/secrets/db_password ]]; then
     # The password the earlier first run saved may be the reason it stopped.
     read -r -s -p 'Database password (hidden; Enter keeps the one entered before): ' password || fail 'Input cancelled'
@@ -675,7 +676,10 @@ install -d -m 0700 "$DEPLOY_DIR/secrets"
 for file in compose.yml preflight.py uat_guard.py uat_admins.py; do mv -f -- "$TEMP_DIR/$file" "$DEPLOY_DIR/$file"; done
 mv -f -- "$TEMP_DIR/db_password" "$DEPLOY_DIR/secrets/db_password"
 # A first deployment stays unverified until it uses its database (bind_directory).
-[[ -e $DEPLOY_DIR/.deployment-identity ]] || : > "$UNVERIFIED"
+if [[ ! -e $DEPLOY_DIR/.deployment-identity ]]; then
+    : > "$TEMP_DIR/unverified"
+    mv -f -- "$TEMP_DIR/unverified" "$UNVERIFIED"  # a rename replaces a symlink there, never writes through it
+fi
 mv -f -- "$TEMP_DIR/identity" "$DEPLOY_DIR/.deployment-identity"
 {
     for key in DB_HOST DB_PORT DB_NAME DB_USER PROJECT_NAME HTTP_PORT BIND_IP STARTUP_TIMEOUT INIT_TIMEOUT; do printf '%s=%s\n' "$key" "${!key}"; done
@@ -729,7 +733,7 @@ bind_directory() {  # from here on, this directory belongs to this database
     rm -f -- "$UNVERIFIED"
 }
 if ! state=$(preflight check); then
-    [[ -f $UNVERIFIED ]] || fail 'The database check above failed. Fix the cause and run deploy-app.sh again'
+    unverified || fail 'The database check above failed. Fix the cause and run deploy-app.sh again'
     fail "The database check above failed, before this deployment used the database. This App server's addresses: $(server_addresses | paste -sd ' ' -). Correct DB_HOST, DB_PORT, DB_NAME or DB_USER in $DEPLOY_DIR/app.env, or the settings on the DB server (the App server address it accepts, its firewall), then run deploy-app.sh again: on a terminal it asks for the database password again"
 fi
 FRESH=0

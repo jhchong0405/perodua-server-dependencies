@@ -166,12 +166,18 @@ run_app() {
     [[ $DEPLOY_DIR == /* && $DEPLOY_DIR != / ]] || die '--dir must be an absolute directory path, not /.'
     [[ -f $DEPLOY_DIR/.deployment-identity && -f $DEPLOY_DIR/compose.yml ]] \
         || die "No App deployment at $DEPLOY_DIR (deploy it with deploy-app.sh, or pass --dir)."
+    command -v docker >/dev/null || die 'Docker is not installed.'
+    # Under the lock, so that the database the plan names is the one the
+    # commands below use: a first deployment that never used its database may
+    # still be pointed at another one by deploy-app.sh.
+    [[ $ACTION == status ]] || lock_deployment
     PROJECT=$(sed -n 's/^project=//p' "$DEPLOY_DIR/.deployment-identity")
     DB_NAME=$(sed -n 's/^database=//p' "$DEPLOY_DIR/.deployment-identity")
     DB_HOST=$(sed -n 's/^host=//p' "$DEPLOY_DIR/.deployment-identity")
     [[ $PROJECT =~ ^[a-z][a-z0-9_-]{0,49}$ && -n $DB_NAME ]] || die "Unreadable $DEPLOY_DIR/.deployment-identity."
-    command -v docker >/dev/null || die 'Docker is not installed.'
-    [[ $ACTION == status ]] || lock_deployment
+    if [[ -e $DEPLOY_DIR/.deployment-unverified || -L $DEPLOY_DIR/.deployment-unverified ]] && [[ $ACTION =~ ^(start|restart|reset)$ ]]; then
+        die "The first deployment in $DEPLOY_DIR stopped before it used its database. Finish it with sudo bash deploy-app.sh --dir $DEPLOY_DIR (add --init-db for a new database). Nothing was changed."
+    fi
     case $ACTION in
         stop) app_stop ;;
         start) app_check; app_start ;;

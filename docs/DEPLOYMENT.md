@@ -349,6 +349,10 @@ directory marks it as not bound yet:
 - On a terminal, the rerun asks for the database password again; Enter keeps the
   one entered before. Without a terminal, or with `DB_PASSWORD_FILE` naming a
   file of your own, the password is read as before.
+- `service.sh` does not start, restart or reset such a deployment, so it never
+  starts an App on, or deletes the data of, a database the directory has not
+  used. It stops with the `deploy-app.sh` command that finishes the deployment.
+  `stop` and `status` work as usual.
 
 Deployments set up by earlier scripts have no such file and stay bound.
 
