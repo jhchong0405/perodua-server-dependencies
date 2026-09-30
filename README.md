@@ -100,6 +100,27 @@ Then choose who may open the web page:
 Then enter the database password. When asked, enter the registry username and
 password for `perodua-deploy.novutal.com`. The first run takes several minutes.
 
+**Serving the page under a path, such as `/dev`:** before the first run, write
+only those settings into `/opt/perodua-app/app.env`, one per line, without
+quotes. The script asks for the database settings as above and adds them to the
+file. [Two environments on one server](#two-environments-on-one-server) explains
+the settings.
+
+```
+HTTP_PORT=8110
+BIND_IP=127.0.0.1
+PUBLIC_ROOT=/dev
+ENVIRONMENT_LABEL=DEV environment
+PUBLIC_BASE_URL=https://stgissrp.perodua.com.my/dev
+```
+
+**If the first run stops at the database check** (a wrong `DB_HOST`, the DB
+server's firewall, or a DB server that does not accept this App server), nothing
+has used the database yet. The script prints this server's addresses. Correct
+the setting in `/opt/perodua-app/app.env` or on the DB server and run
+`sudo bash deploy-app.sh --init-db` again: it asks for the database password
+again (press Enter to keep the one entered before).
+
 ## 4. Sign in and check
 
 Open `http://APP_SERVER_IP:8110/app/` (or the web port you chose). If only this

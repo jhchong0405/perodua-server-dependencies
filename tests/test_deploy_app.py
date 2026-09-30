@@ -145,6 +145,10 @@ if os.environ.get('FAKE_DOCKER_MODE') in ('auth', 'network'):
         print('unauthorized: fixture token rejected', file=sys.stderr); sys.exit(1)
     if args and args[0] == 'compose' and 'config' in args: sys.exit(0)
     if args and args[0] == 'compose' and 'run' in args:
+        # FAKE_PREFLIGHT_STATE: the database check answers with this state,
+        # and the fixture stops at the next Docker command instead.
+        if os.environ.get('FAKE_PREFLIGHT_STATE') and args[-2:] == ['/opt/deploy/preflight.py', 'check']:
+            print(os.environ['FAKE_PREFLIGHT_STATE']); sys.exit(0)
         print('Fixture stopped before any database or container operation', file=sys.stderr)
         sys.exit(92)
 print('Fake Docker rejected unexpected command: ' + ' '.join(args), file=sys.stderr)
@@ -698,6 +702,165 @@ sys.exit(93)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("PUBLIC_ROOT needs Client Stable UIUX v1.0.4 or later", result.stdout)
             self.assertEqual(self.docker_calls(), [])
+
+    # ── an app.env written by hand, and a first run that stopped early ──
+    # What an operator wrote into /opt/perodua-app/app.env before the first run:
+    # the settings of the page only, no database settings.
+    HAND_WRITTEN = ("HTTP_PORT=8110\nBIND_IP=127.0.0.1\nPUBLIC_ROOT=/dev\nENVIRONMENT_LABEL=DEV environment\n"
+                    "PUBLIC_BASE_URL=https://stgissrp.perodua.com.my/dev\n")
+
+    def hand_written_app_env(self):
+        self.deploy_dir.mkdir()
+        (self.deploy_dir / "app.env").write_text(self.HAND_WRITTEN, encoding="utf-8")
+
+    def saved_command(self, *extra):
+        return ["bash", str(SCRIPT), "--dir", str(self.deploy_dir), *extra]
+
+    def run_saved_command(self, *extra, stdin=subprocess.DEVNULL):
+        return subprocess.run(self.saved_command(*extra), env=self.env, text=True, stdin=stdin,
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=20)
+
+    def test_a_hand_written_app_env_gets_the_database_questions(self):
+        self.hand_written_app_env()
+        self.pulls_succeed()
+        code, output = self.terminal_exchange([
+            (b"Database server IP / hostname []: ", b"192.0.2.20", True),
+            (b"Database port [5432]: ", b"", True),
+            (b"Application database name [perodua]: ", b"", True),
+            (b"Database username [odoo]: ", b"", True),
+            (b"Database password (hidden): ", b"fixture-password", False),
+        ], command=self.saved_command("--init-db"))
+        self.assertNotEqual(code, 0, "Fake Docker must stop before database operations")
+        self.assertIn("app.env has no database settings: answer the questions below.", output)
+        # Not asked: the file gives the web port and who may open the page.
+        self.assertNotIn("Web port that browsers open", output)
+        self.assertNotIn("Who may open the web page?", output)
+        self.assertIn("Fixture stopped before", output)
+        self.assertNotIn("fixture-password", output)
+        saved = (self.deploy_dir / "app.env").read_text()
+        for line in ("DB_HOST=192.0.2.20", "DB_PORT=5432", "DB_NAME=perodua", "DB_USER=odoo", "HTTP_PORT=8110",
+                     "BIND_IP=127.0.0.1", "PUBLIC_ROOT=/dev", "ENVIRONMENT_LABEL=DEV environment",
+                     "PUBLIC_BASE_URL=https://stgissrp.perodua.com.my/dev"):
+            self.assertIn(line + "\n", saved)
+        self.assertEqual((self.deploy_dir / "secrets" / "db_password").read_text(), "fixture-password")
+        self.assertIn('"127.0.0.1:8110:80"', (self.deploy_dir / "compose.yml").read_text())
+        # It stopped at the database check: nothing has used the database yet.
+        self.assertTrue((self.deploy_dir / ".deployment-unverified").exists())
+        self.assertIn("before this deployment used the database", output)
+        self.assertIn("This App server's addresses: 10.1.2.3 203.0.113.7", output)
+
+    def test_a_missing_db_host_is_named_where_nothing_can_ask(self):
+        self.hand_written_app_env()
+        for extra in (("--check-config",), ("--non-interactive",), ()):
+            with self.subTest(extra=extra):
+                result = self.run_saved_command(*extra)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("app.env has no DB_HOST. Add DB_HOST=<IP address of the database server>", result.stdout)
+                self.assertNotIn("must be an IP address or hostname", result.stdout)
+                self.assertEqual(self.docker_calls(), [])
+                self.assertEqual(sorted(p.name for p in self.deploy_dir.iterdir()), ["app.env"])
+                self.assertEqual((self.deploy_dir / "app.env").read_text(), self.HAND_WRITTEN)
+
+    def test_a_complete_hand_written_app_env_deploys_without_questions(self):
+        self.deploy_dir.mkdir()
+        (self.deploy_dir / "app.env").write_text(self.config.read_text())
+        self.pulls_succeed()
+        result = self.run_saved_command("--non-interactive")
+        self.assertIn("Fixture stopped before", result.stdout)
+        self.assertNotIn("Use an empty deployment directory", result.stdout)
+        self.assertIn("DB_HOST=192.0.2.20\n", (self.deploy_dir / "app.env").read_text())
+
+    def test_an_app_env_next_to_another_configuration_is_still_refused(self):
+        # Only the file the run reads may be there; with --config it is not.
+        self.hand_written_app_env()
+        self.pulls_succeed()
+        result = self.run_script("--non-interactive")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Use an empty deployment directory", result.stdout)
+        self.assertEqual((self.deploy_dir / "app.env").read_text(), self.HAND_WRITTEN)
+
+    def test_an_unverified_first_run_may_change_its_database_settings(self):
+        self.pulls_succeed()
+        result = self.run_script("--non-interactive")
+        self.assertIn("Fixture stopped before", result.stdout)
+        identity = self.deploy_dir / ".deployment-identity"
+        self.assertIn("host=192.0.2.20\n", identity.read_text())
+        # The DB server was another one: the corrected setting is taken.
+        self.write_config(DB_HOST="192.0.2.21", DB_NAME="perodua_dev")
+        result = self.run_script("--non-interactive")
+        self.assertIn("stopped before it used its database, so its settings may still change", result.stdout)
+        self.assertIn("Fixture stopped before", result.stdout)
+        self.assertIn("host=192.0.2.21\n", identity.read_text())
+        self.assertIn("database=perodua_dev\n", identity.read_text())
+        self.assertIn("DB_HOST=192.0.2.21\n", (self.deploy_dir / "app.env").read_text())
+        # Its Docker network and volume carry the project name: that one stays.
+        self.write_config(DB_HOST="192.0.2.21", DB_NAME="perodua_dev", PROJECT_NAME="perodua-other")
+        result = self.run_script("--non-interactive")
+        self.assertIn("Directory belongs to a different database, project, or release", result.stdout)
+
+    def test_a_marker_that_is_not_a_regular_file_is_neither_written_through_nor_trusted(self):
+        outside = self.base / "outside-file"
+        outside.write_text("keep")
+        self.pulls_succeed()
+        # In an empty directory it is not ignored: the run stops, and the target stays.
+        self.deploy_dir.mkdir()
+        (self.deploy_dir / ".deployment-unverified").symlink_to(outside)
+        result = self.run_script("--non-interactive")
+        self.assertIn("Use an empty deployment directory", result.stdout)
+        self.assertEqual(outside.read_text(), "keep")
+        (self.deploy_dir / ".deployment-unverified").unlink()
+        # Next to an identity, a symlink does not make the directory unverified.
+        self.assertIn("Fixture stopped before", self.run_script("--non-interactive").stdout)
+        marker = self.deploy_dir / ".deployment-unverified"
+        self.assertTrue(marker.is_file() and not marker.is_symlink())
+        marker.unlink()
+        marker.symlink_to(outside)
+        self.write_config(DB_HOST="192.0.2.21")
+        result = self.run_script("--non-interactive")
+        self.assertIn("Directory belongs to a different database, project, or release", result.stdout)
+        self.assertEqual(outside.read_text(), "keep")
+
+    def test_a_deployment_that_used_its_database_keeps_its_settings(self):
+        self.pulls_succeed()
+        self.assertIn("Fixture stopped before", self.run_script("--non-interactive").stdout)
+        marker = self.deploy_dir / ".deployment-unverified"
+        # A missing database is not used yet: without --init-db it stops, still unverified.
+        self.env["FAKE_PREFLIGHT_STATE"] = "EMPTY"
+        result = self.run_script("--non-interactive")
+        self.assertIn("Database is missing or empty", result.stdout)
+        self.assertTrue(marker.exists())
+        # An initialized database is used from here on (the fixture stops after the check).
+        self.env["FAKE_PREFLIGHT_STATE"] = "READY 0"
+        result = self.run_script("--non-interactive")
+        self.assertIn("Existing initialized database accepted", result.stdout)
+        self.assertFalse(marker.exists())
+        del self.env["FAKE_PREFLIGHT_STATE"]
+        self.write_config(DB_HOST="192.0.2.21")
+        result = self.run_script("--non-interactive")
+        self.assertIn("Directory belongs to a different database, project, or release", result.stdout)
+        self.assertIn("host=192.0.2.20\n", (self.deploy_dir / ".deployment-identity").read_text())
+        # A failed check of a bound deployment says so, without the first-run advice.
+        result = self.run_saved(SCRIPT)
+        self.assertIn("The database check above failed. Fix the cause", result.stdout)
+        self.assertNotIn("before this deployment used the database", result.stdout)
+
+    def test_an_unverified_rerun_asks_for_the_password_again(self):
+        code, output = self.interactive_run([b"192.0.2.20"], [(b"Choose [2]: ", b"", True)])
+        self.assertIn("Fixture stopped before", output)
+        secret = self.deploy_dir / "secrets" / "db_password"
+        self.assertEqual(secret.read_text(), "fixture-password")
+        prompt = b"Database password (hidden; Enter keeps the one entered before): "
+        for answer, kept in ((b"corrected-password", "corrected-password"), (b"", "corrected-password")):
+            with self.subTest(answer=answer):
+                code, output = self.terminal_exchange([(prompt, answer, False)], command=self.saved_command())
+                self.assertIn("Fixture stopped before", output)
+                self.assertNotIn("corrected-password", output)
+                self.assertEqual(secret.read_text(), kept)
+        # Without a terminal the saved password is used, as before.
+        result = self.run_saved(SCRIPT)
+        self.assertIn("Fixture stopped before", result.stdout)
+        self.assertNotIn("Database password", result.stdout)
+        self.assertEqual(secret.read_text(), "corrected-password")
 
 
 if __name__ == "__main__":
