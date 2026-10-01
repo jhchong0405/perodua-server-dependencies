@@ -575,11 +575,22 @@ class HttpsTest(Base):
         self.assertEqual(public_key(self.dir / "fullchain.pem", "x509"), new_key)
         self.assertEqual(self.files(), ["fullchain.pem", "key.pem", "request.csr", "routes.conf"])
 
-    def test_apply_needs_every_port_and_a_certificate(self):
-        self.routes.write_text(ROUTES + "api.example.perodua.com.my /dev/ -\n")
+    def test_a_host_whose_port_is_not_known_is_in_the_certificate_and_answers_404(self):
+        self.routes.write_text(ROUTES + "wom.example.perodua.com.my /dev/ -\n")
         self.ok("csr")
-        self.assertIn("Set the port of api.example.perodua.com.my/dev/", self.refused("apply"))
+        self.ok("install-cert", self.signed(), self.ca.d / "int.pem")
+        result = self.ok("apply")
+        self.assertIn("not served yet (port -", result.stdout)
+        self.assertIn("https://wom.example.perodua.com.my/dev/", result.stdout)
+        conf = self.conf.read_text()
+        wom = conf[conf.index("server_name wom.example.perodua.com.my;"):]
+        wom = wom[:wom.index("\n}\n")]
+        self.assertNotIn("proxy_pass", wom)
+        self.assertIn("location / {\n        return 404;", wom)
+
+    def test_apply_needs_a_certificate(self):
         self.routes.write_text(ROUTES)
+        self.ok("csr")
         self.assertIn("No certificate is installed yet", self.refused("apply"))
         self.ok("install-cert", self.signed(), self.ca.d / "int.pem")
         self.routes.write_text(ROUTES + "other.example.perodua.com.my /dev/ 8120\n")  # a host added after the certificate

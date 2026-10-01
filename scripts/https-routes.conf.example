@@ -2,18 +2,22 @@
 #   HOST    the full host name browsers use; it goes into the certificate request
 #           (the first host is its CN)
 #   PATH    starts and ends with /; a / alone takes the whole host
-#   PORT    the port the service listens on at 127.0.0.1, or - while it is not known
+#   PORT    the port the service listens on at 127.0.0.1, or - while it is not known:
+#           such a host is in the certificate, and answers 404 until its port is set
 #   strip   optional: remove PATH before forwarding, for a service that expects /
 #           (an API published under /dev/api/). Without it the path is forwarded as is.
 # Other paths of a host answer 404. Everything after # is a comment.
 #
-# The grey environment: the four names of the deployment table, /dev on the App
-# deployment at port 8110 (HTTP_PORT in /opt/perodua-app/app.env).
+# The grey environment: the CN and five SANs of the certificate order (PO
+# PM-2026/04/1470), in its order. /dev on the App deployment at port 8110
+# (HTTP_PORT in /opt/perodua-app/app.env); WOM and TMS are not served here yet.
 # HOST                          PATH        PORT   OPTION
 stgiss.perodua.com.my           /dev/       8110
 stgissrp.perodua.com.my         /dev/       8110
+stgisswom.perodua.com.my        /dev/       -
 stgisssp.perodua.com.my         /dev/       8110
 stgisscp.perodua.com.my         /dev/       8110
+stgisstms.perodua.com.my        /dev/       -
 # A UAT deployment at port 8111 later: one /uat/ line per host name.
 # stgissrp.perodua.com.my       /uat/       8111
 # api.example.perodua.com.my    /dev/api/   8000   strip

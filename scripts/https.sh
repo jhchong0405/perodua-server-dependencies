@@ -511,7 +511,7 @@ server {
     }
 NGINX
         for ((i = 0; i < ${#R_HOST[@]}; i++)); do
-            [[ ${R_HOST[i]} == "$name" ]] || continue
+            [[ ${R_HOST[i]} == "$name" && ${R_PORT[i]} != - ]] || continue   # port -: in the certificate, not served yet
             path=${R_PATH[i]}
             [[ $path != / ]] || root=1
             # With a URI part (the trailing /) nginx replaces the matched path: strip.
@@ -1370,9 +1370,8 @@ cmd_apply() {
     load_routes
     [[ ! -e $NGINX_CONF ]] || applied || die "$NGINX_CONF was not written by apply for $STATE_DIR: it is left alone"
     for ((i = 0; i < ${#R_HOST[@]}; i++)); do
-        [[ ${R_PORT[i]} != - ]] || unknown+="${R_HOST[i]}${R_PATH[i]} "
+        [[ ${R_PORT[i]} != - ]] || unknown+="https://${R_HOST[i]}${R_PATH[i]} "
     done
-    [[ -z $unknown ]] || die "Set the port of ${unknown% } in $ROUTES_FILE, or put # in front of those lines"
     [[ -f $STATE_DIR/fullchain.pem && -f $STATE_DIR/key.pem ]] \
         || die 'No certificate is installed yet: run csr, have the request signed, then install-cert'
     [[ $(pub_of cert "$STATE_DIR/fullchain.pem") == "$(pub_of key "$STATE_DIR/key.pem")" ]] \
@@ -1393,9 +1392,12 @@ cmd_apply() {
     keep
     printf 'nginx serves HTTPS for:\n'
     for ((i = 0; i < ${#R_HOST[@]}; i++)); do
+        [[ ${R_PORT[i]} != - ]] || continue
         printf '  https://%s%s -> 127.0.0.1:%s%s\n' "${R_HOST[i]}" "${R_PATH[i]}" "${R_PORT[i]}" \
             "$([[ ${R_STRIP[i]} == strip ]] && printf ' (path removed)')"
     done
+    [[ -z $unknown ]] || printf 'In the certificate, not served yet (port -, they answer 404 until the port is set in %s):\n  %s\n' \
+        "$ROUTES_FILE" "${unknown% }"
     printf 'http:// redirects to https://. Check it with: sudo bash https.sh status\n'
     if command -v ufw > /dev/null && ufw status 2> /dev/null | grep -q 'Status: active'; then
         printf 'ufw is active: allow HTTP and HTTPS with: sudo ufw allow 80,443/tcp\n'
