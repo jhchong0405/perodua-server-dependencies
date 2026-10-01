@@ -543,8 +543,10 @@ nginx configuration all come from it. Run the commands from the `scripts` folder
 
    Paths are forwarded as they are; `strip` removes the path first, for a service
    that expects `/`, such as the ISS-Oracle API published under `/dev/api/`. A port
-   that is not known yet can be `-` until step 4. Put every host name that needs
-   HTTPS in the table now: the certificate is requested for exactly these names.
+   that is not known yet can be `-`: the host name is in the certificate, and nginx
+   answers 404 for it until the port is set and `apply` runs again (the template
+   has WOM and TMS like that). Put every host name that needs HTTPS in the table
+   now: the certificate is requested for exactly these names.
 2. **The certificate request (CSR).**
 
    ```bash
