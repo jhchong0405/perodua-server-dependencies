@@ -352,7 +352,10 @@ class UpgradeTests(unittest.TestCase):
         # SIGHUP while pg_dump runs: to the whole process group (the terminal
         # hangs up, the dump dies with it), or to the script only (sudo passes it
         # on; the dump still ends). With stderr that takes nothing more (the
-        # terminal is gone), the old App must still be started again.
+        # terminal is gone), the old App must still be started again. The
+        # address of the sign-in host: a run that warns about the hand-over
+        # would stop at that warning, on /dev/full, before the backup starts.
+        self.write_app_env(PUBLIC_BASE_URL='https://stgiss.perodua.com.my')
         for to_group, stderr in ((True, subprocess.STDOUT), (False, subprocess.STDOUT), (True, 'full')):
             with self.subTest(to_group=to_group, stderr=stderr):
                 self.log.unlink(missing_ok=True)

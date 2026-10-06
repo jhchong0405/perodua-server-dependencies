@@ -5,12 +5,12 @@ set -Eeuo pipefail
 export LC_ALL=C
 umask 077
 
-RELEASE=client-stable-uiux-v1.0.4
-REVISION=c3a7fdae0ca52b9cdadf98051a8a437b347861d7
+RELEASE=client-stable-uiux-v1.0.5
+REVISION=bd9848e4138854715cfa336985c8fa178ea19fe0
 # Published to the private registry only (not GHCR). The Odoo image loads no
 # sample data; both images name REVISION.
-ODOO_IMAGE=perodua-deploy.novutal.com/perodua-odoo:client-stable-uiux-v1.0.4@sha256:0febf36e6c4150548f1b70b3bcf6195621c665368525f5de825d8fdfd951384c
-WEB_IMAGE=perodua-deploy.novutal.com/perodua-odoo:client-stable-uiux-web-v1.0.4@sha256:d99b16018a5ebca9e62e2517e23d80f464f79183d3156dbf28f069ecd1ae9cbe
+ODOO_IMAGE=perodua-deploy.novutal.com/perodua-odoo:client-stable-uiux-v1.0.5@sha256:3608d20492bc645f0f6f7818dffd6f7bc8f7e0203c4eebeecf67de00f58864b2
+WEB_IMAGE=perodua-deploy.novutal.com/perodua-odoo:client-stable-uiux-web-v1.0.5@sha256:be758d230def76522f06dc7af5104b6267f9074f9c43662f51fa9c185d24f045
 REGISTRY=${ODOO_IMAGE%%/*}
 # Whether the pinned web image serves the page under PUBLIC_ROOT and shows
 # ENVIRONMENT_LABEL: yes from v1.0.4. The scripts folder of v1.0.3 has 0 here.
@@ -18,8 +18,9 @@ PUBLIC_ROOT_SUPPORTED=1
 # Whether the pinned release signs the module host names (stgissrp, stgisssp,
 # stgisscp) in through the sign-in host with a one-time ticket: yes from
 # v1.0.5. Odoo switches it on only when PUBLIC_BASE_URL is https:// on the
-# sign-in host, so without that a run warns.
-HANDOVER_SUPPORTED=0
+# sign-in host, so without that a run warns. The scripts folder of v1.0.4 has 0
+# here.
+HANDOVER_SUPPORTED=1
 HANDOVER_HOST=stgiss.perodua.com.my
 # --init-db: a fresh UAT database, the release graph without the client
 # demonstration dataset. Before anything is written, uat_guard.py checks the
@@ -50,7 +51,7 @@ usage() {
 Usage: bash deploy-app.sh [--config PATH] [--dir PATH] [--non-interactive] [--init-db]
        bash deploy-app.sh [--config PATH] [--dir PATH] --check-config
        bash deploy-app.sh --upgrade [--dir PATH] [--backup-dir PATH] [--non-interactive]
-Deploy the pinned Client Stable UIUX v1.0.4 Odoo + Web images using Docker Compose.
+Deploy the pinned Client Stable UIUX v1.0.5 Odoo + Web images using Docker Compose.
 Requires a reachable external PostgreSQL 16 server; does not install or configure it.
 Default: use an already initialized, matching Client Stable UIUX database.
 --init-db initializes a NEW or EMPTY database as a fresh UAT system without
@@ -362,9 +363,9 @@ if [[ -n $PUBLIC_ROOT && -z $PUBLIC_BASE_URL ]]; then
     printf 'Warning: PUBLIC_ROOT is set without PUBLIC_BASE_URL. Odoo will record http://HOST without %s as its base URL when an administrator signs in; set PUBLIC_BASE_URL, such as https://HOST%s.\n' "$PUBLIC_ROOT" "$PUBLIC_ROOT" >&2
 fi
 # Odoo hands a sign-in on to the module host names only when the frozen
-# web.base.url is https:// on the sign-in host. Otherwise every host name keeps
-# its own password sign-in, as before v1.0.5; the menu of each name is the
-# same either way.
+# web.base.url is https:// on the sign-in host, with no port other than 443.
+# Otherwise every host name keeps its own password sign-in, as before v1.0.5;
+# the menu of each name is the same either way.
 if ((HANDOVER_SUPPORTED)); then
     handover_off="so the sign-in hand-over of $RELEASE stays off: each host name keeps its own password sign-in. Set PUBLIC_BASE_URL=https://$HANDOVER_HOST$PUBLIC_ROOT"
     if [[ -z $PUBLIC_BASE_URL ]]; then
@@ -374,6 +375,8 @@ if ((HANDOVER_SUPPORTED)); then
     elif [[ ${url_host,,} != "$HANDOVER_HOST" ]]; then
         printf 'Warning: PUBLIC_BASE_URL names %s, not the sign-in host %s. Unless the Odoo system parameter perodua_client_stable.hosts names %s as the sign-in host, %s.\n' \
             "$url_host" "$HANDOVER_HOST" "$url_host" "$handover_off" >&2
+    elif [[ -n $url_port ]] && ((10#$url_port != 443)); then
+        printf 'Warning: PUBLIC_BASE_URL has the port %s, not 443, %s.\n' "$url_port" "$handover_off" >&2
     fi
 fi
 [[ -z $DB_PASSWORD_FILE || ( $DB_PASSWORD_FILE == /* && -r $DB_PASSWORD_FILE && -f $DB_PASSWORD_FILE ) ]] || fail 'DB_PASSWORD_FILE must be an absolute path to a readable file'

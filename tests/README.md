@@ -85,14 +85,15 @@ checks:
 
 The sign-in hand-over of v1.0.5. The tests run a copy of `deploy-app.sh` with
 `HANDOVER_SUPPORTED` set to 1 or 0. `test_deploy_app.py` checks:
-- an empty `PUBLIC_BASE_URL`, an `http://` one and one on another host than
-  `stgiss.perodua.com.my` each print their warning with the value to set
-  (`https://stgiss.perodua.com.my` and `PUBLIC_ROOT`), in `--check-config` and
-  in a deployment; the settings stay valid and nothing changes;
-- `https://stgiss.perodua.com.my/dev`, in any case of letters, prints none, and
-  a release without the hand-over prints none;
+- an empty `PUBLIC_BASE_URL`, an `http://` one, one on another host than
+  `stgiss.perodua.com.my` and one with a port other than 443 each print their
+  warning with the value to set (`https://stgiss.perodua.com.my` and
+  `PUBLIC_ROOT`), in `--check-config` and in a deployment; the settings stay
+  valid and nothing changes;
+- `https://stgiss.perodua.com.my/dev`, in any case of letters and also with
+  `:443`, prints none, and a release without the hand-over prints none;
 - the pinned release has `HANDOVER_SUPPORTED=1` exactly when it is v1.0.5 or
-  later.
+  later, and `--help` names the pinned release.
 
 `test_deploy_app_uat.py` checks that `preflight.py public-urls` runs once on
 every path (an initialized database with and without `--init-db`, a fresh
@@ -144,7 +145,8 @@ directory's own, or the staged one of the new release) and the release that
 - a lost SSH session while `pg_dump` runs (SIGHUP to the process group, or to
   the script only while the dump ends by itself) does the same, with exit
   status 129, also when standard error takes nothing more (`/dev/full`, as a
-  hung-up terminal);
+  hung-up terminal). Its `app.env` names the sign-in host, so that no
+  hand-over warning goes to that standard error before the backup;
 - a backup that may not fit (the database and attachment sizes from the staged
   size check, against the free space of the backup folder's disk), or sizes
   that cannot be read, are refused before the App stops; nothing changes;

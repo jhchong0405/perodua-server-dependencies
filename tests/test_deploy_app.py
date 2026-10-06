@@ -293,6 +293,10 @@ sys.exit(93)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--config", result.stdout)
         self.assertEqual(self.docker_calls(), [])
+        # The help names the release the script pins.
+        version = re.search(r"^RELEASE=client-stable-uiux-v(\d+\.\d+\.\d+)$", SCRIPT.read_text(encoding="utf-8"), re.M)
+        self.assertIsNotNone(version)
+        self.assertIn(f"Deploy the pinned Client Stable UIUX v{version.group(1)} Odoo + Web images", result.stdout)
 
     def test_unknown_option_and_missing_option_values_fail_early(self):
         for args in (("--unknown",), ("--dir",), ("--config",)):
@@ -631,6 +635,9 @@ sys.exit(93)
                   "Warning: PUBLIC_BASE_URL does not start with https://, so the sign-in hand-over of"),
                  ({"PUBLIC_ROOT": "/dev", "PUBLIC_BASE_URL": "https://stgissrp.perodua.com.my/dev"},
                   "Warning: PUBLIC_BASE_URL names stgissrp.perodua.com.my, not the sign-in host stgiss.perodua.com.my."),
+                 ({"PUBLIC_ROOT": "/dev", "PUBLIC_BASE_URL": "https://stgiss.perodua.com.my:8443/dev"},
+                  "Warning: PUBLIC_BASE_URL has the port 8443, not 443, so the sign-in hand-over of"),
+                 ({"PUBLIC_ROOT": "/dev", "PUBLIC_BASE_URL": "https://stgiss.perodua.com.my:443/dev"}, None),
                  ({"PUBLIC_ROOT": "/dev", "PUBLIC_BASE_URL": "https://STGISS.perodua.com.my/dev"}, None),
                  ({"PUBLIC_ROOT": "/dev", "PUBLIC_BASE_URL": "https://stgiss.perodua.com.my/dev"}, None))
         for settings, warning in cases:

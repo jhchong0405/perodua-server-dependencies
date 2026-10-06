@@ -480,14 +480,16 @@ again under Settings > Technical > Scheduled Actions once real systems are
 connected. Demo Control's Reset & Reseed is refused on such a database, because
 it would load the sample data.
 
-A database initialized with v1.0.0 to v1.0.2 cannot be used with v1.0.4: its
+A database initialized with v1.0.0 to v1.0.2 cannot be used with v1.0.5: its
 module fingerprint differs and the App refuses it. Run
-`sudo bash service.sh --role app reset` from the v1.0.4 `scripts` folder on the
+`sudo bash service.sh --role app reset` from the v1.0.5 `scripts` folder on the
 App Server (see [Stop, start and reset](#stop-start-and-reset-servicesh); it
-deletes the data), or uninstall both servers and initialize again. v1.0.4 has
-the same Odoo modules as v1.0.3, so a directory deployed with v1.0.3 keeps its
-data with `sudo bash deploy-app.sh --upgrade` from the v1.0.4 `scripts` folder
-(see [Upgrade to a new release](#upgrade-to-a-new-release-keeping-the-data-deploy-appsh---upgrade)).
+deletes the data), or uninstall both servers and initialize again. v1.0.5 has
+the same Odoo modules as v1.0.4 and v1.0.3, so a directory deployed with v1.0.4
+or v1.0.3 keeps its data with `sudo bash deploy-app.sh --upgrade` from the
+v1.0.5 `scripts` folder (see [Upgrade to a new release](#upgrade-to-a-new-release-keeping-the-data-deploy-appsh---upgrade),
+and the steps in the README:
+[Upgrade an App server from v1.0.4 to v1.0.5](../README.md#upgrade-an-app-server-from-v104-to-v105)).
 Without `--upgrade` such a directory is refused, because it records its release.
 
 If the initialization stops after the modules are installed, for example on a
@@ -586,6 +588,9 @@ deployment directory (default `/opt/perodua-app`) to that release. The
 database, the attachments volume and the settings in `app.env` stay. A plain
 `deploy-app.sh` refuses a directory that another release deployed and points to
 `--upgrade`. `--upgrade` does not combine with `--init-db` or `--check-config`.
+For the move from v1.0.4 to v1.0.5, the README gives the steps in order, HTTPS
+and the acceptance checks included:
+[Upgrade an App server from v1.0.4 to v1.0.5](../README.md#upgrade-an-app-server-from-v104-to-v105).
 
 **What it requires.** Each check below stops the upgrade before anything
 changes:
@@ -664,7 +669,7 @@ with status 129.
 
 **Going back.** Put back the identity and the settings that the directory had
 before the upgrade, then deploy the old release without `--upgrade`, from any
-`scripts` folder of it (v1.0.3 has no `--upgrade`):
+`scripts` folder of it (the folders of v1.0.4 and earlier have no `--upgrade`):
 
 ```bash
 sudo cp -p BACKUP/deployment-identity DIR/.deployment-identity
@@ -853,7 +858,7 @@ server's private address when F5 connects to the web ports directly.
    `DB_USER` with the same password, or a user each. Each database is recorded
    separately.
 2. On the App server, keep one `scripts` folder per release, for example
-   `/root/perodua-v1.0.4/scripts`. Write one configuration file per environment
+   `/root/perodua-v1.0.5/scripts`. Write one configuration file per environment
    (see `app.env.example`), for example `/root/perodua-dev.env`:
 
    ```
@@ -953,7 +958,8 @@ server's private address when F5 connects to the web ports directly.
 
 From v1.0.5, one Odoo serves four host names in different roles. The host table
 in Odoo (system parameter `perodua_client_stable.hosts`; without it, the
-release's default) names them:
+release's default) names them. The table is JSON: a change of it in Odoo
+changes the host names without a new release.
 
 | Host name | Role | Shows |
 | --- | --- | --- |
@@ -970,17 +976,17 @@ a sign-in sends the browser to stgiss. stgiss asks for the password if needed
 and sends the browser back with a one-time ticket, valid for 60 seconds. The
 module host then has its own sign-in, and its cookie stays its own (host-only,
 path `/dev/`). Odoo switches the hand-over on only when `web.base.url` is
-frozen, starts with `https://` and names the sign-in host. `deploy-app.sh`
-writes it from `PUBLIC_BASE_URL`, so:
+frozen, starts with `https://`, names the sign-in host and has no port other
+than 443. `deploy-app.sh` writes it from `PUBLIC_BASE_URL`, so:
 
 - set `PUBLIC_BASE_URL=https://stgiss.perodua.com.my/dev` in the `app.env` of
   the grey environment (`/dev`), and `https://stgiss.perodua.com.my/uat` for a
   UAT environment at `/uat`. Then run `deploy-app.sh` (or `--upgrade`). Odoo
   takes the scheme and the path of the public addresses from this value, and
   the host names from the host table; never from a request;
-- with an empty value, an `http://` value or another host name, the hand-over
-  stays off and every name keeps its own password sign-in. `deploy-app.sh` of
-  v1.0.5 or later prints a warning, but goes on;
+- with an empty value, an `http://` value, another host name or a port other
+  than 443, the hand-over stays off and every name keeps its own password
+  sign-in. `deploy-app.sh` of v1.0.5 or later prints a warning, but goes on;
 - the HTTPS front must send all four names to the environment's web port: the
   `/dev/` lines of [https-routes.conf.example](../scripts/https-routes.conf.example)
   do. A UAT environment needs one `/uat/` line for each of the four names. A
