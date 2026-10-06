@@ -480,13 +480,17 @@ again under Settings > Technical > Scheduled Actions once real systems are
 connected. Demo Control's Reset & Reseed is refused on such a database, because
 it would load the sample data.
 
-A database initialized with v1.0.0 to v1.0.2 cannot be used with v1.0.4: its
-module fingerprint differs and the App refuses it. v1.0.4 has the same Odoo
-modules as v1.0.3, but a deployment directory records its release, so a
-directory deployed with v1.0.3 is refused as well. In both cases run
-`sudo bash service.sh --role app reset` from the v1.0.4 `scripts` folder on the
+A database initialized with v1.0.0 to v1.0.2 cannot be used with v1.0.5: its
+module fingerprint differs and the App refuses it. Run
+`sudo bash service.sh --role app reset` from the v1.0.5 `scripts` folder on the
 App Server (see [Stop, start and reset](#stop-start-and-reset-servicesh); it
-deletes the data), or uninstall both servers and initialize again.
+deletes the data), or uninstall both servers and initialize again. v1.0.5 has
+the same Odoo modules as v1.0.4 and v1.0.3, so a directory deployed with v1.0.4
+or v1.0.3 keeps its data with `sudo bash deploy-app.sh --upgrade` from the
+v1.0.5 `scripts` folder (see [Upgrade to a new release](#upgrade-to-a-new-release-keeping-the-data-deploy-appsh---upgrade),
+and the steps in the README:
+[Upgrade an App server from v1.0.4 to v1.0.5](../README.md#upgrade-an-app-server-from-v104-to-v105)).
+Without `--upgrade` such a directory is refused, because it records its release.
 
 If the initialization stops after the modules are installed, for example on a
 timeout, Ctrl-C, a lost SSH session or a failed sign-in check, the preflight
@@ -575,6 +579,130 @@ deleted and leaves the App stopped; start it again with `start`. If it fails
 later, the database is only partly emptied and the App stays stopped: solve the
 problem and run the reset again, which finishes it. The same applies when
 `deploy-app.sh` stops, for example when the registry cannot be reached.
+
+## Upgrade to a new release, keeping the data (`deploy-app.sh --upgrade`)
+
+`sudo bash deploy-app.sh --upgrade [--dir PATH] [--backup-dir PATH] [--non-interactive]`,
+run from the `scripts` folder of the new release on the App Server, moves a
+deployment directory (default `/opt/perodua-app`) to that release. The
+database, the attachments volume and the settings in `app.env` stay. A plain
+`deploy-app.sh` refuses a directory that another release deployed and points to
+`--upgrade`. `--upgrade` does not combine with `--init-db` or `--check-config`.
+For the move from v1.0.4 to v1.0.5, the README gives the steps in order, HTTPS
+and the acceptance checks included:
+[Upgrade an App server from v1.0.4 to v1.0.5](../README.md#upgrade-an-app-server-from-v104-to-v105).
+
+**What it requires.** Each check below stops the upgrade before anything
+changes:
+
+| Check | Refused when |
+| --- | --- |
+| The directory is a deployment | It has no `.deployment-identity`, or its first deployment never used its database (`.deployment-unverified`). |
+| The same deployment | `.deployment-identity` differs from the new one in anything but `release=` and `revision=`: the project, the database server (`host=`, `port=`), the database or the user. The message names the values that differ. |
+| Another release | The directory already runs this release: run `deploy-app.sh` without `--upgrade`. |
+| The same Odoo modules | The database check (`preflight.py check`) of the new image does not report `READY`, for example when the module fingerprint differs. |
+
+The **module fingerprint** is the MD5 of the `__manifest__.py` files of all
+`perodua_*` modules in the image, read in name order. A fresh UAT
+initialization stores it as `perodua.image_modhash` when it is stamped `READY`;
+every database check compares the stored value with the one of the image. So it
+stays the same while no byte of any of these manifests changes and no module
+folder is added or removed. A release that changes only controllers, other
+Python code or the web page has the same fingerprint. A new module version, a
+new data file or a new dependency changes it. Such a release needs a module
+upgrade (`-u`), which `--upgrade` never runs: it stops with "a module upgrade
+needs its own plan" and changes nothing.
+
+**The steps, in order:**
+
+1. Compare the identities (above).
+2. Pull the new images. The App keeps running.
+3. Check the database with the new image, from a staged copy of the new
+   `compose.yml` in a temporary folder of the directory: same project, so the
+   same network and attachments volume. The directory's own files are not
+   touched.
+4. Check the room for the backup: the size of the database
+   (`pg_database_size`) and of `filestore/DB_NAME` together must fit in the free
+   space of the backup folder's disk, or it stops and changes nothing. This is
+   more than the backup takes: the dump leaves out the indexes and is
+   compressed. Then stop the App (`docker compose stop web odoo`), so that the
+   backup holds the data as it is at the switch.
+5. Back up into `DIR/backups/TIME-OLD_RELEASE/` (with `--backup-dir PATH`:
+   `PATH/TIME-OLD_RELEASE/`), a folder only root can read:
+   - `database.dump`: `pg_dump --format=custom` of the database, run in the new
+     Odoo image as the App's database user. The image's PostgreSQL 18 client
+     reaches the DB Server the way Odoo does. The password comes from the
+     container's environment, never a command line. The dump must read back with
+     `pg_restore --list` and must contain the data of `ir_module_module`;
+   - `filestore.tar.gz`: `filestore/DB_NAME/...` from the attachments volume, as
+     [From a backup](../README.md#from-a-backup) restores it. It must read back
+     with `tar`;
+   - `deployment-identity` and `app.env`: the directory's identity and settings
+     before the upgrade;
+   - `restore.txt`: the restore commands below, also printed.
+
+   `pg_dump` and `tar` write to standard output. These two runs have no
+   container log (`logging: driver: none`, from an extra compose file in the
+   temporary folder): Docker's default log would keep another copy, about four
+   times the size, on the disk of `/var/lib/docker`. The App's own services keep
+   their logs.
+6. **The switch:** write the new `compose.yml`, `preflight.py` and helpers,
+   rewrite `release=` and `revision=` in `.deployment-identity`, and write
+   `app.env` again.
+7. The usual deployment: the database check, the attachments check, `report.url`
+   and `PUBLIC_BASE_URL`, `docker compose up --force-recreate`, and the HTTP
+   self-check. The final message names the backup folder.
+
+The App is down from step 4 until step 7 finishes: the size of the database and
+of the attachments sets most of that time. Run `--upgrade` in `tmux` or
+`screen`. A lost SSH session (SIGHUP) stops the run as Ctrl-C does: before the
+switch the old App starts again, as in the table below, and the script exits
+with status 129.
+
+**When a step fails:**
+
+| Failed step | State of the server | What to do |
+| --- | --- | --- |
+| 1 to 3, or the room check of 4 | Nothing changed: the directory still runs the old release, its App still runs. | Solve the cause (for the room: free space, or `--backup-dir` on another disk) and run `--upgrade` again. |
+| 4 (after the room check) or 5, also a lost SSH session | The incomplete backup folder is deleted. The directory still runs the old release, with its own files. Its App is started again (`up --no-recreate`) if it was running before; if that fails, the message gives the `service.sh start` command. | Solve the cause (often the disk space), then run `--upgrade` again. |
+| 6 or 7 | The directory names the new release. Before the containers are recreated, the App is stopped; the old containers stay as they are, and the database holds the data of the backup (only `report.url` and `web.base.url` may have been written again, with the values from `app.env`). After that, the containers run the new images but did not pass the self-check, and the database holds the backup's data plus what the App wrote since. The message says which. | To finish: solve the cause, then run `deploy-app.sh` (without `--upgrade`) from the new folder. To go back: see below. |
+
+**Going back.** Put back the identity and the settings that the directory had
+before the upgrade, then deploy the old release without `--upgrade`, from any
+`scripts` folder of it (the folders of v1.0.4 and earlier have no `--upgrade`):
+
+```bash
+sudo cp -p BACKUP/deployment-identity DIR/.deployment-identity
+sudo cp -p BACKUP/app.env DIR/app.env
+sudo bash deploy-app.sh --dir DIR    # from the scripts folder of the old release
+```
+
+The failure message after the switch and step 5 of `restore.txt` print these
+commands with the real paths. This works because both releases have the same
+modules. A `scripts` folder of the old release that has `--upgrade` can also
+run `sudo bash deploy-app.sh --upgrade --dir DIR`, which takes a new backup
+first.
+
+To also put the data back as it was before the upgrade, follow `restore.txt`
+instead. In short, on the App Server: stop the App
+(`service.sh --role app stop`); empty the database with `reset_database.py`, as
+`service.sh reset` does; restore `database.dump`; put the attachments back and
+delete the Odoo sessions; and deploy the release that the data belongs to.
+After that, every user must sign in again. The restored database has the
+password hashes and the single-session values of the backup, so without the
+deletion a sign-in that ended after the backup (a sign-out, a new sign-in, a
+password reset) would be valid again. Passwords changed after the backup are
+undone: a user who changed a password for safety must change it again. The archive comes from pg_dump 18,
+so restore it with the tools of the Odoo image, as `restore.txt` shows: the
+`pg_restore` 16 of the DB Server stops with "unsupported version (1.16) in file
+header". `restore.txt` lets `pg_restore` write SQL and leaves out its first
+`SET transaction_timeout = 0;` line, which PostgreSQL 16 does not know. psql
+then runs the rest in one transaction, so a failed restore leaves the database
+empty, and you can run it again.
+
+`uninstall.sh --role app` deletes the directory and the backups in it. Its plan
+names them; copy them elsewhere first, or give `--backup-dir` a folder outside
+the directory.
 
 ## Uninstall (`uninstall.sh`)
 
@@ -688,7 +816,7 @@ still read.
 | --- | --- |
 | `PUBLIC_ROOT` | The path, such as `/dev`: a `/` followed by 1-31 lowercase letters, digits or `-`, without `/` at the end. Empty (the default): the page is at `/app/` as before. Needs v1.0.4 or later; the `scripts` folder of v1.0.3 stops with a message before it changes anything. |
 | `ENVIRONMENT_LABEL` | The label on the sign-in page, such as `DEV` or `UAT`: up to 40 letters, digits, spaces and `. _ ( ) -`. Empty: the label the release has always shown. From v1.0.4; v1.0.3 prints a warning and ignores it. |
-| `PUBLIC_BASE_URL` | The address browsers use, such as `https://stgissrp.perodua.com.my/dev`, without `/` at the end. The host is a host name (labels of letters, digits and `-`, separated by single dots) or an IPv4 address. Its path must be `PUBLIC_ROOT`: with `PUBLIC_ROOT` empty it has no path. Empty: nothing is written, and Odoo sets its base URL (`web.base.url`) itself, from the address of each administrator sign-in. Behind the web container that address has no path (the container removes `PUBLIC_ROOT` before Odoo) and starts with `http://`, so with `PUBLIC_ROOT` set, set `PUBLIC_BASE_URL` too; `deploy-app.sh` prints a warning otherwise. |
+| `PUBLIC_BASE_URL` | The address browsers use, such as `https://stgiss.perodua.com.my/dev`, without `/` at the end. From v1.0.5 it must be the `https://` address of the sign-in host, or the sign-in hand-over stays off (see [Sign in once on stgiss](#sign-in-once-on-stgiss-v105)); `deploy-app.sh` of v1.0.5 or later warns otherwise. The host is a host name (labels of letters, digits and `-`, separated by single dots) or an IPv4 address. Its path must be `PUBLIC_ROOT`: with `PUBLIC_ROOT` empty it has no path. Empty: nothing is written, and Odoo sets its base URL (`web.base.url`) itself, from the address of each administrator sign-in. Behind the web container that address has no path (the container removes `PUBLIC_ROOT` before Odoo) and starts with `http://`, so with `PUBLIC_ROOT` set, set `PUBLIC_BASE_URL` too; `deploy-app.sh` prints a warning otherwise. |
 
 Every run of `deploy-app.sh` writes these Odoo system parameters to the
 database before the containers start, on a new and an existing database alike:
@@ -714,7 +842,7 @@ The two deployments differ in these settings (the ports are examples):
 | `DB_NAME` | `perodua_dev` | `perodua_uat` |
 | `HTTP_PORT` | `8110` | `8111` |
 | `PUBLIC_ROOT` | `/dev` | `/uat` |
-| `PUBLIC_BASE_URL` | `https://stgissrp.perodua.com.my/dev` | `https://stgissrp.perodua.com.my/uat` |
+| `PUBLIC_BASE_URL` | `https://stgiss.perodua.com.my/dev` | `https://stgiss.perodua.com.my/uat` |
 | `ENVIRONMENT_LABEL` | `DEV` | `UAT` |
 
 `BIND_IP` is `127.0.0.1` for both with an nginx on this server in front, or the
@@ -730,7 +858,7 @@ server's private address when F5 connects to the web ports directly.
    `DB_USER` with the same password, or a user each. Each database is recorded
    separately.
 2. On the App server, keep one `scripts` folder per release, for example
-   `/root/perodua-v1.0.4/scripts`. Write one configuration file per environment
+   `/root/perodua-v1.0.5/scripts`. Write one configuration file per environment
    (see `app.env.example`), for example `/root/perodua-dev.env`:
 
    ```
@@ -746,7 +874,7 @@ server's private address when F5 connects to the web ports directly.
    INIT_TIMEOUT=3600
    PUBLIC_ROOT=/dev
    ENVIRONMENT_LABEL=DEV
-   PUBLIC_BASE_URL=https://stgissrp.perodua.com.my/dev
+   PUBLIC_BASE_URL=https://stgiss.perodua.com.my/dev
    ```
 
 3. Deploy each from the `scripts` folder of its release:
@@ -793,7 +921,9 @@ server's private address when F5 connects to the web ports directly.
   its `scripts` folder pins, and a deployment directory is bound to that
   release. Run each environment's `deploy-app.sh` and `service.sh reset` from
   the folder of the release it should run: a reset from another release's
-  folder installs that release.
+  folder installs that release. To move an environment to another release and
+  keep its data, run `deploy-app.sh --upgrade --dir` from that release's folder
+  (see [Upgrade to a new release](#upgrade-to-a-new-release-keeping-the-data-deploy-appsh---upgrade)).
 - **A reset checks the settings first.** `service.sh reset` has the
   `deploy-app.sh` next to it check `app.env` (`deploy-app.sh --check-config`)
   before it stops the App or deletes anything. A reset of a `/dev` environment
@@ -823,6 +953,72 @@ server's private address when F5 connects to the web ports directly.
   environment could call the other's API with the session signed in there.
   This is acceptable for test data. When UAT holds real data or real accounts,
   give it a host name of its own instead.
+
+## Sign in once on stgiss (v1.0.5)
+
+From v1.0.5, one Odoo serves four host names in different roles. The host table
+in Odoo (system parameter `perodua_client_stable.hosts`; without it, the
+release's default) names them. The table is JSON: a change of it in Odoo
+changes the host names without a new release.
+
+| Host name | Role | Shows |
+| --- | --- | --- |
+| `stgiss.perodua.com.my` | sign-in host (hub) | no module; after the sign-in, links to the modules the user may open |
+| `stgissrp.perodua.com.my` | module host | Perodua SPD |
+| `stgisssp.perodua.com.my` | module host | Supplier Portal |
+| `stgisscp.perodua.com.my` | module host | Customer Portal |
+| any other name: `localhost` (SSH tunnel), `127.0.0.1`, the self-check of `deploy-app.sh` | local | all three, with password sign-in as in v1.0.4 |
+
+Each name shows only its own module, whether the hand-over below is on or not.
+
+**The hand-over.** A user signs in one time, on stgiss. A module host without
+a sign-in sends the browser to stgiss. stgiss asks for the password if needed
+and sends the browser back with a one-time ticket, valid for 60 seconds. The
+module host then has its own sign-in, and its cookie stays its own (host-only,
+path `/dev/`). Odoo switches the hand-over on only when `web.base.url` is
+frozen, starts with `https://`, names the sign-in host and has no port other
+than 443. `deploy-app.sh` writes it from `PUBLIC_BASE_URL`, so:
+
+- set `PUBLIC_BASE_URL=https://stgiss.perodua.com.my/dev` in the `app.env` of
+  the grey environment (`/dev`), and `https://stgiss.perodua.com.my/uat` for a
+  UAT environment at `/uat`. Then run `deploy-app.sh` (or `--upgrade`). Odoo
+  takes the scheme and the path of the public addresses from this value, and
+  the host names from the host table; never from a request;
+- with an empty value, an `http://` value, another host name or a port other
+  than 443, the hand-over stays off and every name keeps its own password
+  sign-in. `deploy-app.sh` of v1.0.5 or later prints a warning, but goes on;
+- the HTTPS front must send all four names to the environment's web port: the
+  `/dev/` lines of [https-routes.conf.example](../scripts/https-routes.conf.example)
+  do. A UAT environment needs one `/uat/` line for each of the four names. A
+  front proxy or F5 in between must keep the `Host` header, the query string and
+  absolute `Location` headers, and must not cache the redirects (303).
+
+**What users and support see:**
+
+- **Sign in at stgiss:** `https://stgiss.perodua.com.my/dev/app/`. A bookmark of
+  a module address works as well: it sends the user to stgiss and back.
+- **Module names send users to stgiss.** They show no sign-in form, and a
+  password sign-in sent to a module name is refused.
+- **One sign-out ends all names.** A sign-out on any name ends the sign-in on
+  stgiss and on every module name, in all tabs, at their next request. A module
+  name then sends the user to `stgiss.../app/?signed_out=1`. A new password
+  sign-in of the same user, on another computer or browser, also ends the
+  earlier sign-in on all names (one sign-in per user, as before).
+- **Support** signs in at stgiss, or through the SSH tunnel
+  (`ssh -N -L 8110:127.0.0.1:8110 USER@APP_SERVER`, then
+  `http://localhost:8110/dev/app/`). The tunnel is a local name: it keeps the
+  password sign-in and shows all three modules.
+
+With `BIND_IP=0.0.0.0`, port 8110 also answers plain HTTP on the server's own
+addresses, where the session cookies travel unencrypted. Prefer
+`BIND_IP=127.0.0.1`, so that browsers reach the App only through the HTTPS
+front. The stgiss session cookie now also signs in every module host name, so it
+must never travel over plain HTTP. `https.sh` marks it `Secure` (and
+`SameSite=Lax`), so that a browser does not send it to `http://` on port 80 or
+on port 8110 of these names. `https.sh` sends no `Strict-Transport-Security`;
+add it only when the customer decides that these names are HTTPS-only. The SSH
+tunnel (`localhost`) and the server's IP address are other host names with
+their own cookies: they keep working over HTTP.
 
 ## HTTPS certificate from Let's Encrypt
 

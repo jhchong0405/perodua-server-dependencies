@@ -22,6 +22,7 @@ import unittest
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 SCRIPT = SCRIPTS / "deploy-app.sh"
 SUPPORT_LINE = re.compile(r"^PUBLIC_ROOT_SUPPORTED=[01]$", re.M)
+HANDOVER_LINE = re.compile(r"^HANDOVER_SUPPORTED=[01]$", re.M)
 
 
 def release_copy(folder, supported):
@@ -292,6 +293,10 @@ sys.exit(93)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--config", result.stdout)
         self.assertEqual(self.docker_calls(), [])
+        # The help names the release the script pins.
+        version = re.search(r"^RELEASE=client-stable-uiux-v(\d+\.\d+\.\d+)$", SCRIPT.read_text(encoding="utf-8"), re.M)
+        self.assertIsNotNone(version)
+        self.assertIn(f"Deploy the pinned Client Stable UIUX v{version.group(1)} Odoo + Web images", result.stdout)
 
     def test_unknown_option_and_missing_option_values_fail_early(self):
         for args in (("--unknown",), ("--dir",), ("--config",)):
@@ -611,6 +616,70 @@ sys.exit(93)
                 result = self.run_script("--non-interactive", script=script)
                 self.assertIn("Fixture stopped before", result.stdout)
                 self.assertEqual(warning in result.stdout, warned, result.stdout)
+
+    # ── the sign-in hand-over (v1.0.5): PUBLIC_BASE_URL on the sign-in host ──
+    def handover_copy(self, supported):
+        """deploy-app.sh and its helpers as a release whose Odoo does (1) or
+        does not (0) hand a sign-in on from stgiss to the module host names."""
+        script = release_copy(self.base / f"handover-{int(supported)}", supported=True)
+        text = script.read_text(encoding="utf-8")
+        self.assertEqual(len(HANDOVER_LINE.findall(text)), 1, "deploy-app.sh must set HANDOVER_SUPPORTED once")
+        script.write_text(HANDOVER_LINE.sub(f"HANDOVER_SUPPORTED={int(supported)}", text), encoding="utf-8")
+        return script
+
+    def test_a_base_url_that_keeps_the_handover_off_is_warned_about(self):
+        script = self.handover_copy(True)
+        cases = (({}, "Warning: PUBLIC_BASE_URL is empty, so the sign-in hand-over of"),
+                 ({"PUBLIC_ROOT": "/dev"}, "Warning: PUBLIC_BASE_URL is empty, so the sign-in hand-over of"),
+                 ({"PUBLIC_ROOT": "/dev", "PUBLIC_BASE_URL": "http://stgiss.perodua.com.my/dev"},
+                  "Warning: PUBLIC_BASE_URL does not start with https://, so the sign-in hand-over of"),
+                 ({"PUBLIC_ROOT": "/dev", "PUBLIC_BASE_URL": "https://stgissrp.perodua.com.my/dev"},
+                  "Warning: PUBLIC_BASE_URL names stgissrp.perodua.com.my, not the sign-in host stgiss.perodua.com.my."),
+                 ({"PUBLIC_ROOT": "/dev", "PUBLIC_BASE_URL": "https://stgiss.perodua.com.my:8443/dev"},
+                  "Warning: PUBLIC_BASE_URL has the port 8443, not 443, so the sign-in hand-over of"),
+                 ({"PUBLIC_ROOT": "/dev", "PUBLIC_BASE_URL": "https://stgiss.perodua.com.my:443/dev"}, None),
+                 ({"PUBLIC_ROOT": "/dev", "PUBLIC_BASE_URL": "https://STGISS.perodua.com.my/dev"}, None),
+                 ({"PUBLIC_ROOT": "/dev", "PUBLIC_BASE_URL": "https://stgiss.perodua.com.my/dev"}, None))
+        for settings, warning in cases:
+            with self.subTest(**settings):
+                self.write_config(**settings)
+                # A warning only: the settings are valid, and nothing is changed.
+                result = self.run_script("--check-config", script=script)
+                self.assertEqual(result.returncode, 0, result.stdout)
+                self.assertIn("Configuration valid", result.stdout)
+                self.assertEqual(self.docker_calls(), [])
+                if warning:
+                    self.assertIn(warning, result.stdout)
+                    root = settings.get("PUBLIC_ROOT", "")
+                    self.assertIn(f"each host name keeps its own password sign-in. Set PUBLIC_BASE_URL="
+                                  f"https://stgiss.perodua.com.my{root}.\n", result.stdout)
+                else:
+                    self.assertNotIn("hand-over", result.stdout)
+
+    def test_a_deployment_warns_about_the_handover_too(self):
+        script = self.handover_copy(True)
+        self.pulls_succeed()
+        self.write_config(PUBLIC_ROOT="/dev", PUBLIC_BASE_URL="http://stgiss.perodua.com.my/dev")
+        result = self.run_script("--non-interactive", script=script)
+        self.assertIn("Warning: PUBLIC_BASE_URL does not start with https://", result.stdout)
+        self.assertIn("Fixture stopped before", result.stdout)
+
+    def test_a_release_without_the_handover_does_not_warn(self):
+        script = self.handover_copy(False)
+        for settings in ({}, {"PUBLIC_ROOT": "/dev", "PUBLIC_BASE_URL": "https://stgissrp.perodua.com.my/dev"}):
+            with self.subTest(**settings):
+                self.write_config(**settings)
+                result = self.run_script("--check-config", script=script)
+                self.assertEqual(result.returncode, 0, result.stdout)
+                self.assertNotIn("hand-over", result.stdout)
+
+    def test_the_pinned_release_has_the_handover_from_v1_0_5(self):
+        # Moving the pin to v1.0.5 or later must switch HANDOVER_SUPPORTED on.
+        text = SCRIPT.read_text(encoding="utf-8")
+        version = re.search(r"^RELEASE=client-stable-uiux-v(\d+)\.(\d+)\.(\d+)$", text, re.M)
+        self.assertIsNotNone(version)
+        supported = tuple(int(part) for part in version.groups()) >= (1, 0, 5)
+        self.assertEqual(HANDOVER_LINE.findall(text), [f"HANDOVER_SUPPORTED={int(supported)}"])
 
     # ── --check-config: what service.sh reset runs before it deletes anything ──
     def test_check_config_checks_the_settings_without_docker(self):

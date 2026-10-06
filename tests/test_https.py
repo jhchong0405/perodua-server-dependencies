@@ -608,6 +608,9 @@ class HttpsTest(Base):
             # the host name and the caller's address, never what the caller sent
             self.assertIn(f"proxy_set_header Host {host};\n    proxy_set_header X-Forwarded-Host {host};\n"
                           "    proxy_set_header X-Forwarded-For $remote_addr;\n    proxy_set_header X-Forwarded-Proto https;", conf)
+        # Odoo's session cookie only over HTTPS; no HSTS: that is the customer's decision
+        self.assertEqual(conf.count("\n    proxy_cookie_flags session_id secure samesite=lax;\n"), len(HOSTS))
+        self.assertNotIn("Strict-Transport-Security", conf)
         self.assertNotIn("return 302", conf)  # nginx itself sends /dev/api to /dev/api/, the query kept
         # the generation the script asks nginx for, answered to this server only
         self.assertEqual(len(re.findall(r'location = /\.perodua-https \{\n        if \(\$remote_addr != 127\.0\.0\.1\) \{\n'

@@ -217,6 +217,9 @@ uninstall_app() {
     ((${#anonymous[@]} == 0)) \
         || printf '  - delete the %s anonymous volume(s) Docker created for them (such as /mnt/extra-addons)\n' "${#anonymous[@]}"
     printf '  - delete %s (configuration, the copy of the database password, logs)\n' "$DEPLOY_DIR"
+    # deploy-app.sh --upgrade keeps its backups there unless --backup-dir names another place.
+    [[ ! -d $DEPLOY_DIR/backups ]] \
+        || printf '  - and with it the backups that deploy-app.sh --upgrade saved in %s/backups: copy them elsewhere first to keep them\n' "$DEPLOY_DIR"
     if ((PURGE)); then
         printf '  - delete the attachments volume %s\n' "$volume"
         for image in "${images[@]}"; do printf '  - delete the image %s\n' "${image%@*}"; done
