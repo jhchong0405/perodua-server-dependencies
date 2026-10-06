@@ -15,6 +15,12 @@ REGISTRY=${ODOO_IMAGE%%/*}
 # Whether the pinned web image serves the page under PUBLIC_ROOT and shows
 # ENVIRONMENT_LABEL: yes from v1.0.4. The scripts folder of v1.0.3 has 0 here.
 PUBLIC_ROOT_SUPPORTED=1
+# Whether the pinned release signs the module host names (stgissrp, stgisssp,
+# stgisscp) in through the sign-in host with a one-time ticket: yes from
+# v1.0.5. Odoo switches it on only when PUBLIC_BASE_URL is https:// on the
+# sign-in host, so without that a run warns.
+HANDOVER_SUPPORTED=0
+HANDOVER_HOST=stgiss.perodua.com.my
 # --init-db: a fresh UAT database, the release graph without the client
 # demonstration dataset. Before anything is written, uat_guard.py checks the
 # pinned image: nothing Odoo could install may depend on EXCLUDED_MODULE or
@@ -27,6 +33,9 @@ RESTORED_MODULES=perodua_client_stable,perodua_demo_client,perodua_gateway,perod
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 DEPLOY_DIR=/opt/perodua-app
 CONFIG='' NON_INTERACTIVE=0 INIT_DB=0 CHECK_ONLY=0 TEMP_DIR='' AUTH_DIR='' STARTED=0
+# --upgrade: the release the directory runs before, the backup of its data,
+# whether its App was running, and how far the upgrade got (see cleanup).
+UPGRADE=0 BACKUP_BASE='' BACKUP_DIR='' OLD_RELEASE='' OLD_REVISION='' WAS_RUNNING=0 UPGRADE_STATE=''
 DB_HOST='' DB_PORT=5432 DB_NAME=perodua DB_USER=odoo DB_PASSWORD_FILE=''
 PROJECT_NAME=perodua-client-uiux HTTP_PORT=8110 BIND_IP=0.0.0.0
 STARTUP_TIMEOUT=600 INIT_TIMEOUT=3600
@@ -40,6 +49,7 @@ usage() {
     cat <<'HELP'
 Usage: bash deploy-app.sh [--config PATH] [--dir PATH] [--non-interactive] [--init-db]
        bash deploy-app.sh [--config PATH] [--dir PATH] --check-config
+       bash deploy-app.sh --upgrade [--dir PATH] [--backup-dir PATH] [--non-interactive]
 Deploy the pinned Client Stable UIUX v1.0.4 Odoo + Web images using Docker Compose.
 Requires a reachable external PostgreSQL 16 server; does not install or configure it.
 Default: use an already initialized, matching Client Stable UIUX database.
@@ -59,6 +69,12 @@ database settings and asks for the password again.
 --config accepts literal KEY=VALUE lines (see app.env.example), never shell code.
 --check-config reads --config, or app.env in --dir, checks every setting the
 way a deployment does and stops before Docker is used; nothing is changed.
+--upgrade moves a deployment of another release to this one and keeps its data.
+The directory must run the same project and database (app.env), and the
+release must have the same Odoo modules: no module upgrade (-u) is run. It
+stops the App, saves the database (pg_dump -Fc) and the attachments in
+--dir/backups/ (or --backup-dir), then deploys this release. If anything fails
+before that, the directory and its App stay as they were.
 HTTP only: default 0.0.0.0:8110. Odoo ports are private to the Compose network.
 Optional keys, read only from --config or app.env: PUBLIC_ROOT (such as /dev,
 v1.0.4 or later) serves the page under http://HOST:PORT/dev/app/;
@@ -70,34 +86,97 @@ fail() { printf 'Error: %s\n' "$*" >&2; exit 1; }
 cleanup() {
     local status=$?
     trap - EXIT
-    [[ -z $TEMP_DIR ]] || rm -rf -- "$TEMP_DIR"
-    [[ -z $AUTH_DIR ]] || rm -rf -- "$AUTH_DIR"
+    # Whatever happens now, the cleanup runs to its end: a second signal, or a
+    # message the hung-up terminal of a lost SSH session can no longer take,
+    # does not stop it. The commands it starts ignore those signals as well.
+    trap '' HUP INT TERM
+    set +e
     if (( status != 0 && STARTED )); then
         printf 'Deployment did not pass verification. Existing database and volumes were retained.\n' >&2
         printf 'Logs: docker compose --project-name %q --file %q logs --tail 100\n' "$PROJECT_NAME" "$DEPLOY_DIR/compose.yml" >&2
     fi
+    # Before the temporary Docker configuration goes: it may start the old App again.
+    if (( status != 0 && UPGRADE )) && [[ -n $OLD_RELEASE ]]; then upgrade_stopped; fi
+    [[ -z $TEMP_DIR ]] || rm -rf -- "$TEMP_DIR"
+    [[ -z $AUTH_DIR ]] || rm -rf -- "$AUTH_DIR"
     exit "$status"
 }
+upgrade_stopped() {  # what a failed --upgrade leaves, and the way back
+    case $UPGRADE_STATE in
+        '')
+            printf 'Nothing was changed: %s still runs %s.\n' "$DEPLOY_DIR" "$OLD_RELEASE" >&2 ;;
+        stopped|backed-up)
+            # An incomplete backup is no use to anyone; a complete one stays.
+            if [[ $UPGRADE_STATE == stopped && -n $BACKUP_DIR ]]; then rm -rf -- "$BACKUP_DIR"; BACKUP_DIR=''; fi
+            printf 'The upgrade stopped before the switch: %s still runs %s, with its own files and containers.\n' "$DEPLOY_DIR" "$OLD_RELEASE" >&2
+            if ((WAS_RUNNING)); then
+                printf 'Starting the App of %s again...\n' "$OLD_RELEASE" >&2
+                if docker compose --project-name "$PROJECT_NAME" --file "$DEPLOY_DIR/compose.yml" \
+                        up --detach --no-recreate --wait --wait-timeout "$STARTUP_TIMEOUT" >&2; then
+                    printf 'The App of %s runs again.\n' "$OLD_RELEASE" >&2
+                else
+                    printf 'The App of %s did not start again. Start it with: sudo bash service.sh --role app --dir %q start\n' "$OLD_RELEASE" "$DEPLOY_DIR" >&2
+                fi
+            else
+                printf 'Its App was not running before the upgrade, and stays stopped.\n' >&2
+            fi
+            [[ -z $BACKUP_DIR ]] || printf 'The backup in %s is complete and kept.\n' "$BACKUP_DIR" >&2 ;;
+        switched)
+            printf 'The upgrade from %s to %s stopped after the switch. Now:\n' "$OLD_RELEASE" "$RELEASE" >&2
+            printf '  - %s names %s: its identity, compose.yml and app.env are those of %s.\n' "$DEPLOY_DIR" "$RELEASE" "$RELEASE" >&2
+            if ((STARTED)); then
+                printf '  - Its containers were recreated from the %s images. They may be running, but did not pass the checks above.\n' "$RELEASE" >&2
+                printf '  - The database holds the data of the backup and whatever the App wrote since it started.\n' >&2
+            else
+                printf '  - The App is stopped. The containers of %s were not removed or changed.\n' "$OLD_RELEASE" >&2
+                printf '  - The database holds the data of the backup. Only report.url and web.base.url may have been written again, with the values from app.env.\n' >&2
+            fi
+            printf 'To finish the upgrade: solve the problem above, then run sudo bash deploy-app.sh --dir %q from this scripts folder, without --upgrade.\n' "$DEPLOY_DIR" >&2
+            printf 'To go back to %s: put back its identity and settings, then deploy it without --upgrade:\n' "$OLD_RELEASE" >&2
+            go_back_steps >&2
+            printf 'To also put the data back as it was before the upgrade: follow %s/restore.txt instead (its step 5 is the above).\n' "$BACKUP_DIR" >&2 ;;
+    esac
+}
 trap cleanup EXIT
+# A lost SSH session (SIGHUP) fails the run as Ctrl-C does. Without its own trap,
+# bash would run the EXIT trap with the status of the last command, often 0,
+# and a stopped upgrade would neither start the old App again nor say so.
+trap 'exit 129' HUP
 trap 'exit 130' INT TERM
 # Only the main shell reports. A command that fails inside $( ) or <( ) is either
 # checked where its result is used or leaves the deployment going.
 trap '[[ $BASHPID != "$$" ]] || printf "Deployment failed at line %s.\n" "$LINENO" >&2' ERR
 while (($#)); do
     case $1 in
-        --config|--dir)
+        --config|--dir|--backup-dir)
             (($# >= 2)) || fail "$1 requires a path"
-            if [[ $1 == --config ]]; then CONFIG=$2; else DEPLOY_DIR=$2; fi
+            case $1 in
+                --config) CONFIG=$2 ;;
+                --dir) DEPLOY_DIR=$2 ;;
+                --backup-dir) BACKUP_BASE=$2 ;;
+            esac
             shift 2 ;;
         --non-interactive) NON_INTERACTIVE=1; shift ;;
         --init-db) INIT_DB=1; shift ;;
         --check-config) CHECK_ONLY=1; shift ;;
+        --upgrade) UPGRADE=1; shift ;;
         --help|-h) usage; exit 0 ;;
         *) fail "Unknown argument: $1" ;;
     esac
 done
 [[ $DEPLOY_DIR == /* && $DEPLOY_DIR != / && $DEPLOY_DIR != *$'\n'* ]] || fail '--dir must be an absolute directory path, not /'
 [[ ! -L $DEPLOY_DIR ]] || fail 'Deployment directory must not be a symbolic link'
+if ((UPGRADE)); then
+    ((INIT_DB == 0 && CHECK_ONLY == 0)) || fail '--upgrade cannot be combined with --init-db or --check-config'
+    [[ -f $DEPLOY_DIR/.deployment-identity && ! -L $DEPLOY_DIR/.deployment-identity ]] \
+        || fail "--upgrade moves an existing deployment to this release, and $DEPLOY_DIR has none (no .deployment-identity). Deploy it with deploy-app.sh without --upgrade"
+    [[ -n $CONFIG || -f $DEPLOY_DIR/app.env ]] \
+        || fail "--upgrade reads the settings of the deployment from $DEPLOY_DIR/app.env, which is missing; pass them with --config"
+    [[ -z $BACKUP_BASE || ( $BACKUP_BASE == /* && $BACKUP_BASE != / && $BACKUP_BASE != *$'\n'* ) ]] \
+        || fail '--backup-dir must be an absolute directory path, not /'
+else
+    [[ -z $BACKUP_BASE ]] || fail '--backup-dir applies only to --upgrade'
+fi
 if [[ -z $CONFIG && -f $DEPLOY_DIR/app.env ]]; then
     CONFIG=$DEPLOY_DIR/app.env
     # Before the first deployment, app.env can only be the operator's: every
@@ -282,6 +361,21 @@ fi
 if [[ -n $PUBLIC_ROOT && -z $PUBLIC_BASE_URL ]]; then
     printf 'Warning: PUBLIC_ROOT is set without PUBLIC_BASE_URL. Odoo will record http://HOST without %s as its base URL when an administrator signs in; set PUBLIC_BASE_URL, such as https://HOST%s.\n' "$PUBLIC_ROOT" "$PUBLIC_ROOT" >&2
 fi
+# Odoo hands a sign-in on to the module host names only when the frozen
+# web.base.url is https:// on the sign-in host. Otherwise every host name keeps
+# its own password sign-in, as before v1.0.5; the menu of each name is the
+# same either way.
+if ((HANDOVER_SUPPORTED)); then
+    handover_off="so the sign-in hand-over of $RELEASE stays off: each host name keeps its own password sign-in. Set PUBLIC_BASE_URL=https://$HANDOVER_HOST$PUBLIC_ROOT"
+    if [[ -z $PUBLIC_BASE_URL ]]; then
+        printf 'Warning: PUBLIC_BASE_URL is empty, %s.\n' "$handover_off" >&2
+    elif [[ $PUBLIC_BASE_URL != https://* ]]; then
+        printf 'Warning: PUBLIC_BASE_URL does not start with https://, %s.\n' "$handover_off" >&2
+    elif [[ ${url_host,,} != "$HANDOVER_HOST" ]]; then
+        printf 'Warning: PUBLIC_BASE_URL names %s, not the sign-in host %s. Unless the Odoo system parameter perodua_client_stable.hosts names %s as the sign-in host, %s.\n' \
+            "$url_host" "$HANDOVER_HOST" "$url_host" "$handover_off" >&2
+    fi
+fi
 [[ -z $DB_PASSWORD_FILE || ( $DB_PASSWORD_FILE == /* && -r $DB_PASSWORD_FILE && -f $DB_PASSWORD_FILE ) ]] || fail 'DB_PASSWORD_FILE must be an absolute path to a readable file'
 if ((NON_INTERACTIVE)) && [[ -z $DB_PASSWORD_FILE && ! -r $DEPLOY_DIR/secrets/db_password ]]; then
     fail 'DB_PASSWORD_FILE is required for the first non-interactive deployment'
@@ -335,11 +429,35 @@ exec 9>"$DEPLOY_DIR/.deploy.lock"
 flock -n 9 || fail 'Another deployment is running in this directory'
 TEMP_DIR=$(mktemp -d "$DEPLOY_DIR/.deploy.XXXXXXXX")
 printf '%s\n' "release=$RELEASE" "revision=$REVISION" "project=$PROJECT_NAME" "host=$DB_HOST" "port=$DB_PORT" "database=$DB_NAME" "user=$DB_USER" > "$TEMP_DIR/identity"
+same_but_release() {  # whether the identity $1 differs from this run's in the release only
+    [[ $(grep -Ev '^(release|revision)=' "$1") == "$(grep -Ev '^(release|revision)=' "$TEMP_DIR/identity")" ]]
+}
+check_upgrade() {
+    local release revision
+    release=$(sed -n 's/^release=//p' "$DEPLOY_DIR/.deployment-identity")
+    revision=$(sed -n 's/^revision=//p' "$DEPLOY_DIR/.deployment-identity")
+    [[ $release =~ ^[a-z0-9.-]+$ && $revision =~ ^[0-9a-f]{40}$ ]] || fail "Unreadable $DEPLOY_DIR/.deployment-identity"
+    OLD_RELEASE=$release OLD_REVISION=$revision
+    ! unverified \
+        || fail "The first deployment in $DEPLOY_DIR stopped before it used its database, so it has no data to keep. Finish it with deploy-app.sh without --upgrade"
+    same_but_release "$DEPLOY_DIR/.deployment-identity" \
+        || fail "--upgrade keeps the project, database server, port, database and user of the deployment, and $CONFIG names others than $DEPLOY_DIR/.deployment-identity: $(diff <(grep -Ev '^(release|revision)=' "$DEPLOY_DIR/.deployment-identity") <(grep -Ev '^(release|revision)=' "$TEMP_DIR/identity") | sed -n 's/^> //p' | paste -sd ' ' -)"
+    ! cmp -s "$TEMP_DIR/identity" "$DEPLOY_DIR/.deployment-identity" \
+        || fail "$DEPLOY_DIR already runs $RELEASE. Run deploy-app.sh without --upgrade"
+    printf 'Upgrade of %s from %s (%s) to %s (%s). The database %s and the attachments are kept.\n' \
+        "$DEPLOY_DIR" "$OLD_RELEASE" "$OLD_REVISION" "$RELEASE" "$REVISION" "$DB_NAME"
+}
 if [[ -e $DEPLOY_DIR/.deployment-identity ]]; then
-    if ! cmp -s "$TEMP_DIR/identity" "$DEPLOY_DIR/.deployment-identity"; then
-        unverified && [[ $(grep -x 'project=.*' "$TEMP_DIR/identity") == "$(grep -x 'project=.*' "$DEPLOY_DIR/.deployment-identity")" ]] \
-            || fail 'Directory belongs to a different database, project, or release. Use a separate deployment directory'
-        printf 'The earlier first run in %s stopped before it used its database, so its settings may still change: using the ones of this run.\n' "$DEPLOY_DIR"
+    if ((UPGRADE)); then
+        check_upgrade
+    elif ! cmp -s "$TEMP_DIR/identity" "$DEPLOY_DIR/.deployment-identity"; then
+        if unverified && [[ $(grep -x 'project=.*' "$TEMP_DIR/identity") == "$(grep -x 'project=.*' "$DEPLOY_DIR/.deployment-identity")" ]]; then
+            printf 'The earlier first run in %s stopped before it used its database, so its settings may still change: using the ones of this run.\n' "$DEPLOY_DIR"
+        elif same_but_release "$DEPLOY_DIR/.deployment-identity"; then
+            fail "$DEPLOY_DIR runs $(sed -n 's/^release=//p' "$DEPLOY_DIR/.deployment-identity"). To move it to $RELEASE and keep its data, run deploy-app.sh --upgrade --dir $DEPLOY_DIR (see docs/DEPLOYMENT.md); otherwise use a separate deployment directory"
+        else
+            fail 'Directory belongs to a different database, project, or release. Use a separate deployment directory'
+        fi
     fi
 elif [[ -e $DEPLOY_DIR/compose.yml || -e $DEPLOY_DIR/secrets ]] || { [[ -e $DEPLOY_DIR/app.env ]] && ((PREPARED == 0)); }; then
     fail 'Unmanaged deployment files already exist in this directory; use an empty directory'
@@ -672,6 +790,134 @@ YAML
 chmod 0444 "$TEMP_DIR/preflight.py"
 # The UAT helpers ship next to this script and run with the image's Python.
 for helper in uat_guard.py uat_admins.py; do install -m 0444 -- "$SCRIPT_DIR/$helper" "$TEMP_DIR/$helper"; done
+# --upgrade: up to here nothing in the directory has changed. The new release
+# checks the database and saves it from a staged copy of the deployment in
+# TEMP_DIR: the same project, so the same attachments volume and network. The
+# directory's files and containers stay those of the old release until the
+# switch below.
+staged() { docker compose --project-name "$PROJECT_NAME" --file "$TEMP_DIR/compose.yml" "$@"; }
+current() { docker compose --project-name "$PROJECT_NAME" --file "$DEPLOY_DIR/compose.yml" "$@"; }
+upgrade_check_database() {
+    local state
+    install -d -m 0700 "$TEMP_DIR/secrets"
+    cp -p -- "$TEMP_DIR/db_password" "$TEMP_DIR/secrets/db_password"
+    staged config --quiet
+    printf 'Checking database %s for %s before anything is changed...\n' "$DB_NAME" "$RELEASE"
+    if ! state=$(staged run --rm --no-deps -T odoo python3 /opt/deploy/preflight.py check </dev/null 2> "$TEMP_DIR/check.log"); then
+        cat "$TEMP_DIR/check.log" >&2
+        if grep -q 'module fingerprint does not match' "$TEMP_DIR/check.log"; then
+            fail "$RELEASE has other Odoo modules than the release that set up database $DB_NAME. --upgrade never upgrades modules (-u); a module upgrade needs its own plan"
+        fi
+        fail 'The database check above failed'
+    fi
+    [[ $state == READY\ * ]] \
+        || fail "--upgrade needs an initialized database, and the check of $DB_NAME reports $state"
+    printf 'Database %s fits %s: the same Odoo modules, %s attachments.\n' "$DB_NAME" "$RELEASE" "${state#READY }"
+}
+upgrade_space() {  # the backup must fit, before the App stops
+    local sizes database attachments base free
+    # pg_database_size (indexes included, nothing compressed) and the
+    # attachments as stored: more than the dump and the archive will take.
+    # shellcheck disable=SC2016
+    sizes=$(staged run --rm --no-deps -T odoo bash -c \
+        'PGPASSWORD="$DB_PASSWORD" psql -X -A -t -q --no-password --host="$DB_HOST" --port="$DB_PORT" --username="$DB_USER" --dbname="$DB_NAME" -c "SELECT pg_database_size(current_database()) / 1024" && if [ -d "/var/lib/odoo/filestore/$DB_NAME" ]; then du -sk "/var/lib/odoo/filestore/$DB_NAME" | cut -f1; else echo 0; fi' \
+        </dev/null) || fail "Cannot read the size of database $DB_NAME and of its attachments (above)"
+    [[ $sizes =~ ^([0-9]+)$'\n'([0-9]+)$ ]] || fail "Cannot read the size of database $DB_NAME and of its attachments: $sizes"
+    database=${BASH_REMATCH[1]} attachments=${BASH_REMATCH[2]}
+    base=${BACKUP_BASE:-$DEPLOY_DIR/backups}
+    while [[ ! -d $base ]]; do base=${base%/*}; base=${base:-/}; done
+    free=$(df -Pk -- "$base" | awk 'NR == 2 { print $4 }')
+    [[ $free =~ ^[0-9]+$ ]] || fail "Cannot read the free space of $base"
+    ((free >= database + attachments)) || fail "Not enough room for the backup on the disk of $base: $((free / 1024)) MB free, and the backup may need up to $(((database + attachments) / 1024)) MB (database $DB_NAME $((database / 1024)) MB, attachments $((attachments / 1024)) MB; the dump is usually smaller than the database). Free space there, or give --backup-dir on a disk with more room"
+}
+upgrade_backup() {
+    local folder running bytes files
+    upgrade_space
+    # pg_dump and tar send the backup to standard output, which Docker's default
+    # log (json-file) would also keep, at about four times its size, until the
+    # container is removed. These two runs have no container log.
+    printf 'services:\n  odoo:\n    logging:\n      driver: none\n' > "$TEMP_DIR/no-log.yml"
+    # The App is stopped first, so that the database and the attachments are
+    # saved as they are when the switch starts.
+    running=$(current ps --quiet --status running) || fail 'Cannot read the state of the App containers'
+    [[ -z $running ]] || WAS_RUNNING=1
+    folder=${BACKUP_BASE:-$DEPLOY_DIR/backups}/$(date -u +%Y%m%dT%H%M%SZ)-$OLD_RELEASE
+    if ! { mkdir -p -- "${folder%/*}" && mkdir -- "$folder"; }; then fail "Cannot create the backup folder $folder"; fi
+    BACKUP_DIR=$folder
+    UPGRADE_STATE=stopped
+    printf 'Stopping the App of %s for the backup...\n' "$OLD_RELEASE"
+    current stop web odoo
+    printf 'Saving database %s to %s/database.dump...\n' "$DB_NAME" "$BACKUP_DIR"
+    # pg_dump of the image (PostgreSQL 18) reaches the DB server as the App
+    # does. The password comes from the container's own environment, never a
+    # command line.
+    # shellcheck disable=SC2016
+    staged --file "$TEMP_DIR/no-log.yml" run --rm --no-deps -T odoo bash -c \
+        'PGPASSWORD="$DB_PASSWORD" exec pg_dump --format=custom --no-password --host="$DB_HOST" --port="$DB_PORT" --username="$DB_USER" --dbname="$DB_NAME"' \
+        </dev/null > "$BACKUP_DIR/database.dump" || fail "pg_dump of database $DB_NAME failed (above)"
+    if ! { staged run --rm --no-deps -T odoo pg_restore --list < "$BACKUP_DIR/database.dump" > "$TEMP_DIR/database.list" \
+            && grep -Eq ' TABLE DATA public ir_module_module( |$)' "$TEMP_DIR/database.list"; }; then
+        fail "The backup $BACKUP_DIR/database.dump cannot be read back, or holds no Odoo database"
+    fi
+    printf 'Saving the attachments of %s to %s/filestore.tar.gz...\n' "$DB_NAME" "$BACKUP_DIR"
+    # The layout README.md restores ("From a backup"): filestore/DB_NAME/...
+    # shellcheck disable=SC2016
+    staged --file "$TEMP_DIR/no-log.yml" run --rm --no-deps -T odoo bash -c \
+        'cd /var/lib/odoo && if [ -d "filestore/$DB_NAME" ]; then exec tar -czf - "filestore/$DB_NAME"; fi; exec tar -czf - --files-from=/dev/null' \
+        </dev/null > "$BACKUP_DIR/filestore.tar.gz" || fail "The archive of the attachments volume ${PROJECT_NAME}_filestore failed (above)"
+    files=$(tar -tzf "$BACKUP_DIR/filestore.tar.gz" | awk '!/\/$/ { n++ } END { print n + 0 }') \
+        || fail "The backup $BACKUP_DIR/filestore.tar.gz cannot be read back"
+    cp -p -- "$DEPLOY_DIR/.deployment-identity" "$BACKUP_DIR/deployment-identity"
+    [[ ! -f $DEPLOY_DIR/app.env ]] || cp -p -- "$DEPLOY_DIR/app.env" "$BACKUP_DIR/app.env"
+    restore_hint > "$BACKUP_DIR/restore.txt"
+    UPGRADE_STATE=backed-up
+    bytes=$(wc -c < "$BACKUP_DIR/database.dump")
+    printf 'Backup complete in %s: database.dump (%s bytes), filestore.tar.gz (%s files).\n' "$BACKUP_DIR" "$bytes" "$files"
+    cat "$BACKUP_DIR/restore.txt"
+}
+restore_hint() {  # how to put the backup back, saved next to it as restore.txt
+    local compose dump archive
+    compose=$(printf 'sudo docker compose --project-name %q --file %q' "$PROJECT_NAME" "$DEPLOY_DIR/compose.yml")
+    dump=$(printf '%q' "$BACKUP_DIR/database.dump")
+    archive=$(printf '%q' "$BACKUP_DIR/filestore.tar.gz:/restore.tar.gz:ro")
+    cat <<HINT
+Backup of $DEPLOY_DIR before the upgrade from $OLD_RELEASE to $RELEASE:
+  database.dump        database $DB_NAME on $DB_HOST:$DB_PORT (pg_dump -Fc, PostgreSQL 18)
+  filestore.tar.gz     its attachments, filestore/$DB_NAME/..., from the volume ${PROJECT_NAME}_filestore
+  deployment-identity  the directory's identity before the upgrade; app.env its settings
+
+To put this data back, on this App server. Restore database.dump with the
+pg_restore and psql of the Odoo image as below: the pg_restore 16 of the DB
+server cannot read it, and the SQL of pg_restore 18 starts with the one line
+PostgreSQL 16 does not know (SET transaction_timeout), which step 3 leaves out.
+1. Stop the App:
+   sudo bash service.sh --role app --dir $(printf '%q' "$DEPLOY_DIR") stop
+2. Empty the database, from a scripts folder (reset_database.py is there):
+   $compose run --rm --no-deps -T odoo python3 - < reset_database.py
+3. Restore the database, in one transaction:
+   $compose run --rm --no-deps -T odoo bash -c 'set -o pipefail; pg_restore --no-owner --no-acl --file=- | sed "0,/^SET transaction_timeout = 0;/{//d}" | PGPASSWORD="\$DB_PASSWORD" psql -X -q --output=/dev/null --no-password -v ON_ERROR_STOP=1 --single-transaction --host="\$DB_HOST" --port="\$DB_PORT" --username="\$DB_USER" --dbname="\$DB_NAME"' < $dump
+4. Put the attachments back, and end every sign-in (the sessions):
+   $compose run --rm --no-deps --user 0 --entrypoint bash -v $archive odoo -ec 'rm -rf "/var/lib/odoo/filestore/\$DB_NAME" /var/lib/odoo/sessions; tar --no-same-owner -xzf /restore.tar.gz -C /var/lib/odoo; mkdir -p "/var/lib/odoo/filestore/\$DB_NAME"; chown -R odoo:odoo /var/lib/odoo/filestore'
+   Every user must sign in again. The database is as it was at the backup:
+   passwords changed and sign-outs made since then are undone, so a user who
+   changed a password for safety after the backup must change it again.
+5. Deploy $OLD_RELEASE again, with the identity and settings the directory had
+   before the upgrade (a scripts folder of $OLD_RELEASE needs no --upgrade):
+$(go_back_steps)
+HINT
+}
+go_back_steps() {  # back to OLD_RELEASE, from any of its scripts folders
+    local dir backup
+    dir=$(printf '%q' "$DEPLOY_DIR") backup=$(printf '%q' "$BACKUP_DIR")
+    printf '   sudo cp -p %s/deployment-identity %s/.deployment-identity\n' "$backup" "$dir"
+    [[ ! -f $BACKUP_DIR/app.env ]] || printf '   sudo cp -p %s/app.env %s/app.env\n' "$backup" "$dir"
+    printf '   Then, from a scripts folder of %s: sudo bash deploy-app.sh --dir %s\n' "$OLD_RELEASE" "$dir"
+}
+if ((UPGRADE)); then
+    upgrade_check_database
+    upgrade_backup
+    UPGRADE_STATE=switched
+fi
 install -d -m 0700 "$DEPLOY_DIR/secrets"
 for file in compose.yml preflight.py uat_guard.py uat_admins.py; do mv -f -- "$TEMP_DIR/$file" "$DEPLOY_DIR/$file"; done
 mv -f -- "$TEMP_DIR/db_password" "$DEPLOY_DIR/secrets/db_password"
@@ -972,6 +1218,9 @@ if ((FRESH)); then
     [[ $state == READY\ * ]] || fail 'Fresh UAT database could not be stamped READY'
 fi
 printf '\nDeployment verified: %s (%s)\n' "$RELEASE" "$REVISION"
+if ((UPGRADE)); then
+    printf 'Upgraded from %s. The data as it was before: %s (restore.txt explains how to put it back).\n' "$OLD_RELEASE" "$BACKUP_DIR"
+fi
 if [[ $BIND_IP == 127.0.0.1 ]]; then
     printf 'HTTP URL: http://127.0.0.1:%s%s/app/ (this server only). From your computer: ssh -N -L %s:127.0.0.1:%s <user>@<APP_SERVER_IP>, then open http://localhost:%s%s/app/\n' \
         "$HTTP_PORT" "$PUBLIC_ROOT" "$HTTP_PORT" "$HTTP_PORT" "$HTTP_PORT" "$PUBLIC_ROOT"

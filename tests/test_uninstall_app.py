@@ -478,6 +478,15 @@ class UninstallAppTests(unittest.TestCase):
                 self.assertEqual(self.left_volumes(), set(VOLUMES))
                 self.assertTrue((self.app / "secrets" / "db_password").exists())
 
+    def test_the_plan_names_the_upgrade_backups_it_deletes(self):
+        result = self.run_script("--confirm", "another-project")
+        self.assertNotIn("backups", result.stdout)
+        (self.app / "backups" / "20261006T071500Z-client-stable-uiux-v1.0.4").mkdir(parents=True)
+        result = self.run_script("--confirm", "another-project")
+        self.assertIn(f"and with it the backups that deploy-app.sh --upgrade saved in {self.app}/backups: "
+                      "copy them elsewhere first to keep them", result.stdout)
+        self.assertEqual(self.changes(), [])
+
     def test_a_wrong_confirmation_changes_nothing(self):
         result = self.run_script("--confirm", "another-project")
         self.assertNotEqual(result.returncode, 0)

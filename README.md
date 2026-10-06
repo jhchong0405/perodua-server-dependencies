@@ -104,14 +104,15 @@ password for `perodua-deploy.novutal.com`. The first run takes several minutes.
 only those settings into `/opt/perodua-app/app.env`, one per line, without
 quotes. The script asks for the database settings as above and adds them to the
 file. [Two environments on one server](#two-environments-on-one-server) explains
-the settings.
+the settings. `PUBLIC_BASE_URL` names the sign-in host `stgiss`: from v1.0.5 the
+other host names hand their sign-in over to it ([Sign in once](#sign-in-once-v105)).
 
 ```
 HTTP_PORT=8110
 BIND_IP=127.0.0.1
 PUBLIC_ROOT=/dev
 ENVIRONMENT_LABEL=DEV environment
-PUBLIC_BASE_URL=https://stgissrp.perodua.com.my/dev
+PUBLIC_BASE_URL=https://stgiss.perodua.com.my/dev
 ```
 
 **If the first run stops at the database check** (a wrong `DB_HOST`, the DB
@@ -149,6 +150,8 @@ sudo docker compose -p perodua-client-uiux -f /opt/perodua-app/compose.yml ps
 `web` and `odoo` should both be `healthy`. Running `deploy-app.sh` again keeps the
 database and passwords and does not reinstall or upgrade modules. If the first run
 stops part-way, see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#initialize-a-fresh-uat-system-on-the-app-server).
+To move to a newer release and keep the data, see
+[Upgrade to a new release](#upgrade-to-a-new-release).
 
 ## From a backup
 
@@ -192,6 +195,33 @@ directory, project name, database, web port and `PUBLIC_ROOT`, behind F5 or an
 nginx that sends each path to its port. See
 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#two-environments-on-one-server-by-path-dev-uat).
 v1.0.3 does not support it.
+
+## Sign in once (v1.0.5)
+
+From v1.0.5, users sign in one time, on `stgiss.perodua.com.my`. The module host
+names hand that sign-in over: `stgissrp` (Perodua SPD), `stgisssp` (Supplier
+Portal) and `stgisscp` (Customer Portal). Each name shows only its own module.
+
+- **Prerequisite:** `PUBLIC_BASE_URL` in `app.env` is the `https://` address of
+  the sign-in host. For the grey environment (`/dev`) that is
+  `PUBLIC_BASE_URL=https://stgiss.perodua.com.my/dev`. With an empty value, an
+  `http://` value or another host name, the hand-over stays off: each name keeps
+  its own password sign-in, as in v1.0.4, and `deploy-app.sh` prints a warning.
+  After you change the value, run `deploy-app.sh` again (`--upgrade` when you
+  move to v1.0.5).
+- **Sign in at stgiss:** `https://stgiss.perodua.com.my/dev/app/`. After the
+  sign-in, stgiss shows no module, but links to the modules the user may open.
+- **Module names send users to stgiss:** a module name without a sign-in sends
+  the browser to stgiss, and back after the sign-in. A password sign-in on a
+  module name is refused.
+- **One sign-out ends all names:** a sign-out on any name ends the sign-in on
+  stgiss and on every module name. A new sign-in of the same user, on another
+  computer or browser, also ends it.
+- **Support:** sign in at stgiss, or through the SSH tunnel
+  (`http://localhost:8110/dev/app/`). The tunnel keeps the password sign-in and
+  shows all modules.
+
+See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#sign-in-once-on-stgiss-v105).
 
 ## Check the data without the web page
 
@@ -266,6 +296,52 @@ password, the web port and the other settings stay. `whadmin`, `admin1` and
 the `scripts` folder you run it from, so it also moves a system set up with an
 earlier version to this one. If it stops part-way, solve the problem it shows
 and run it again.
+
+## Upgrade to a new release
+
+An upgrade keeps the data. Put the `scripts` folder of the new release next to
+the old one, and keep the old one. Then run this on the App server, from the new
+folder:
+
+```bash
+sudo bash deploy-app.sh --upgrade
+```
+
+Add `--dir PATH` for a directory other than `/opt/perodua-app`. The settings
+come from `app.env` there. The upgrade goes ahead only when:
+
+- the directory runs the same project and the same database (server, port,
+  name and user). Its `.deployment-identity` differs from the new one only in
+  the release;
+- the new release has the same Odoo modules. The database check with the new
+  image must report `READY` with the same module fingerprint. A release that
+  changes modules needs a module upgrade (`-u`), and that needs its own plan:
+  `--upgrade` stops and changes nothing.
+
+Then it stops the App and saves the database (`pg_dump -Fc`) and the
+attachments in `/opt/perodua-app/backups/TIME-OLD_RELEASE/` (or in a folder
+that you give with `--backup-dir PATH`). If the backup fails, it starts the old
+App again and stops. Then it deploys the new release with the usual checks.
+`restore.txt` in the backup folder gives the commands that put the data back.
+
+If it stops before the switch, the directory and its App stay as they were. If
+it stops later, it tells you the state of the server and the ways back:
+
+- To go back to the old release with the current data, copy
+  `deployment-identity` and `app.env` from the backup folder back into the
+  directory (as `.deployment-identity` and `app.env`), then run
+  `sudo bash deploy-app.sh` from the old release's `scripts` folder, without
+  `--upgrade`. The message prints these commands.
+- To also put back the data from before the upgrade, follow `restore.txt`
+  instead. It also ends every sign-in: all users sign in again.
+
+Before it stops the App, `--upgrade` checks that the backup folder's disk has
+room for the size of the database and of the attachments, and stops if not.
+The App is down while the backup runs, so run it in `tmux` or `screen`: a lost
+SSH session stops the upgrade (before the switch, the old App starts again).
+
+Uninstall deletes `/opt/perodua-app` and the backups in it: copy them elsewhere
+first. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#upgrade-to-a-new-release-keeping-the-data-deploy-appsh---upgrade).
 
 ## Uninstall
 
@@ -630,7 +706,11 @@ nginx configuration all come from it. Run the commands from the `scripts` folder
    port 80 redirects to HTTPS, and on 443 each host forwards its paths to
    `127.0.0.1:PORT` and answers 404 for any other path. The services get the host
    name, `X-Forwarded-Proto: https` and the caller's address in `X-Forwarded-For`
-   and `X-Real-IP`, replacing whatever the caller sent. Ports 80 and 443 must be
+   and `X-Real-IP`, replacing whatever the caller sent. The Odoo session cookie
+   (`session_id`) gets `Secure` and `SameSite=Lax`, so browsers send it over HTTPS
+   only, on every port. `apply` sends no `Strict-Transport-Security`: making these
+   host names HTTPS-only in browsers for a long time is the customer's decision,
+   and hard to undo. Ports 80 and 443 must be
    free for nginx: another program there, or an nginx of another installation
    (one that is not on the PATH, such as a build in `/usr/local/nginx`), stops
    `apply` before anything changes. `apply` also refuses host names that another
@@ -642,9 +722,11 @@ nginx configuration all come from it. Run the commands from the `scripts` folder
    is installed (if not, `apply` installs it), whatever would stop `apply` on ports
    80 and 443, and every route.
 
-Behind HTTPS, the App's `PUBLIC_BASE_URL` starts with `https://`, and every
-service listens on `127.0.0.1` only (`BIND_IP=127.0.0.1`), so that browsers reach
-it through nginx ([DEPLOYMENT.md](docs/DEPLOYMENT.md)).
+Behind HTTPS, the App's `PUBLIC_BASE_URL` starts with `https://` (in the grey
+environment `https://stgiss.perodua.com.my/dev`, see
+[Sign in once](#sign-in-once-v105)), and every service listens on `127.0.0.1`
+only (`BIND_IP=127.0.0.1`), so that browsers reach it through nginx
+([DEPLOYMENT.md](docs/DEPLOYMENT.md)).
 
 ### Later
 

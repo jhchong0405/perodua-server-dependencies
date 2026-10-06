@@ -83,6 +83,17 @@ checks:
   only warns about a label; the pinned release supports `PUBLIC_ROOT` exactly
   when it is v1.0.4 or later.
 
+The sign-in hand-over of v1.0.5. The tests run a copy of `deploy-app.sh` with
+`HANDOVER_SUPPORTED` set to 1 or 0. `test_deploy_app.py` checks:
+- an empty `PUBLIC_BASE_URL`, an `http://` one and one on another host than
+  `stgiss.perodua.com.my` each print their warning with the value to set
+  (`https://stgiss.perodua.com.my` and `PUBLIC_ROOT`), in `--check-config` and
+  in a deployment; the settings stay valid and nothing changes;
+- `https://stgiss.perodua.com.my/dev`, in any case of letters, prints none, and
+  a release without the hand-over prints none;
+- the pinned release has `HANDOVER_SUPPORTED=1` exactly when it is v1.0.5 or
+  later.
+
 `test_deploy_app_uat.py` checks that `preflight.py public-urls` runs once on
 every path (an initialized database with and without `--init-db`, a fresh
 initialization, `SETUP_PENDING`, `SETUP_UNMARKED`), after the fresh checks and
@@ -106,6 +117,62 @@ deployment of the project. Files in it stop a new system without a terminal
 (with the delete command), and on a terminal they are deleted only after "y".
 An empty one is used as is. In a new directory, a volume that an uninstall kept
 is used again with the same database; other project resources still stop it.
+
+`test_deploy_app_upgrade.py` runs `deploy-app.sh --upgrade` in a directory that
+an earlier release (`client-stable-uiux-v1.0.3`) left, against a scripted fake
+Docker. For every call the fake records the compose file it got (the
+directory's own, or the staged one of the new release) and the release that
+`.deployment-identity` named at that moment. It checks:
+- another project, database server, port, database or user in `app.env` is
+  refused, with the differing value named, before any pull or container; so is
+  the release the directory already runs, a first deployment that never used
+  its database, a directory without a deployment or `app.env`, `--init-db`,
+  `--check-config` and a relative `--backup-dir` with `--upgrade`, and
+  `--backup-dir` without it. Each time the identity, `compose.yml` and
+  `app.env` stay as they were, and the message says that nothing was changed;
+- a module fingerprint that differs is refused after the new image's database
+  check, with "a module upgrade needs its own plan", and so is a database that
+  is not `READY` or cannot be checked: the App is not stopped and no backup
+  folder is made;
+- a plain run in a directory of another release points to `--upgrade`;
+- a failed `pg_dump`, a dump without `ir_module_module` data and a failed
+  attachments archive stop before the switch: the incomplete backup folder is
+  deleted, the old App is started again from its own `compose.yml` with
+  `up --no-recreate` (not when it was not running before; when it does not
+  start, the message gives the `service.sh start` command), and the directory
+  keeps its identity and files;
+- a lost SSH session while `pg_dump` runs (SIGHUP to the process group, or to
+  the script only while the dump ends by itself) does the same, with exit
+  status 129, also when standard error takes nothing more (`/dev/full`, as a
+  hung-up terminal);
+- a backup that may not fit (the database and attachment sizes from the staged
+  size check, against the free space of the backup folder's disk), or sizes
+  that cannot be read, are refused before the App stops; nothing changes;
+- `pg_dump` and the archive run with an extra compose file that turns off the
+  container log (`logging: driver: none`); no other run has it, and the
+  directory's `compose.yml` keeps the logs;
+- the order: two pulls, the staged database check, the staged size check,
+  whether the App runs, its stop, `pg_dump`, `pg_restore --list` and the archive (all staged, all while
+  the directory names the old release), then the switch and the usual
+  deployment, all with the new identity. No step has `-u` or `-i`, and no
+  argument holds the password;
+- after the upgrade, `.deployment-identity` differs from the old one only in
+  `release=` and `revision=`, `app.env` and the password are unchanged, and
+  `compose.yml` names the new image and the same attachments volume;
+- the backup folder (`backups/TIME-OLD_RELEASE`, 0700, or under `--backup-dir`)
+  holds the dump, the archive, the old identity and `app.env`, and
+  `restore.txt`, which is printed as well and names each restore command: step
+  4 also deletes the Odoo sessions and says that every user signs in again;
+  step 5 copies the old identity and `app.env` back and deploys without
+  `--upgrade`;
+- a failure after the switch (recording the addresses, the HTTP check) says
+  that the directory names the new release, whether the App is stopped or the
+  containers were recreated, and how to finish, go back and restore; the
+  printed copies, followed by a plain run of a `deploy-app.sh` that pins the old
+  release, bring the directory back (as a v1.0.3 folder, which has no
+  `--upgrade` and refuses the directory before the copies);
+- `--upgrade` from a folder of another release with the same modules moves the
+  directory there again, with a second backup.
 
 `test_uninstall_app.py` runs `uninstall.sh --role app` against a fake Docker CLI.
 The fake keeps containers, volumes and networks in a file, including those of
@@ -161,6 +228,9 @@ mounts, and containers without a Compose project):
 - a failed deletion is reported and the next project is still asked about;
 - containers of the uninstalled project that appear afterwards (a new
   deployment) are not offered.
+
+The plan of `uninstall.sh --role app` names the `backups` folder that
+`deploy-app.sh --upgrade` made in the directory, and only when there is one.
 
 It needs root on Ubuntu 24.04, so run it in the test image. The fake follows
 what a real engine did on 2026-09-24 (Docker 29, Compose v5): after
@@ -313,7 +383,8 @@ what nginx "runs", unless the test says the reload does not take, and
   file serves, in a one-line server block,
   quoted on a line of its own, or after a quoted `#`. It writes the redirect, one
   TLS server per host that sends the services its host name and the caller's
-  address, the generation probe answered to 127.0.0.1 only, paths forwarded as
+  address, marks the `session_id` cookie `Secure` and `SameSite=Lax` and sends no
+  `Strict-Transport-Security`, the generation probe answered to 127.0.0.1 only, paths forwarded as
   they are or stripped, 404 for other paths (or a route for `/`), runs `nginx -t`
   and reloads. A configuration `nginx -t` refuses, or one nginx does not take (a
   first one, and a change of routes with the same certificate), is taken back
@@ -440,7 +511,9 @@ checks with curl, trusting only the throwaway root, that each host and path
 reaches its port with the path kept or removed and `X-Forwarded-Proto: https`,
 that a forged `Host` and `X-Forwarded-For` do not reach the service, that other
 paths answer 404, that `/dev?a=1` redirects to `/dev/?a=1` and `http://` to
-`https://`, and that the generation probe answers 127.0.0.1 but not the
+`https://`, that the `session_id` cookie of a service comes back with `Secure;
+SameSite=Lax` and another cookie unchanged, that HTTPS answers carry no
+`Strict-Transport-Security`, and that the generation probe answers 127.0.0.1 but not the
 container's own address. `status` finds nginx without the sbin directories on the
 PATH. It renews the certificate and changes the key while
 nginx runs, comparing the exact certificate nginx presents, and refuses a second
@@ -448,6 +521,30 @@ nginx file for one of the host names. With another nginx file holding a port
 that a program already has, nginx cannot reload: `apply` must fail and put the
 previous configuration back, and `uninstall` must fail and change nothing. Then
 it uninstalls. It refuses to run outside a container.
+
+`check-upgrade-backup.sh` runs the backup of `deploy-app.sh --upgrade` and the
+restore steps of its `restore.txt` against real PostgreSQL 16 (a `postgres:16`
+container) and the PostgreSQL 18 client tools of an Odoo image that is already
+on the host, such as the pinned release image:
+
+```bash
+bash tests/check-upgrade-backup.sh IMAGE
+```
+
+It takes the command lines from `deploy-app.sh`, and checks that the dump and
+the archive are the two runs with the no-log compose file. A database shaped as Odoo
+leaves it (900 tables with foreign keys to `res_users`, inheriting tables, an
+`api` schema with a view, a sequence, a function, the trusted extensions
+`pg_trgm` and `unaccent`) and an attachments volume are saved. It checks that
+the dump reads back from standard input, that the archive holds only
+`filestore/DB_NAME`, and that the `pg_restore` 16 of the DB server refuses the
+archive. The size check of the free-space test must print the database and
+attachment sizes in KB. Then it damages the data and the files, empties the
+database with `reset_database.py`, and follows `restore.txt`: the database and the
+attachments must equal the originals, and the sessions folder must be gone
+(every sign-in ended). Its
+Docker resources are named `perodua-upgrade-check-*` and are removed at the
+end.
 
 `test_uat_guard.py` runs `uat_guard.py` against temporary addon trees shaped
 like the pinned image (literal manifests, code shipped as bare `.pyc`): direct,

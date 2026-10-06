@@ -50,6 +50,9 @@ class Echo(http.server.BaseHTTPRequestHandler):
         body = (f"port={self.server.server_port} path={self.path} proto={self.headers.get('X-Forwarded-Proto')}"
                 f" host={self.headers.get('Host')} xff={self.headers.get('X-Forwarded-For')}\n").encode()
         self.send_response(200)
+        # as Odoo sets its session cookie: no Secure, no SameSite
+        self.send_header("Set-Cookie", "session_id=echo; Path=/dev/; HttpOnly")
+        self.send_header("Set-Cookie", "frontend_lang=en_US; Path=/")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -119,6 +122,15 @@ code=$(curl -s --cacert /ca/root.pem -o /dev/null -w '%{http_code} %{redirect_ur
 [[ $code == '301 https://stgissrp.perodua.com.my/dev/?a=1' ]] && pass "/dev?a=1 -> $code" || fail "/dev?a=1 -> $code"
 code=$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' "${RESOLVE[@]}" http://api.example.perodua.com.my/dev/api/x)
 [[ $code == '301 https://api.example.perodua.com.my/dev/api/x' ]] && pass "http -> $code" || fail "http -> $code"
+# Odoo's session cookie goes back over HTTPS only; other cookies stay as they are
+headers=$(curl -s --cacert /ca/root.pem "${RESOLVE[@]}" -D - -o /dev/null https://stgissrp.perodua.com.my/dev/web/login | tr -d '\r')
+grep -qx 'Set-Cookie: session_id=echo; Path=/dev/; HttpOnly; Secure; SameSite=Lax' <<< "$headers" \
+    && pass 'session_id gets Secure and SameSite=Lax' || fail "session_id: $(grep -i '^set-cookie' <<< "$headers")"
+grep -qx 'Set-Cookie: frontend_lang=en_US; Path=/' <<< "$headers" && pass 'other cookies are unchanged' \
+    || fail "other cookies: $(grep -i '^set-cookie' <<< "$headers")"
+# no HSTS: whether these names become HTTPS-only for browsers is the customer's decision
+headers=$(curl -s --cacert /ca/root.pem "${RESOLVE[@]}" -D - -o /dev/null https://stgissrp.perodua.com.my/dev/web/login | tr -d '\r')
+! grep -qi '^Strict-Transport-Security' <<< "$headers" && pass 'no HSTS' || fail 'HSTS sent'
 # the generation of the configuration nginx runs, for https.sh on this server only
 got=$(curl -s --cacert /ca/root.pem "${RESOLVE[@]}" https://api.example.perodua.com.my/.perodua-https)
 [[ $got =~ ^generation\ [0-9a-f]{16}$ ]] && pass "/.perodua-https from 127.0.0.1 -> $got" || fail "/.perodua-https -> $got"

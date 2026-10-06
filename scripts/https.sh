@@ -501,6 +501,11 @@ server {
     proxy_set_header X-Real-IP \$remote_addr;
     proxy_set_header Upgrade \$http_upgrade;
     proxy_set_header Connection \$perodua_https_connection;
+    # Odoo sets its session cookie without Secure, and these host names also
+    # answer plain HTTP (port 80, and the App's own port on the network): the
+    # browser sends the cookie over HTTPS only, on every port. On stgiss the
+    # cookie also signs in every module host name.
+    proxy_cookie_flags session_id secure samesite=lax;
 
     # Which configuration nginx runs, for https.sh on this server only.
     location = /.perodua-https {
