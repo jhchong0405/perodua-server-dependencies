@@ -8,8 +8,10 @@ mode answers as the real one does for that state; the real modes run against a
 database in test_preflight_module_upgrade.py. The directory's preflight.py is
 the fixture of the old release until the switch: as the real one of v1.0.5 to
 v1.0.8, it accepts only the 'from' state. These tests pin the order of the
-steps, every refusal before the App stops, that nothing starts the old App
-after its containers are removed, the mail hold, and the reruns.
+steps, every refusal before the App stops, the second check with the App
+stopped and the refused mark (both start the old App again), that nothing
+starts the old App once the database may carry the mark, the mail hold, and
+the reruns.
 """
 
 import json
@@ -40,7 +42,8 @@ OLD_SERVICE_SHA256 = 'b3c2533b5f2f7b78c6e2b2c036ce215dc8e306f56b96058ef8a4ddb13f
 BACKUP = ['staged backup size', 'running?', 'stop web odoo', 'staged pg_dump', 'staged pg_restore --list',
           'staged filestore archive']
 CHECKS = ['pull', 'pull', 'staged preflight upgrade-check', 'staged uat_guard guard', 'staged uat_guard demo-flag']
-UPGRADE = ['remove the containers', 'staged preflight mark-upgrading', f'rm -f {CONTAINER}', 'staged odoo -u',
+RECHECK = ['staged preflight upgrade-check']  # the second check, with the App stopped
+UPGRADE = ['staged preflight mark-upgrading', 'remove the containers', f'rm -f {CONTAINER}', 'staged odoo -u',
            'staged preflight verify-upgrade']
 DEPLOY = ['preflight check --accept-pending', 'filestore check', 'stop web odoo', 'preflight public-urls', 'up',
           'http verify', 'preflight stamp-upgrade']
@@ -92,16 +95,19 @@ class ModuleUpgradeFixture(UpgradeHarness):
         self.assertEqual(self.db_state(), 'from')
 
     def assert_no_old_app_after_the_mark(self, result):
-        """After the containers are removed: no start of the old App, the -u
-        container removed, and restore.txt as the way back."""
+        """Once the database may carry the mark: the containers removed, no
+        start of the old App, the -u container removed, and restore.txt as the
+        way back."""
         self.assertNotEqual(result.returncode, 0, result.stdout)
         names = self.names()
-        mark = names.index('remove the containers')
+        self.assertEqual(names.count('remove the containers'), 1)
+        remove = names.index('remove the containers')
+        self.assertEqual(names[remove - 1], 'staged preflight mark-upgrading')
         self.assertNotIn('restart', names)
         self.assertNotIn('up', names)
-        self.assertEqual(self.module_steps()[mark][1], OLD)  # the directory's own compose file
-        self.assertIn(f'The containers of {OLD} were removed when the upgrade started, and its App is not started again',
-                      result.stdout)
+        self.assertEqual(self.module_steps()[remove][1], OLD)  # the directory's own compose file
+        self.assertIn(f'The containers of {OLD} ', result.stdout)
+        self.assertIn('and its App is not started again', result.stdout)
         self.assertIn('The only way back is the backup', result.stdout)
         [backup] = self.backups()
         self.assertIn(f'follow {backup}/restore.txt, all of its steps', result.stdout)
@@ -117,7 +123,7 @@ class ModuleUpgradeTests(ModuleUpgradeFixture, unittest.TestCase):
         result = self.upgrade()
         self.assertEqual(result.returncode, 0, result.stdout)
         steps = self.module_steps()
-        self.assertEqual([name for name, _ in steps], CHECKS + BACKUP + UPGRADE + DEPLOY)
+        self.assertEqual([name for name, _ in steps], CHECKS + BACKUP + RECHECK + UPGRADE + DEPLOY)
         switch = [name for name, _ in steps].index('preflight check --accept-pending')
         self.assertEqual({release for _, release in steps[:switch]}, {OLD})
         self.assertEqual({release for _, release in steps[switch:]}, {RELEASE})
@@ -229,11 +235,61 @@ class ModuleUpgradeTests(ModuleUpgradeFixture, unittest.TestCase):
         result = self.upgrade('--drop-retired-data')
         self.assertEqual(result.returncode, 0, result.stdout)
         names = self.names()
-        self.assertEqual(names[names.index('staged filestore archive') + 1:names.index('remove the containers')],
-                         ['staged preflight retired-export'])
+        self.assertEqual(names[names.index('staged filestore archive') + 1:names.index('staged preflight mark-upgrading')],
+                         RECHECK + ['staged preflight retired-export'])
         [backup] = self.backups()
         with tarfile.open(backup / 'retired-data.tar.gz') as archive:
             self.assertEqual(archive.getnames(), ['retired-data/columns/stock_picking.perodua_dispatch_state.csv'])
+
+    # ── the second check, with the App stopped ──────────────────────────────
+    def assert_old_app_started_again_after_the_recheck(self, result, message):
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn(message, result.stdout)
+        names = self.names()
+        self.assertEqual(names[names.index('staged filestore archive') + 1:], RECHECK + ['restart'])
+        self.assertIn(f'The upgrade stopped before the switch: {self.deploy_dir} still runs {OLD}', result.stdout)
+        self.assertIn(f'The App of {OLD} runs again.', result.stdout)
+        [backup] = self.backups()
+        self.assertIn(f'The backup in {backup} is complete and kept.', result.stdout)
+        self.assertFalse((backup / 'retired-data.tar.gz').exists())
+        self.assertNotIn('The only way back is the backup', result.stdout)
+        self.assertEqual((self.deploy_dir / '.deployment-identity').read_text(), self.identity)
+        self.assertEqual(self.db_state(), 'from')
+
+    def test_retired_data_written_after_the_first_check_is_refused_with_the_app_stopped(self):
+        # The first check (App running) finds none; a user records a driver
+        # check-in before the App stops for the backup.
+        result = self.upgrade(retired_again='table perodua_driver_checkin 2|column stock_picking.perodua_dispatch_state 0')
+        self.assertIn('Retired data: none.', result.stdout)
+        self.assert_old_app_started_again_after_the_recheck(
+            result, 'Users wrote data of the retired modules after the first check, while the App ran (above).')
+        self.assertIn('Retired data that the module upgrade deletes, counted with the App stopped:', result.stdout)
+        self.assertIn('table       perodua_driver_checkin: 2', result.stdout)
+        self.assertIn('run --upgrade again with --drop-retired-data', result.stdout)
+        self.assertNotIn('staged preflight retired-export', self.names())
+
+    def test_retired_data_written_after_the_first_check_is_saved_with_drop_retired_data(self):
+        result = self.upgrade('--drop-retired-data', retired_again='table perodua_driver_checkin 2')
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn('Retired data: none.', result.stdout)
+        names = self.names()
+        self.assertEqual(names[names.index('staged filestore archive') + 1:names.index('staged preflight mark-upgrading')],
+                         RECHECK + ['staged preflight retired-export'])
+        [backup] = self.backups()
+        self.assertTrue((backup / 'retired-data.tar.gz').is_file())
+        self.assertEqual(self.db_state(), 'new')
+
+    def test_a_refusal_of_the_second_check_starts_the_old_app_again(self):
+        result = self.upgrade(refuse_again='perodua_demo.seed_mode is full, not none')
+        self.assert_old_app_started_again_after_the_recheck(
+            result, 'Database perodua changed while the App ran: the module upgrade (-u) is now refused for the reasons above')
+        self.assertIn('module upgrade refused: perodua_demo.seed_mode is full, not none', result.stdout)
+
+    def test_other_modules_at_the_second_check_start_the_old_app_again(self):
+        result = self.upgrade(modules_again='perodua_client_stable,perodua_rp,perodua_ui')
+        self.assert_old_app_started_again_after_the_recheck(
+            result, 'The modules to upgrade changed while the App ran: perodua_client_stable,perodua_ui at the first check, '
+                    'perodua_client_stable,perodua_rp,perodua_ui now')
 
     def test_a_failed_export_of_the_retired_data_starts_the_old_app_again(self):
         result = self.upgrade('--drop-retired-data', retired='table perodua_transporter_rate 2', export_exit=1)
@@ -269,15 +325,46 @@ class ModuleUpgradeTests(ModuleUpgradeFixture, unittest.TestCase):
                 self.assertIn(message, result.stdout)
                 self.assertEqual(self.calls(), [])
 
-    # ── after the mark: never the old App again ─────────────────────────────
-    def test_the_old_containers_are_removed_after_the_backup(self):
-        result = self.upgrade(mark_exit=1)
-        backup = self.assert_no_old_app_after_the_mark(result)
+    # ── the mark ─────────────────────────────────────────────────────────────
+    def test_a_refused_mark_starts_the_old_app_again(self):
+        # mark-upgrading checks the database again and refuses (exit 3)
+        # before it writes: the old containers are still there, and start.
+        result = self.upgrade(mark_exit=3)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn('module upgrade refused: perodua_demo.seed_mode is full, not none', result.stdout)
+        self.assertIn('The mark of the module upgrade was refused for the reasons above. Nothing was written to the database',
+                      result.stdout)
         names = self.names()
         self.assertEqual(names[names.index('staged filestore archive') + 1:],
-                         ['remove the containers', 'staged preflight mark-upgrading'])
-        self.assertIn('after the backup, before the module upgrade (-u) started', result.stdout)
-        self.assertTrue((backup / 'database.dump').is_file())
+                         RECHECK + ['staged preflight mark-upgrading', 'restart'])
+        self.assertIn(f'The App of {OLD} runs again.', result.stdout)
+        [backup] = self.backups()
+        self.assertIn(f'The backup in {backup} is complete and kept.', result.stdout)
+        self.assertNotIn('The only way back is the backup', result.stdout)
+        self.assertNotIn('restore.txt:', result.stdout)
+        self.assertEqual(self.db_state(), 'from')
+
+    # ── once the database may carry the mark: never the old App again ───────
+    def test_a_failed_mark_removes_the_old_containers_and_points_to_the_backup(self):
+        # Exit 1 may come after the commit of the mark (a lost connection):
+        # the run cannot tell, so it treats the database as marked.
+        for fake, state in (({'mark_exit': 1}, 'from'), ({'mark_lost': 1}, 'upgrading')):
+            with self.subTest(fake=fake):
+                self.set_db('from')
+                self.log.unlink(missing_ok=True)
+                shutil.rmtree(self.deploy_dir / 'backups', ignore_errors=True)
+                for key in ('FAKE_MARK_EXIT', 'FAKE_MARK_LOST'):
+                    self.env.pop(key, None)
+                result = self.upgrade(**fake)
+                backup = self.assert_no_old_app_after_the_mark(result)
+                names = self.names()
+                self.assertEqual(names[names.index('staged filestore archive') + 1:],
+                                 RECHECK + ['staged preflight mark-upgrading', 'remove the containers'])
+                self.assertIn('after the backup, before the module upgrade (-u) started', result.stdout)
+                self.assertIn('The mark of this upgrade was written, or its result is not known (above).', result.stdout)
+                self.assertIn(f'The containers of {OLD} are removed, and its App is not started again', result.stdout)
+                self.assertTrue((backup / 'database.dump').is_file())
+                self.assertEqual(self.db_state(), state)
 
     def test_a_failed_module_upgrade_does_not_start_the_old_app(self):
         result = self.upgrade(u_exit=1)

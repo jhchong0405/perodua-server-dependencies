@@ -184,8 +184,9 @@ keeps the database's module fingerprint in a file (`from`, `upgrading`,
 directory's `preflight.py` is the old release's until the switch, and accepts
 only `from`. It checks:
 - the order: the pulls, `upgrade-check`, `uat_guard.py guard` and `demo-flag`,
-  the backup, the removal of the old containers (`rm --stop --force odoo web`,
-  the directory's own compose file), `mark-upgrading`, `docker rm -f` of the
+  the backup, `upgrade-check` again, `mark-upgrading`, the removal of the old
+  containers (`rm --stop --force odoo web`, the directory's own compose
+  file), `docker rm -f` of the
   one-off container, one `-u` run, `verify-upgrade`, then the switch and the
   deployment with `check --accept-pending` and `stamp-upgrade` at the end;
 - the `-u` run: `bash -c`, `--name PROJECT-module-upgrade`, the modules and the
@@ -201,10 +202,19 @@ only `from`. It checks:
   wrong confirmation stop before the App stops, and nothing changes;
   `--confirm`, `--drop-retired-data` and `--release-queued-mail` are refused
   where they do not apply;
-- with `--drop-retired-data`, `retired-export` runs after the backup and
-  before the containers go, into `retired-data.tar.gz`; a failed export starts
-  the old App again;
-- a failed mark, a failed `-u`, a `-u` past `INIT_TIMEOUT`, a lost SSH session
+- after the backup, `upgrade-check` runs again with the App stopped. Retired
+  data that it counts when the first check counted none needs
+  `--drop-retired-data` (without it: refused, and the old App starts again
+  with the backup kept; with it: `retired-data.tar.gz` is made). A refusal or
+  other modules to upgrade at this second check also start the old App again;
+- with `--drop-retired-data`, `retired-export` runs after the second check and
+  before the mark, into `retired-data.tar.gz`; a failed export starts the old
+  App again;
+- `mark-upgrading` runs before the containers go: its refusal (exit 3, nothing
+  written) starts the old App again and keeps the backup, without the text of
+  `restore.txt`;
+- a mark that failed otherwise (also one committed before its answer was lost)
+  removes the containers, a failed `-u`, a `-u` past `INIT_TIMEOUT`, a lost SSH session
   during `-u` (SIGHUP to the process group or to the script only) and a failed
   `verify-upgrade` never start the old App: no `up`, the one-off container is
   removed with `docker rm -f`, the `-u` process does not go on, and the message
@@ -230,7 +240,9 @@ or real PostgreSQL 16 with `PREFLIGHT_TEST_PG='HOST PORT USER PASSWORD DATABASE'
 It checks the report of `upgrade-check` (retired tables, columns, attachments,
 the modules to upgrade), each of its refusals, what it leaves to the new
 release (an adoptable reference code, the default host table, one
-`sample_data` parameter), that from `mark-upgrading` on no release accepts the
+`sample_data` parameter), that a refusal of `mark-upgrading` exits 3 and
+writes nothing while its other failures exit 1, that from `mark-upgrading`
+on no release accepts the
 database (the old preflight included), the cron rule (flags back as before,
 new crons as the upgrade set them, the four mock intake pulls kept off while
 their system resolves to mock, a live one restored), the mail hold of the rows

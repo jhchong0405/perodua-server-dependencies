@@ -46,10 +46,12 @@ CONFIG='' NON_INTERACTIVE=0 INIT_DB=0 CHECK_ONLY=0 TEMP_DIR='' AUTH_DIR='' START
 # whether its App was running, and how far the upgrade got (see cleanup).
 UPGRADE=0 BACKUP_BASE='' BACKUP_DIR='' OLD_RELEASE='' OLD_REVISION='' WAS_RUNNING=0 UPGRADE_STATE=''
 # A module upgrade: the modules it upgrades, Odoo's demo-data option, the
-# retired rows it deletes, the one-off container and its process, whether a
-# database upgraded earlier only waits for its deployment, and the held mail.
-MODULE_UPGRADE=0 UPGRADE_MODULES='' DEMO_FLAG='' RETIRED_TOTAL=0 DROP_RETIRED=0 CONFIRM=''
-UPGRADE_CONTAINER='' UPGRADE_PID='' PENDING_ONLY=0 PENDING_STAMP=0 HELD_MAIL='' RELEASE_MAIL=0 DB_MARKED=0
+# retired rows it deletes (and their lines in the report), the one-off
+# container and its process, whether a database upgraded earlier only waits
+# for its deployment, the held mail, and whether the containers of the old
+# release are removed.
+MODULE_UPGRADE=0 UPGRADE_MODULES='' DEMO_FLAG='' RETIRED_TOTAL=0 RETIRED_LINES=() DROP_RETIRED=0 CONFIRM=''
+UPGRADE_CONTAINER='' UPGRADE_PID='' PENDING_ONLY=0 PENDING_STAMP=0 HELD_MAIL='' RELEASE_MAIL=0 DB_MARKED=0 OLD_REMOVED=0
 DB_HOST='' DB_PORT=5432 DB_NAME=perodua DB_USER=odoo DB_PASSWORD_FILE=''
 PROJECT_NAME=perodua-client-uiux HTTP_PORT=8110 BIND_IP=0.0.0.0
 STARTUP_TIMEOUT=600 INIT_TIMEOUT=3600
@@ -144,16 +146,25 @@ upgrade_stopped() {  # what a failed --upgrade leaves, and the way back
                 printf 'Nothing was changed: %s still runs %s.\n' "$DEPLOY_DIR" "$OLD_RELEASE" >&2
             fi ;;
         marked|migrating|migrated)
-            # After the mark the old release cannot run on the database, and
-            # its containers are gone: the backup is the only way back.
+            # The database may carry the mark (a mark that was refused went
+            # back to 'backed-up'): the old release must not run on it, and
+            # the backup is the only way back.
             stop_module_upgrade
+            # A stop between the mark and the removal: remove them now.
+            ((OLD_REMOVED)) || current rm --stop --force odoo web >&2
             printf 'The module upgrade from %s to %s stopped ' "$OLD_RELEASE" "$RELEASE" >&2
             case $UPGRADE_STATE in
-                marked) printf 'after the backup, before the module upgrade (-u) started. The database holds the data of the backup, and may carry the mark of this upgrade.\n' >&2 ;;
-                migrating) printf 'while the module upgrade (-u) ran. The database is partly upgraded. Log: %s/module-upgrade.log\n' "$BACKUP_DIR" >&2 ;;
-                migrated) printf 'after the module upgrade (-u): the check of its result failed (above). Log: %s/module-upgrade.log\n' "$BACKUP_DIR" >&2 ;;
+                marked)
+                    printf 'after the backup, before the module upgrade (-u) started. The database holds the data of the backup. The mark of this upgrade was written, or its result is not known (above).\n' >&2
+                    printf 'The containers of %s are removed, and its App is not started again: %s cannot run on a database that carries the mark (its database check refuses it), and this run cannot tell that the mark is absent.\n' "$OLD_RELEASE" "$OLD_RELEASE" >&2 ;;
+                migrating|migrated)
+                    if [[ $UPGRADE_STATE == migrating ]]; then
+                        printf 'while the module upgrade (-u) ran. The database is partly upgraded. Log: %s/module-upgrade.log\n' "$BACKUP_DIR" >&2
+                    else
+                        printf 'after the module upgrade (-u): the check of its result failed (above). Log: %s/module-upgrade.log\n' "$BACKUP_DIR" >&2
+                    fi
+                    printf 'The containers of %s were removed when the upgrade started, and its App is not started again: %s cannot run on this database any more (its database check refuses the mark of this upgrade).\n' "$OLD_RELEASE" "$OLD_RELEASE" >&2 ;;
             esac
-            printf 'The containers of %s were removed when the upgrade started, and its App is not started again: %s cannot run on this database any more (its database check refuses the mark of this upgrade).\n' "$OLD_RELEASE" "$OLD_RELEASE" >&2
             printf 'The only way back is the backup: follow %s/restore.txt, all of its steps. Then %s runs again with the data of the backup, and --upgrade can run again once the cause is solved. restore.txt:\n' "$BACKUP_DIR" "$OLD_RELEASE" >&2
             cat -- "$BACKUP_DIR/restore.txt" >&2 ;;
         stopped|backed-up)
@@ -886,10 +897,10 @@ def module_upgrade_problems(cur, modules, installed, uat, excluded_rows):
             problems.append('%s.%s names a deleted record, and record %s of %s has its code %s: the upgrade would create it again and stop on the unique code'
                             % (module, name, other[0], table, code))
     return problems
-def refuse(problems):
+def refuse(problems, code=1):
     for problem in problems:
         print('Database preflight: module upgrade refused: ' + problem, file=sys.stderr)
-    sys.exit(1)
+    sys.exit(code)
 def retired_export(cur):
     # Each retired table, the rows of each retired column with a value, and the
     # retired attachments (their files are in filestore.tar.gz), as CSV.
@@ -1146,7 +1157,10 @@ with connect(db) as cn:
             # mark checks again what upgrade-check checked.
             problems = module_upgrade_problems(cur, modules, installed, uat, excluded_records())
             if problems:
-                refuse(problems)
+                # mark-upgrading: exit 3 says that nothing was written, so
+                # deploy-app.sh starts the old App again. Every other failure
+                # exits 1, which may come after the commit of the mark.
+                refuse(problems, 3 if mode == 'mark-upgrading' else 1)
             if mode == 'mark-upgrading':
                 mark_upgrading(cn, cur, installed, fingerprint)
             for kind, name, count in retired_counts(cur):
@@ -1285,12 +1299,7 @@ upgrade_check_database() {
     fi
     UPGRADE_MODULES=$(sed -n 's/^MODULES //p' <<< "$report")
     [[ $UPGRADE_MODULES =~ ^perodua_[a-z0-9_]+(,perodua_[a-z0-9_]+)*$ ]] || fail "Unexpected module list from the database check: $UPGRADE_MODULES"
-    local kind name count lines=()
-    while read -r kind name count; do
-        [[ $count =~ ^[0-9]+$ ]] || fail "Unexpected retired-data count from the database check: $kind $name $count"
-        ((count == 0)) || lines+=("$(printf '  %-11s %s: %s' "$kind" "$name" "$count")")
-        RETIRED_TOTAL=$((RETIRED_TOTAL + count))
-    done < <(sed -n 's/^RETIRED //p' <<< "$report")
+    retired_counts "$report"
     printf 'Database %s has the modules of %s (fingerprint %s). %s has other modules: this upgrade runs a module upgrade (-u) of %s modules. %s attachments.\n' \
         "$DB_NAME" "$OLD_RELEASE" "$MODULE_UPGRADE_FROM" "$RELEASE" "$(tr ',' '\n' <<< "$UPGRADE_MODULES" | wc -l | tr -d ' ')" "${state#MODULE_UPGRADE }"
     if ((RETIRED_TOTAL == 0)); then
@@ -1298,10 +1307,49 @@ upgrade_check_database() {
         return
     fi
     printf 'Retired data that the module upgrade deletes (the modules that owned it are gone from %s):\n' "$RELEASE"
-    printf '%s\n' "${lines[@]}"
+    printf '%s\n' "${RETIRED_LINES[@]}"
     ((DROP_RETIRED)) \
         || fail "The module upgrade deletes the retired data above. Once its owner agreed, run --upgrade again with --drop-retired-data: the rows are saved as CSV in the backup folder (retired-data.tar.gz) before the upgrade"
     printf 'With --drop-retired-data: the rows above are saved as CSV in the backup folder, then deleted by the upgrade.\n'
+}
+retired_counts() {  # the RETIRED lines of an upgrade-check report: their total, and the lines that are not 0
+    local kind name count
+    RETIRED_TOTAL=0 RETIRED_LINES=()
+    while read -r kind name count; do
+        [[ $count =~ ^[0-9]+$ ]] || fail "Unexpected retired-data count from the database check: $kind $name $count"
+        ((count == 0)) || RETIRED_LINES+=("$(printf '  %-11s %s: %s' "$kind" "$name" "$count")")
+        RETIRED_TOTAL=$((RETIRED_TOTAL + count))
+    done < <(sed -n 's/^RETIRED //p' <<< "$1")
+}
+upgrade_recheck_database() {
+    # The first check ran while the old App ran, and users could write until
+    # the App stopped for the backup. Now nothing writes: check again, so that
+    # no retired row is deleted without --drop-retired-data and its CSV copy.
+    # A refusal here starts the old App again (state backed-up).
+    local report state modules
+    printf 'Checking database %s again, now that the App is stopped...\n' "$DB_NAME"
+    if ! report=$(staged run --rm --no-deps -T odoo python3 /opt/deploy/preflight.py upgrade-check "$MODULE_UPGRADE_FROM" \
+            </dev/null 2> "$TEMP_DIR/check.log"); then
+        cat "$TEMP_DIR/check.log" >&2
+        if grep -q 'module upgrade refused' "$TEMP_DIR/check.log"; then
+            fail "Database $DB_NAME changed while the App ran: the module upgrade (-u) is now refused for the reasons above"
+        fi
+        fail 'The second database check failed (above)'
+    fi
+    state=${report##*$'\n'}
+    [[ $state == MODULE_UPGRADE\ * ]] || fail "The second check of database $DB_NAME reports $state, not the module upgrade of the first check"
+    modules=$(sed -n 's/^MODULES //p' <<< "$report")
+    [[ $modules == "$UPGRADE_MODULES" ]] \
+        || fail "The modules to upgrade changed while the App ran: $UPGRADE_MODULES at the first check, $modules now. Run --upgrade again"
+    retired_counts "$report"
+    if ((RETIRED_TOTAL == 0)); then
+        printf 'Database %s: the same modules to upgrade, and still no retired data.\n' "$DB_NAME"
+        return
+    fi
+    printf 'Retired data that the module upgrade deletes, counted with the App stopped:\n'
+    printf '%s\n' "${RETIRED_LINES[@]}"
+    ((DROP_RETIRED)) \
+        || fail "Users wrote data of the retired modules after the first check, while the App ran (above). The module upgrade deletes it. Once its owner agreed, run --upgrade again with --drop-retired-data: the rows are saved as CSV in the backup folder (retired-data.tar.gz) before the upgrade"
 }
 module_upgrade_guard() {  # before anything changes: the modules -u touches never need perodua_demo_client
     printf 'Checking that the module upgrade keeps %s out of database %s...\n' "$EXCLUDED_MODULE" "$DB_NAME"
@@ -1322,8 +1370,10 @@ module_upgrade_confirm() {
     cat <<PLAN
 The module upgrade of database $DB_NAME on $DB_HOST, from $OLD_RELEASE to $RELEASE:
   1. Stop the App, then save the database and the attachments (as every --upgrade does).
-  2. Remove the containers of $OLD_RELEASE. From then on $OLD_RELEASE cannot run on
-     this database, and the only way back is to restore the backup (restore.txt).
+     Check the database again, now that nothing writes to it.
+  2. Mark the database for the upgrade and remove the containers of $OLD_RELEASE.
+     From then on $OLD_RELEASE cannot run on this database, and the only way
+     back is to restore the backup (restore.txt).
   3. Upgrade the modules once (-u, no -i, cron jobs off). Mail the upgrade
      queues is held; release it after review with --release-queued-mail.
   4. Check the result, put the cron flags back, deploy $RELEASE.
@@ -1350,11 +1400,22 @@ export_retired_data() {  # the owner agreed (--drop-retired-data): keep a copy n
 }
 module_upgrade() {  # after the backup: the mark, -u, and the check of its result
     local state status=0
+    # The containers of the old release are stopped. From the mark on they
+    # must never start again, so they go right after it. mark-upgrading
+    # checks the database once more and refuses with exit 3 before it writes
+    # anything: then the old App starts again (backed-up). Any other failure
+    # may come after the mark was written, so it counts as marked.
     UPGRADE_STATE=marked
+    state=$(staged run --rm --no-deps -T odoo python3 /opt/deploy/preflight.py mark-upgrading \
+        "$MODULE_UPGRADE_FROM" "$OLD_RELEASE" "$RELEASE" </dev/null) || status=$?
+    if ((status == 3)); then
+        UPGRADE_STATE=backed-up
+        fail 'The mark of the module upgrade was refused for the reasons above. Nothing was written to the database'
+    fi
     printf 'Removing the containers of %s (its compose.yml and images stay): from here on it does not start again on this database.\n' "$OLD_RELEASE"
     current rm --stop --force odoo web
-    state=$(staged run --rm --no-deps -T odoo python3 /opt/deploy/preflight.py mark-upgrading \
-        "$MODULE_UPGRADE_FROM" "$OLD_RELEASE" "$RELEASE" </dev/null) || fail 'Could not mark the database for the module upgrade (above)'
+    OLD_REMOVED=1
+    ((status == 0)) || fail 'Could not mark the database for the module upgrade (above)'
     [[ $state == MARKED ]] || fail "Unexpected answer to the mark of the module upgrade: $state"
     UPGRADE_CONTAINER=$PROJECT_NAME-module-upgrade
     docker rm -f "$UPGRADE_CONTAINER" >/dev/null 2>&1 || true
@@ -1481,9 +1542,10 @@ HINT
     ((${MODULE_UPGRADE:-0})) || return 0
     cat <<HINT
 
-This upgrade runs a module upgrade (-u). From the removal of the containers of
-$OLD_RELEASE on, $OLD_RELEASE cannot run on database $DB_NAME: steps 1 to 5
-are then the only way back, and each of them is needed. Point of no return:
+This upgrade runs a module upgrade (-u). From the mark of this upgrade on (the
+containers of $OLD_RELEASE are removed right after it),
+$OLD_RELEASE cannot run on database $DB_NAME: steps 1 to 5 are then the only
+way back, and each of them is needed. Point of no return:
 once users write data with $RELEASE, these steps lose that data; after that
 point, fix forward instead. Also in this folder: module-upgrade.log (the log
 of -u), uat-guard.json (the check of the modules) and, when there was retired
@@ -1506,6 +1568,7 @@ if ((UPGRADE)); then
         fi
         upgrade_backup
         if ((MODULE_UPGRADE)); then
+            upgrade_recheck_database  # RETIRED_TOTAL: the count with the App stopped
             ((RETIRED_TOTAL == 0)) || export_retired_data
             cp -p -- "$TEMP_DIR/uat-guard.json" "$BACKUP_DIR/uat-guard.json"
             module_upgrade

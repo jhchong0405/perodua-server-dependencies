@@ -354,6 +354,35 @@ class PreflightModuleUpgradeTests(unittest.TestCase):
         self.assertIn('marked by a module upgrade that did not finish', self.run_preflight('check', ok=False))
         self.assertIn('database contains pending module changes', self.run_preflight('check', script='old', ok=False))
 
+    def test_a_refused_mark_exits_3_and_writes_nothing(self):
+        # What changed while the old App ran: the refusal exits 3 before any
+        # write, so deploy-app.sh starts the old App again. Other failures
+        # exit 1 (they may come after the commit).
+        self.param('perodua_demo.seed_mode', 'full')
+        result = subprocess.run([sys.executable, str(self.scripts['new']), 'mark-upgrading', self.from_fp,
+                                 'client-stable-uiux-v1.0.6', 'client-stable-uiux-v1.2.0'],
+                                env=self.env, capture_output=True, timeout=60)
+        self.assertEqual(result.returncode, 3, result.stderr.decode())
+        self.assertIn('Database preflight: module upgrade refused: perodua_demo.seed_mode is full, not none',
+                      result.stderr.decode())
+        self.assertEqual(result.stdout, b'')
+        params = self.params()
+        self.assertEqual(params['perodua.image_modhash'], self.from_fp)
+        self.assertNotIn('perodua.kit_upgrade', params)
+        self.assertEqual(self.run_preflight('check', script='old'), 'READY 1')  # the old release still runs on it
+        # upgrade-check keeps exit 1 for the same refusal
+        result = subprocess.run([sys.executable, str(self.scripts['new']), 'upgrade-check', self.from_fp],
+                                env=self.env, capture_output=True, timeout=60)
+        self.assertEqual(result.returncode, 1, result.stderr.decode())
+        # a failure that is not a refusal: exit 1
+        self.param('perodua_demo.seed_mode', 'none')
+        self.param('perodua.image_modhash', self.new_fp)
+        result = subprocess.run([sys.executable, str(self.scripts['new']), 'mark-upgrading', self.from_fp,
+                                 'client-stable-uiux-v1.0.6', 'client-stable-uiux-v1.2.0'],
+                                env=self.env, capture_output=True, timeout=60)
+        self.assertEqual(result.returncode, 1, result.stderr.decode())
+        self.assertIn('mark-upgrading does not apply', result.stderr.decode())
+
     def test_mark_needs_the_old_modules(self):
         self.param('perodua.image_modhash', self.new_fp)
         self.assertIn('mark-upgrading does not apply', self.run_preflight(

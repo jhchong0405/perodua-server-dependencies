@@ -434,10 +434,14 @@ check lists it), add `--drop-retired-data` after the owner agreed: the rows are
 saved as CSV in the backup folder (`retired-data.tar.gz`) before the upgrade
 deletes them.
 
-After the backup, the upgrade removes the containers of the old release and
-runs the module upgrade once. **From that point the old release cannot run on
-the database.** If the upgrade stops, it does not start the old App again: the
-only way back is `restore.txt` in the backup folder, all of its steps.
+After the backup, with the App stopped, the upgrade checks the database
+again: users could write while the first checks ran. Retired data written in
+that time also needs `--drop-retired-data`. If this check refuses, the old App
+starts again and the backup stays. Then the upgrade marks the database, removes
+the containers of the old release and runs the module upgrade once. **From the
+mark on, the old release cannot run on the database.** If the upgrade stops
+after the mark, it does not start the old App again: the only way back is
+`restore.txt` in the backup folder, all of its steps.
 
 **Point of no return.** Go back with `restore.txt` only before users write data
 with the new release. All data written after the backup is lost by the

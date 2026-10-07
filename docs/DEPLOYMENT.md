@@ -723,15 +723,19 @@ upgrade goes on as in the chapter above. `deploy-app.sh` pins this:
 | `MODULE_UPGRADE_FROM` | `3b62a97697d2974ef37328de7f3d034d`: the module fingerprint of v1.0.3 to v1.0.8. The only fingerprint a module upgrade starts from. |
 | `OLD_RELEASES_ACCEPTED` | `client-stable-uiux-v1.0.5` to `client-stable-uiux-v1.0.8`: the releases the directory may run. |
 
-**Point of no return.** After the backup, the upgrade removes the containers of
-the old release and marks the database. From then on the old release cannot
+**Point of no return.** After the backup, the upgrade marks the database and
+removes the containers of the old release. From then on the old release cannot
 run on it, and the only way back is to restore the backup (`restore.txt`, all
 of its steps). Do that only before users write data with the new release: the
 restore loses all data written after the backup. After that point, fix forward.
 
 **What it requires.** Each check below stops the upgrade before the App stops,
-and nothing changes. The database check (`preflight.py upgrade-check`) of the
-new image lists every problem it finds:
+and nothing changes. The App runs during these checks, so users can still
+write. For this reason the database checks run again after the backup, with
+the App stopped: `upgrade-check` (step 5) and `mark-upgrading` (step 6). If
+one of them refuses, nothing was written to the database, the old App starts
+again and the backup stays. The database check (`preflight.py
+upgrade-check`) of the new image lists every problem it finds:
 
 | Check | Refused when |
 | --- | --- |
@@ -744,7 +748,7 @@ new image lists every problem it finds:
 | The host table | `perodua_client_stable.hosts` is not a host table, or names workspace codes other than `rp`, `sp` and `cp`. |
 | No sample data | Neither `perodua_demo.seed_mode` nor a `MODULE.sample_data` parameter is set; `perodua_demo.seed_mode` is not `none`; a `MODULE.sample_data` is not `none`; or `perodua_demo.seeded` is set. |
 | Reference codes | The XML ID of a shipped holiday type, order cycle or customer category still exists, its record was deleted, and another record has its code. The upgrade would create the record again and stop on the unique code. (A user's record with the code and no XML ID is adopted by the new release.) |
-| Retired data | The retired modules left data (below), and `--drop-retired-data` is not given. |
+| Retired data | The retired modules left data (below), and `--drop-retired-data` is not given. The second count, with the App stopped, also finds the data that users wrote after the first check. |
 | The modules of the upgrade | `uat_guard.py guard`, with the modules that `-u` upgrades, finds that one of them needs `perodua_demo_client`. |
 | The confirmation | You do not type the database name, or `--confirm` names another one. With `--non-interactive`, `--confirm DATABASE` is required. |
 
@@ -767,7 +771,8 @@ check counts it and prints the counts that are not 0:
 - the attachments of the retired models.
 
 When a count is not 0, get the owner's agreement, then run `--upgrade` again
-with `--drop-retired-data`. After the backup, the rows are saved as CSV in
+with `--drop-retired-data`. After the backup, the data is counted again with
+the App stopped, and the rows are saved as CSV in
 `BACKUP/retired-data.tar.gz`: one file per table, one per column (the record
 `id` and its value, so the pairs of picking and route are kept), and
 `attachments.csv` (their files are in `filestore.tar.gz`).
@@ -781,16 +786,25 @@ with `--drop-retired-data`. After the backup, the rows are saved as CSV in
    database name (or give `--confirm`).
 4. Check the room for the backup, then stop the App.
 5. Back up into `BACKUP` (as above). `restore.txt` also says that this is a
-   module upgrade. With `--drop-retired-data`, save `retired-data.tar.gz`.
-   If anything fails up to here, the old App starts again, as above.
-6. **Remove the containers of the old release** (`docker compose rm --stop
+   module upgrade. Then `upgrade-check` runs again: until the App stopped,
+   users could write. It stops the upgrade when it refuses, when the modules
+   to upgrade changed, or when it counts retired data and `--drop-retired-data`
+   is not given. With `--drop-retired-data`, save `retired-data.tar.gz` with
+   the rows of this second count. If anything fails up to here, the old App
+   starts again, as above, and the backup stays.
+6. `mark-upgrading`: check the database once more (the problems of
+   `upgrade-check`). A refusal exits with code 3 and writes nothing: the old
+   App starts again, and the backup stays. Then save the cron flags, the last
+   `mail_mail` id and the modules in `perodua.kit_upgrade`, and set
+   `perodua.image_modhash` to `upgrading:FINGERPRINT`. The database check of
+   every release refuses this value: `service.sh start` of the old release
+   (v1.0.5 to v1.0.8) stops with "the database check failed".
+7. **Remove the containers of the old release** (`docker compose rm --stop
    --force odoo web` with the directory's own `compose.yml`; the file and the
-   images stay). Its `restart: unless-stopped` can no longer start it.
-7. `mark-upgrading`: save the cron flags, the last `mail_mail` id and the
-   modules in `perodua.kit_upgrade`, and set `perodua.image_modhash` to
-   `upgrading:FINGERPRINT`. The database check of every release refuses this
-   value: `service.sh start` of the old release (v1.0.5 to v1.0.8) stops with
-   "the database check failed".
+   images stay). Its `restart: unless-stopped` can no longer start it. A
+   failure of step 6 that is not its refusal also removes them: the mark may
+   be written before such a failure (for example, a lost connection after the
+   commit).
 8. One run of Odoo in a one-off container of the new image (named
    `PROJECT-module-upgrade`), through `bash -c` so that the image's entrypoint
    starts no initialization and the password stays off the command line:
@@ -834,8 +848,9 @@ with `--drop-retired-data`. After the backup, the rows are saved as CSV in
 | Failed step | State of the server | What to do |
 | --- | --- | --- |
 | 1 to 3 | Nothing changed. | Solve the cause and run `--upgrade` again. |
-| 4 or 5 | As in the chapter above: the old App starts again. | As above. |
-| 6 to 9, also a timeout or a lost SSH session (SIGHUP) | The old containers are gone, and the old App is **not** started again. The one-off container of `-u` is stopped and removed. The database is marked (`upgrading:`): partly upgraded after a failure in 8, upgraded but not right after a failure in 9. The message prints `restore.txt`. | Follow `restore.txt`, all of its steps: the old release then runs with the data of the backup. Solve the cause and run `--upgrade` again. A rerun of `--upgrade` before the restore stops at step 2 and says so. |
+| 4 or 5, also a refusal of the second `upgrade-check` | As in the chapter above: the old App starts again. The backup stays. | Solve the cause (for retired data: get the owner's agreement and add `--drop-retired-data`), then run `--upgrade` again. |
+| 6, a refusal (exit 3) | Nothing was written to the database. The old App starts again, and the backup stays. | Solve the cause and run `--upgrade` again. |
+| 6 (another failure) to 9, also a timeout or a lost SSH session (SIGHUP) | The old containers are gone, and the old App is **not** started again. The one-off container of `-u` is stopped and removed. The database is marked (`upgrading:`), or may be marked after a failure in 6: partly upgraded after a failure in 8, upgraded but not right after a failure in 9. The message prints `restore.txt`. | Follow `restore.txt`, all of its steps: the old release then runs with the data of the backup. Solve the cause and run `--upgrade` again. A rerun of `--upgrade` before the restore stops at step 2 and says so. |
 | 10 | The directory names the new release; the database is upgraded and checked (`UPGRADE_PENDING`). | To finish: solve the cause, then run `sudo bash deploy-app.sh --dir DIR` from the new `scripts` folder, without `--upgrade`. It runs no module upgrade again. To go back: `restore.txt`, before the point of no return. |
 
 If a run stops between the end of step 9 and the switch, a rerun of

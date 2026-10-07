@@ -91,13 +91,21 @@ def module_db(cmd):
     if state == 'upgrading' and mode != 'verify-upgrade':
         reply(code=1, err='Database preflight: database is marked by a module upgrade that did not finish (perodua.image_modhash upgrading:fixture): no release can run on it.')
     if mode == 'upgrade-check':
-        if os.environ.get('FAKE_REFUSE'):
-            reply(code=1, err='\n'.join('Database preflight: module upgrade refused: ' + r for r in os.environ['FAKE_REFUSE'].split('|')))
+        # The second check of a run (with the App stopped) answers from the
+        # FAKE_*_AGAIN values when they are set: what users changed in between.
+        with open(os.environ['FAKE_DOCKER_LOG']) as f:
+            second = sum('upgrade-check' in json.loads(line)['args'] for line in f) > 1
+        def value(name, default=''):
+            again = os.environ.get('FAKE_' + name + '_AGAIN') if second else None
+            return again if again is not None else os.environ.get('FAKE_' + name, default)
+        if value('REFUSE'):
+            reply(code=1, err='\n'.join('Database preflight: module upgrade refused: ' + r for r in value('REFUSE').split('|')))
         if state == 'from':
             if os.environ.get('FAKE_OTHER_FINGERPRINT'):
                 reply(code=1, err='Database preflight: database module fingerprint does not match this release, and is not the fingerprint this release upgrades modules from')
-            retired = os.environ.get('FAKE_RETIRED', 'table perodua_transporter_rate 0|column stock_picking.perodua_dispatch_state 0')
-            reply(''.join('RETIRED ' + r + '\n' for r in retired.split('|')) + 'MODULES perodua_client_stable,perodua_ui\nMODULE_UPGRADE 3')
+            retired = value('RETIRED', 'table perodua_transporter_rate 0|column stock_picking.perodua_dispatch_state 0')
+            reply(''.join('RETIRED ' + r + '\n' for r in retired.split('|'))
+                  + 'MODULES ' + value('MODULES', 'perodua_client_stable,perodua_ui') + '\nMODULE_UPGRADE 3')
         reply('UPGRADE_PENDING 3' if state == 'upgraded' else 'READY 3')
     if mode == 'check':
         if state == 'upgraded':
@@ -105,8 +113,14 @@ def module_db(cmd):
             reply(code=1, err='Database preflight: the module upgrade of this database to this release is checked but not finished')
         reply('READY 3') if state == 'new' else reply(code=1, err='Database preflight: database module fingerprint does not match this release; upgrades require a separate plan')
     if mode == 'mark-upgrading':
-        if os.environ.get('FAKE_MARK_EXIT'): reply(code=1, err='Database preflight: fixture')
-        db['modhash'] = 'upgrading'; save(); reply('MARKED')
+        # 3: refused before any write; another code: failed before the write;
+        # FAKE_MARK_LOST: the mark is committed, then the answer is lost.
+        code = int(os.environ.get('FAKE_MARK_EXIT', '0'))
+        if code == 3: reply(code=3, err='Database preflight: module upgrade refused: perodua_demo.seed_mode is full, not none')
+        if code: reply(code=code, err='Database preflight: fixture')
+        db['modhash'] = 'upgrading'; save()
+        if os.environ.get('FAKE_MARK_LOST'): reply(code=1, err='psycopg2.OperationalError: server closed the connection unexpectedly')
+        reply('MARKED')
     if mode == 'verify-upgrade':
         if os.environ.get('FAKE_VERIFY_EXIT'): reply(code=1, err='Database preflight: the upgraded database is not right: perodua_ui is to upgrade')
         db['modhash'] = 'upgraded'; save()
