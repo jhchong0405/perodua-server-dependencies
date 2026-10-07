@@ -131,8 +131,9 @@ directory's own, or the staged one of the new release) and the release that
   `--check-config` and a relative `--backup-dir` with `--upgrade`, and
   `--backup-dir` without it. Each time the identity, `compose.yml` and
   `app.env` stay as they were, and the message says that nothing was changed;
-- a module fingerprint that differs is refused after the new image's database
-  check, with "a module upgrade needs its own plan", and so is a database that
+- a module fingerprint that differs (and is not the one a module upgrade
+  starts from) is refused after the new image's database check
+  (`upgrade-check`), with the fingerprint it upgrades from, and so is a database that
   is not `READY` or cannot be checked: the App is not stopped and no backup
   folder is made;
 - a plain run in a directory of another release points to `--upgrade`;
@@ -175,6 +176,67 @@ directory's own, or the staged one of the new release) and the release that
   `--upgrade` and refuses the directory before the copies);
 - `--upgrade` from a folder of another release with the same modules moves the
   directory there again, with a second backup.
+
+`test_deploy_app_module_upgrade.py` runs `deploy-app.sh --upgrade` with a module
+upgrade (`-u`) against the same fake Docker, in a directory of v1.0.6. The fake
+keeps the database's module fingerprint in a file (`from`, `upgrading`,
+`upgraded`, `new`) and answers each preflight mode as the real one does; the
+directory's `preflight.py` is the old release's until the switch, and accepts
+only `from`. It checks:
+- the order: the pulls, `upgrade-check`, `uat_guard.py guard` and `demo-flag`,
+  the backup, the removal of the old containers (`rm --stop --force odoo web`,
+  the directory's own compose file), `mark-upgrading`, `docker rm -f` of the
+  one-off container, one `-u` run, `verify-upgrade`, then the switch and the
+  deployment with `check --accept-pending` and `stamp-upgrade` at the end;
+- the `-u` run: `bash -c`, `--name PROJECT-module-upgrade`, the modules and the
+  demo flag as `-e` values, `--max-cron-threads=0`, `--stop-after-init`, the
+  migration log handler, no `-i`, the new compose file, and its log in the
+  backup folder; no argument holds the password;
+- the cron and mail lines of `verify-upgrade` come before `up`, and the final
+  message names the held mail and `--release-queued-mail`; `restore.txt` names
+  the module upgrade and the point of no return;
+- each accepted old release (v1.0.5 to v1.0.7, v1.0.8 being this one) goes
+  through; v1.0.4, another fingerprint, every refusal of `upgrade-check`, retired
+  data without `--drop-retired-data`, a refusal of the guard and a missing or
+  wrong confirmation stop before the App stops, and nothing changes;
+  `--confirm`, `--drop-retired-data` and `--release-queued-mail` are refused
+  where they do not apply;
+- with `--drop-retired-data`, `retired-export` runs after the backup and
+  before the containers go, into `retired-data.tar.gz`; a failed export starts
+  the old App again;
+- a failed mark, a failed `-u`, a `-u` past `INIT_TIMEOUT`, a lost SSH session
+  during `-u` (SIGHUP to the process group or to the script only) and a failed
+  `verify-upgrade` never start the old App: no `up`, the one-off container is
+  removed with `docker rm -f`, the `-u` process does not go on, and the message
+  prints `restore.txt` as the only way back. A rerun of `--upgrade` before the
+  restore stops at `upgrade-check` and says that the database carries the mark;
+- a failure after the switch says that the database is upgraded and checked
+  (`UPGRADE_PENDING`) and that a plain rerun finishes it; that rerun deploys
+  with no `-u`; a rerun of `--upgrade` that finds `UPGRADE_PENDING` (a stop
+  between the check and the switch) switches with no backup and no `-u`;
+- `--release-queued-mail` runs only `preflight.py release-mail` with the
+  directory's compose file, and only from the folder of the release the
+  directory runs;
+- as root on Linux: `service.sh` (byte for byte that of v1.0.5 to v1.0.8, pinned
+  by its sha256) refuses `start` and `restart` on a marked database, before and
+  after the switch, without `up` and without its advice to reset.
+
+`test_preflight_module_upgrade.py` runs the exact `preflight.py` that
+`deploy-app.sh` writes, and the one of v1.0.5 to v1.0.8
+(`fixtures/preflight-v1.0.5-v1.0.8.py`, identical in kit 4198af8 to 8867545),
+against a database: SQLite behind a small stand-in for `psycopg2` by default,
+or real PostgreSQL 16 with `PREFLIGHT_TEST_PG='HOST PORT USER PASSWORD DATABASE'`
+(the user owns the database; each test drops and creates its `public` schema).
+It checks the report of `upgrade-check` (retired tables, columns, attachments,
+the modules to upgrade), each of its refusals, what it leaves to the new
+release (an adoptable reference code, the default host table, one
+`sample_data` parameter), that from `mark-upgrading` on no release accepts the
+database (the old preflight included), the cron rule (flags back as before,
+new crons as the upgrade set them, the four mock intake pulls kept off while
+their system resolves to mock, a live one restored), the mail hold of the rows
+`-u` created and their release after `stamp-upgrade` only, the refusals of
+`verify-upgrade` (which still writes the cron flags and the hold), and the CSV
+files of `retired-export`.
 
 `test_uninstall_app.py` runs `uninstall.sh --role app` against a fake Docker CLI.
 The fake keeps containers, volumes and networks in a file, including those of
@@ -534,7 +596,8 @@ bash tests/check-upgrade-backup.sh IMAGE
 ```
 
 It takes the command lines from `deploy-app.sh`, and checks that the dump and
-the archive are the two runs with the no-log compose file. A database shaped as Odoo
+the archive are the two runs with the no-log compose file, and that a module
+upgrade's `retired-export` uses that file too. A database shaped as Odoo
 leaves it (900 tables with foreign keys to `res_users`, inheriting tables, an
 `api` schema with a view, a sequence, a function, the trusted extensions
 `pg_trgm` and `unaccent`) and an attachments volume are saved. It checks that

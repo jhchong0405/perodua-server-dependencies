@@ -600,7 +600,7 @@ changes:
 | The directory is a deployment | It has no `.deployment-identity`, or its first deployment never used its database (`.deployment-unverified`). |
 | The same deployment | `.deployment-identity` differs from the new one in anything but `release=` and `revision=`: the project, the database server (`host=`, `port=`), the database or the user. The message names the values that differ. |
 | Another release | The directory already runs this release: run `deploy-app.sh` without `--upgrade`. |
-| The same Odoo modules | The database check (`preflight.py check`) of the new image does not report `READY`, for example when the module fingerprint differs. |
+| The same Odoo modules | The database check of the new image (`preflight.py upgrade-check`) does not report `READY`, for example when the module fingerprint differs. A release that upgrades the modules of this database reports `MODULE_UPGRADE` instead: see [Module upgrade (-u)](#module-upgrade--u), which adds its own checks. |
 
 The **module fingerprint** is the MD5 of the `__manifest__.py` files of all
 `perodua_*` modules in the image, read in name order. A fresh UAT
@@ -610,8 +610,12 @@ stays the same while no byte of any of these manifests changes and no module
 folder is added or removed. A release that changes only controllers, other
 Python code or the web page has the same fingerprint. A new module version, a
 new data file or a new dependency changes it. Such a release needs a module
-upgrade (`-u`), which `--upgrade` never runs: it stops with "a module upgrade
-needs its own plan" and changes nothing.
+upgrade (`-u`). `--upgrade` runs one only from the fingerprint that
+`MODULE_UPGRADE_FROM` in `deploy-app.sh` names
+(`3b62a97697d2974ef37328de7f3d034d`, the modules of v1.0.3 to v1.0.8); with
+any other fingerprint it stops, says which fingerprint it upgrades from, and
+changes nothing. The steps below are those of an upgrade with the same
+modules; a module upgrade adds its steps between 5 and 6.
 
 **The steps, in order:**
 
@@ -703,6 +707,158 @@ empty, and you can run it again.
 `uninstall.sh --role app` deletes the directory and the backups in it. Its plan
 names them; copy them elsewhere first, or give `--backup-dir` a folder outside
 the directory.
+
+## Module upgrade (-u)
+
+`sudo bash deploy-app.sh --upgrade [--dir PATH] [--backup-dir PATH] [--confirm DATABASE] [--drop-retired-data]`
+
+A release whose Odoo modules differ from those of the database (from v1.2.0)
+upgrades them in the same `--upgrade`: one run of Odoo with `-u`, between the
+backup and the switch. A release with the same modules (v1.0.3 to v1.0.8
+among themselves) never does: its database check reports `READY`, and the
+upgrade goes on as in the chapter above. `deploy-app.sh` pins this:
+
+| Setting | Value |
+| --- | --- |
+| `MODULE_UPGRADE_FROM` | `3b62a97697d2974ef37328de7f3d034d`: the module fingerprint of v1.0.3 to v1.0.8. The only fingerprint a module upgrade starts from. |
+| `OLD_RELEASES_ACCEPTED` | `client-stable-uiux-v1.0.5` to `client-stable-uiux-v1.0.8`: the releases the directory may run. |
+
+**Point of no return.** After the backup, the upgrade removes the containers of
+the old release and marks the database. From then on the old release cannot
+run on it, and the only way back is to restore the backup (`restore.txt`, all
+of its steps). Do that only before users write data with the new release: the
+restore loses all data written after the backup. After that point, fix forward.
+
+**What it requires.** Each check below stops the upgrade before the App stops,
+and nothing changes. The database check (`preflight.py upgrade-check`) of the
+new image lists every problem it finds:
+
+| Check | Refused when |
+| --- | --- |
+| The fingerprint | The database has another fingerprint than `MODULE_UPGRADE_FROM` (and than the new release). |
+| The old release | The directory runs a release that is not in `OLD_RELEASES_ACCEPTED`. Upgrade it to one of them first. |
+| A UAT database | `perodua.uat_init` is not `complete`. A restored database (set up without `--init-db`) is out of scope. |
+| Modules that must not be there | `perodua_demo_client`, `perodua_reporting` or `perodua_e2e` is installed, or `ir_model_data` has rows of `perodua_demo_client`. |
+| Known modules | An installed `perodua_*` module is not in the new release, other than the retired `perodua_hw_sim`, `perodua_supplier_transport_ext` and `perodua_warehouse_ext` (the upgrade uninstalls them) and `perodua_demo_client_ui`. |
+| No version goes down | An installed module has a higher version than the new release has. |
+| The host table | `perodua_client_stable.hosts` is not a host table, or names workspace codes other than `rp`, `sp` and `cp`. |
+| No sample data | Neither `perodua_demo.seed_mode` nor a `MODULE.sample_data` parameter is set; `perodua_demo.seed_mode` is not `none`; a `MODULE.sample_data` is not `none`; or `perodua_demo.seeded` is set. |
+| Reference codes | The XML ID of a shipped holiday type, order cycle or customer category still exists, its record was deleted, and another record has its code. The upgrade would create the record again and stop on the unique code. (A user's record with the code and no XML ID is adopted by the new release.) |
+| Retired data | The retired modules left data (below), and `--drop-retired-data` is not given. |
+| The modules of the upgrade | `uat_guard.py guard`, with the modules that `-u` upgrades, finds that one of them needs `perodua_demo_client`. |
+| The confirmation | You do not type the database name, or `--confirm` names another one. With `--non-interactive`, `--confirm DATABASE` is required. |
+
+**Retired data.** The upgrade deletes the data of the retired modules. The
+check counts it and prints the counts that are not 0:
+
+- the tables `perodua_transporter_rate`, `perodua_transporter_process`,
+  `perodua_supplier_process`, the 5 wizard tables of `perodua_ui`
+  (`perodua_trip_volume_wizard`, `perodua_supplier_delivery_report_wizard`,
+  `perodua_po_invoice_report_wizard`, `perodua_import_receipt_wizard`,
+  `perodua_overflow_move_wizard`), the 4 wizard tables of `perodua_warehouse`
+  (`perodua_warehouse_dispatch_wizard`, `_line`, `perodua_warehouse_putaway_wizard`,
+  `perodua_warehouse_stock_count_wizard`), `perodua_demo_control`,
+  `perodua_outbound_route`, `perodua_outbound_route_stop` and
+  `perodua_driver_checkin`;
+- the columns `stock_location.perodua_is_overflow` (rows with true),
+  `stock_picking.perodua_wcs_pick_instruction_id` (not empty),
+  `stock_picking.perodua_dispatch_state` (not `none`) and
+  `stock_picking.perodua_outbound_route_id` (set);
+- the attachments of the retired models.
+
+When a count is not 0, get the owner's agreement, then run `--upgrade` again
+with `--drop-retired-data`. After the backup, the rows are saved as CSV in
+`BACKUP/retired-data.tar.gz`: one file per table, one per column (the record
+`id` and its value, so the pairs of picking and route are kept), and
+`attachments.csv` (their files are in `filestore.tar.gz`).
+
+**The steps, in order.** Steps 1 to 5 are those of every upgrade (above):
+
+1. Compare the identities. Pull the new images. The App keeps running.
+2. `upgrade-check` (above) prints the modules to upgrade and the retired data.
+3. `uat_guard.py guard` and `demo-flag` of the new image check the modules of
+   the upgrade. The plan is printed, with the point of no return; type the
+   database name (or give `--confirm`).
+4. Check the room for the backup, then stop the App.
+5. Back up into `BACKUP` (as above). `restore.txt` also says that this is a
+   module upgrade. With `--drop-retired-data`, save `retired-data.tar.gz`.
+   If anything fails up to here, the old App starts again, as above.
+6. **Remove the containers of the old release** (`docker compose rm --stop
+   --force odoo web` with the directory's own `compose.yml`; the file and the
+   images stay). Its `restart: unless-stopped` can no longer start it.
+7. `mark-upgrading`: save the cron flags, the last `mail_mail` id and the
+   modules in `perodua.kit_upgrade`, and set `perodua.image_modhash` to
+   `upgrading:FINGERPRINT`. The database check of every release refuses this
+   value: `service.sh start` of the old release (v1.0.5 to v1.0.8) stops with
+   "the database check failed".
+8. One run of Odoo in a one-off container of the new image (named
+   `PROJECT-module-upgrade`), through `bash -c` so that the image's entrypoint
+   starts no initialization and the password stays off the command line:
+   `odoo -c /etc/odoo/odoo.conf -d DB -u MODULES DEMO_FLAG --max-cron-threads=0
+   --stop-after-init --log-handler=odoo.modules.migration:INFO`, with no `-i`.
+   `MODULES` are the installed `perodua_*` modules of the new release; the
+   retired modules are left out, and the new `perodua_ui` uninstalls them in
+   the same run. The log is `BACKUP/module-upgrade.log`. The run has
+   `INIT_TIMEOUT` seconds (default 3600).
+9. `verify-upgrade`, first what keeps the App safe, then the checks:
+   - **cron flags:** each scheduled action gets the flag it had before the
+     upgrade. One that the upgrade created keeps the flag the upgrade gave it.
+     The four mock intake pulls (`perodua_integration.cron_consume_promise_feed`,
+     `perodua_orders_ext.cron_pull_pss_orders`, `cron_pull_psos_orders`,
+     `cron_pull_pcircle_orders`) are never switched on while their system
+     resolves to mock (`perodua_integration.mode.PROMISE`, `.PSS`, `.PSOS`,
+     `.PCircle`, else `perodua_integration.mode`, else mock): such a pull
+     stays off. A pull whose system is `live` gets its flag back;
+   - **mail hold:** every `mail_mail` row that the upgrade created in state
+     `outgoing` goes to state `exception` with the reason "Held by
+     deploy-app.sh --upgrade (module upgrade) ...". Odoo's mail queue does not
+     send it;
+   - **checks:** no module is in a `to ...` state; the retired modules and
+     `perodua_demo_client`, `perodua_reporting` and `perodua_e2e` are not
+     installed; every installed `perodua_*` module has the version of the new
+     release, and every upgraded module is still installed;
+     `perodua_demo.seeded` is not set; the release stamps did not change; no
+     user `agent` was created.
+
+   When the checks pass, `perodua.image_modhash` becomes
+   `upgraded:FINGERPRINT`.
+10. The switch, as above. Then the usual deployment: the database check (with
+    `--accept-pending` it reports `UPGRADE_PENDING`; every other caller, such
+    as `service.sh`, is refused), the attachments check, `report.url` and
+    `PUBLIC_BASE_URL`, `up --force-recreate`, the HTTP check, and
+    `stamp-upgrade`, which stores the new fingerprint: from then on the check
+    reports `READY`.
+
+**When a step fails:**
+
+| Failed step | State of the server | What to do |
+| --- | --- | --- |
+| 1 to 3 | Nothing changed. | Solve the cause and run `--upgrade` again. |
+| 4 or 5 | As in the chapter above: the old App starts again. | As above. |
+| 6 to 9, also a timeout or a lost SSH session (SIGHUP) | The old containers are gone, and the old App is **not** started again. The one-off container of `-u` is stopped and removed. The database is marked (`upgrading:`): partly upgraded after a failure in 8, upgraded but not right after a failure in 9. The message prints `restore.txt`. | Follow `restore.txt`, all of its steps: the old release then runs with the data of the backup. Solve the cause and run `--upgrade` again. A rerun of `--upgrade` before the restore stops at step 2 and says so. |
+| 10 | The directory names the new release; the database is upgraded and checked (`UPGRADE_PENDING`). | To finish: solve the cause, then run `sudo bash deploy-app.sh --dir DIR` from the new `scripts` folder, without `--upgrade`. It runs no module upgrade again. To go back: `restore.txt`, before the point of no return. |
+
+If a run stops between the end of step 9 and the switch, a rerun of
+`--upgrade` finds `UPGRADE_PENDING`: it makes the switch and the deployment
+with no new backup and no module upgrade. The backup of the first run holds
+the data from before.
+
+**The held mail.** After the review (Settings > Technical > Emails, state
+Exception), send it:
+
+```bash
+sudo bash deploy-app.sh --release-queued-mail --dir DIR    # from the new scripts folder
+```
+
+It sets the held rows back to `outgoing`, only those that the upgrade held and
+that are still held (a row deleted or changed since stays as it is), and only
+after the deployment finished (`READY`). It prints the count. It does not pull,
+stop or start anything.
+
+**Not done by the kit.** Odoo modules other than `perodua_*` are not part of
+the fingerprint and are not upgraded. A release whose `uat_guard.py` has no
+review of its images (`REVIEWED_REFERENCES`) for a changed file stops at step
+3; its review is added together with the pin of its images.
 
 ## Uninstall (`uninstall.sh`)
 

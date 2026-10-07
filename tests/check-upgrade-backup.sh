@@ -109,6 +109,8 @@ assert len(runs) == 3 and 'pg_database_size' in scripts[0] and 'pg_dump' in scri
 # the dump and the archive go to standard output: no container log may keep a copy
 assert [bool(no_log) for no_log, _ in runs] == [False, True, True], runs
 assert "printf 'services:\\n  odoo:\\n    logging:\\n      driver: none\\n' > \"$TEMP_DIR/no-log.yml\"" in text
+# a module upgrade's export of the retired data streams to the backup folder as well
+assert 'staged --file "$TEMP_DIR/no-log.yml" run --rm --no-deps -T odoo python3 /opt/deploy/preflight.py retired-export' in text
 pathlib.Path(sys.argv[2], 'size.sh').write_text(scripts[0])
 pathlib.Path(sys.argv[2], 'dump.sh').write_text(scripts[1])
 pathlib.Path(sys.argv[2], 'archive.sh').write_text(scripts[2])

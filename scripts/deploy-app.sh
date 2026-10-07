@@ -31,12 +31,25 @@ EXCLUDED_MODULE=perodua_demo_client
 # A restored release database (or one seeded by earlier versions of this
 # script) is still held to exactly the module set it was always checked for.
 RESTORED_MODULES=perodua_client_stable,perodua_demo_client,perodua_gateway,perodua_forecast_workbook,perodua_supplier_execution,perodua_uiux_api
+# --upgrade to a release whose Odoo modules differ from the database's runs a
+# module upgrade (-u) only on a database stamped with this module fingerprint
+# (v1.0.3 to v1.0.8 have the same modules), and only in a deployment directory
+# of one of these releases. Any other fingerprint is refused before anything
+# changes. While the pinned image has this fingerprint itself, every --upgrade
+# keeps the modules and runs no -u.
+MODULE_UPGRADE_FROM=3b62a97697d2974ef37328de7f3d034d
+OLD_RELEASES_ACCEPTED=client-stable-uiux-v1.0.5,client-stable-uiux-v1.0.6,client-stable-uiux-v1.0.7,client-stable-uiux-v1.0.8
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 DEPLOY_DIR=/opt/perodua-app
 CONFIG='' NON_INTERACTIVE=0 INIT_DB=0 CHECK_ONLY=0 TEMP_DIR='' AUTH_DIR='' STARTED=0
 # --upgrade: the release the directory runs before, the backup of its data,
 # whether its App was running, and how far the upgrade got (see cleanup).
 UPGRADE=0 BACKUP_BASE='' BACKUP_DIR='' OLD_RELEASE='' OLD_REVISION='' WAS_RUNNING=0 UPGRADE_STATE=''
+# A module upgrade: the modules it upgrades, Odoo's demo-data option, the
+# retired rows it deletes, the one-off container and its process, whether a
+# database upgraded earlier only waits for its deployment, and the held mail.
+MODULE_UPGRADE=0 UPGRADE_MODULES='' DEMO_FLAG='' RETIRED_TOTAL=0 DROP_RETIRED=0 CONFIRM=''
+UPGRADE_CONTAINER='' UPGRADE_PID='' PENDING_ONLY=0 PENDING_STAMP=0 HELD_MAIL='' RELEASE_MAIL=0 DB_MARKED=0
 DB_HOST='' DB_PORT=5432 DB_NAME=perodua DB_USER=odoo DB_PASSWORD_FILE=''
 PROJECT_NAME=perodua-client-uiux HTTP_PORT=8110 BIND_IP=0.0.0.0
 STARTUP_TIMEOUT=600 INIT_TIMEOUT=3600
@@ -51,6 +64,8 @@ usage() {
 Usage: bash deploy-app.sh [--config PATH] [--dir PATH] [--non-interactive] [--init-db]
        bash deploy-app.sh [--config PATH] [--dir PATH] --check-config
        bash deploy-app.sh --upgrade [--dir PATH] [--backup-dir PATH] [--non-interactive]
+                          [--confirm DATABASE] [--drop-retired-data]
+       bash deploy-app.sh --release-queued-mail [--dir PATH]
 Deploy the pinned Client Stable UIUX v1.0.8 Odoo + Web images using Docker Compose.
 Requires a reachable external PostgreSQL 16 server; does not install or configure it.
 Default: use an already initialized, matching Client Stable UIUX database.
@@ -71,11 +86,18 @@ database settings and asks for the password again.
 --check-config reads --config, or app.env in --dir, checks every setting the
 way a deployment does and stops before Docker is used; nothing is changed.
 --upgrade moves a deployment of another release to this one and keeps its data.
-The directory must run the same project and database (app.env), and the
-release must have the same Odoo modules: no module upgrade (-u) is run. It
-stops the App, saves the database (pg_dump -Fc) and the attachments in
---dir/backups/ (or --backup-dir), then deploys this release. If anything fails
-before that, the directory and its App stay as they were.
+The directory must run the same project and database (app.env). It stops the
+App, saves the database (pg_dump -Fc) and the attachments in --dir/backups/ (or
+--backup-dir), then deploys this release. If anything fails before that, the
+directory and its App stay as they were. With the same Odoo modules no module
+upgrade (-u) runs. With other modules it runs one only from the modules of
+v1.0.3 to v1.0.8 and a directory of v1.0.5 to v1.0.8: after the backup it
+removes the old App's containers (from then on the backup is the only way
+back), upgrades the modules once, checks the result, holds the mail the
+upgrade queued and puts the cron flags back. It asks to type the database
+name, or takes --confirm DATABASE. --drop-retired-data agrees to delete the
+data of retired modules; it is saved as CSV in the backup folder first.
+--release-queued-mail queues the held mail again, after its review.
 HTTP only: default 0.0.0.0:8110. Odoo ports are private to the Compose network.
 Optional keys, read only from --config or app.env: PUBLIC_ROOT (such as /dev,
 v1.0.4 or later) serves the page under http://HOST:PORT/dev/app/;
@@ -102,10 +124,38 @@ cleanup() {
     [[ -z $AUTH_DIR ]] || rm -rf -- "$AUTH_DIR"
     exit "$status"
 }
+stop_module_upgrade() {  # the one-off -u container must not run on after this script
+    if [[ -n $UPGRADE_PID ]]; then
+        kill "$UPGRADE_PID" 2>/dev/null
+        wait "$UPGRADE_PID" 2>/dev/null
+        UPGRADE_PID=''
+    fi
+    [[ -z $UPGRADE_CONTAINER ]] || docker rm -f "$UPGRADE_CONTAINER" >/dev/null 2>&1
+}
 upgrade_stopped() {  # what a failed --upgrade leaves, and the way back
+    local restore="$BACKUP_DIR/restore.txt"
+    [[ -n $BACKUP_DIR ]] || restore="restore.txt in the backup folder of the earlier --upgrade (in $DEPLOY_DIR/backups or its --backup-dir)"
+
     case $UPGRADE_STATE in
         '')
-            printf 'Nothing was changed: %s still runs %s.\n' "$DEPLOY_DIR" "$OLD_RELEASE" >&2 ;;
+            if ((DB_MARKED)); then
+                printf 'Nothing was changed by this run. The database carries the mark of an earlier module upgrade that stopped, so %s cannot run on it: restore the backup of that upgrade (restore.txt in its backup folder, in %s/backups or its --backup-dir).\n' "$OLD_RELEASE" "$DEPLOY_DIR" >&2
+            else
+                printf 'Nothing was changed: %s still runs %s.\n' "$DEPLOY_DIR" "$OLD_RELEASE" >&2
+            fi ;;
+        marked|migrating|migrated)
+            # After the mark the old release cannot run on the database, and
+            # its containers are gone: the backup is the only way back.
+            stop_module_upgrade
+            printf 'The module upgrade from %s to %s stopped ' "$OLD_RELEASE" "$RELEASE" >&2
+            case $UPGRADE_STATE in
+                marked) printf 'after the backup, before the module upgrade (-u) started. The database holds the data of the backup, and may carry the mark of this upgrade.\n' >&2 ;;
+                migrating) printf 'while the module upgrade (-u) ran. The database is partly upgraded. Log: %s/module-upgrade.log\n' "$BACKUP_DIR" >&2 ;;
+                migrated) printf 'after the module upgrade (-u): the check of its result failed (above). Log: %s/module-upgrade.log\n' "$BACKUP_DIR" >&2 ;;
+            esac
+            printf 'The containers of %s were removed when the upgrade started, and its App is not started again: %s cannot run on this database any more (its database check refuses the mark of this upgrade).\n' "$OLD_RELEASE" "$OLD_RELEASE" >&2
+            printf 'The only way back is the backup: follow %s/restore.txt, all of its steps. Then %s runs again with the data of the backup, and --upgrade can run again once the cause is solved. restore.txt:\n' "$BACKUP_DIR" "$OLD_RELEASE" >&2
+            cat -- "$BACKUP_DIR/restore.txt" >&2 ;;
         stopped|backed-up)
             # An incomplete backup is no use to anyone; a complete one stays.
             if [[ $UPGRADE_STATE == stopped && -n $BACKUP_DIR ]]; then rm -rf -- "$BACKUP_DIR"; BACKUP_DIR=''; fi
@@ -123,6 +173,19 @@ upgrade_stopped() {  # what a failed --upgrade leaves, and the way back
             fi
             [[ -z $BACKUP_DIR ]] || printf 'The backup in %s is complete and kept.\n' "$BACKUP_DIR" >&2 ;;
         switched)
+            if ((MODULE_UPGRADE)); then
+                printf 'The module upgrade from %s to %s stopped after the switch. Now:\n' "$OLD_RELEASE" "$RELEASE" >&2
+                printf '  - %s names %s: its identity, compose.yml and app.env are those of %s.\n' "$DEPLOY_DIR" "$RELEASE" "$RELEASE" >&2
+                printf '  - The modules of database %s are upgraded and checked. Its database check reports UPGRADE_PENDING until a deployment of %s finishes.\n' "$DB_NAME" "$RELEASE" >&2
+                if ((STARTED)); then
+                    printf '  - Its containers were created from the %s images. They may be running, but did not pass the checks above.\n' "$RELEASE" >&2
+                else
+                    printf '  - The App is stopped.\n' >&2
+                fi
+                printf 'To finish the upgrade: solve the problem above, then run sudo bash deploy-app.sh --dir %q from this scripts folder, without --upgrade. It runs no module upgrade again.\n' "$DEPLOY_DIR" >&2
+                printf '%s cannot run on this database. The only way back is the backup: %s. Use it only before users write data with %s (the point of no return): all data written after the backup is lost.\n' "$OLD_RELEASE" "$restore" "$RELEASE" >&2
+                return
+            fi
             printf 'The upgrade from %s to %s stopped after the switch. Now:\n' "$OLD_RELEASE" "$RELEASE" >&2
             printf '  - %s names %s: its identity, compose.yml and app.env are those of %s.\n' "$DEPLOY_DIR" "$RELEASE" "$RELEASE" >&2
             if ((STARTED)); then
@@ -149,18 +212,21 @@ trap 'exit 130' INT TERM
 trap '[[ $BASHPID != "$$" ]] || printf "Deployment failed at line %s.\n" "$LINENO" >&2' ERR
 while (($#)); do
     case $1 in
-        --config|--dir|--backup-dir)
-            (($# >= 2)) || fail "$1 requires a path"
+        --config|--dir|--backup-dir|--confirm)
+            (($# >= 2)) || fail "$1 requires a value"
             case $1 in
                 --config) CONFIG=$2 ;;
                 --dir) DEPLOY_DIR=$2 ;;
                 --backup-dir) BACKUP_BASE=$2 ;;
+                --confirm) CONFIRM=$2; [[ -n $CONFIRM ]] || fail '--confirm requires the database name' ;;
             esac
             shift 2 ;;
         --non-interactive) NON_INTERACTIVE=1; shift ;;
         --init-db) INIT_DB=1; shift ;;
         --check-config) CHECK_ONLY=1; shift ;;
         --upgrade) UPGRADE=1; shift ;;
+        --drop-retired-data) DROP_RETIRED=1; shift ;;
+        --release-queued-mail) RELEASE_MAIL=1; shift ;;
         --help|-h) usage; exit 0 ;;
         *) fail "Unknown argument: $1" ;;
     esac
@@ -177,6 +243,14 @@ if ((UPGRADE)); then
         || fail '--backup-dir must be an absolute directory path, not /'
 else
     [[ -z $BACKUP_BASE ]] || fail '--backup-dir applies only to --upgrade'
+    [[ -z $CONFIRM ]] || fail '--confirm applies only to --upgrade'
+    ((DROP_RETIRED == 0)) || fail '--drop-retired-data applies only to --upgrade'
+fi
+if ((RELEASE_MAIL)); then
+    ((UPGRADE == 0 && INIT_DB == 0 && CHECK_ONLY == 0)) \
+        || fail '--release-queued-mail runs on its own, after an upgrade finished: not with --upgrade, --init-db or --check-config'
+    [[ -f $DEPLOY_DIR/.deployment-identity && ! -L $DEPLOY_DIR/.deployment-identity ]] \
+        || fail "--release-queued-mail needs a deployment, and $DEPLOY_DIR has none (no .deployment-identity)"
 fi
 if [[ -z $CONFIG && -f $DEPLOY_DIR/app.env ]]; then
     CONFIG=$DEPLOY_DIR/app.env
@@ -465,6 +539,19 @@ if [[ -e $DEPLOY_DIR/.deployment-identity ]]; then
 elif [[ -e $DEPLOY_DIR/compose.yml || -e $DEPLOY_DIR/secrets ]] || { [[ -e $DEPLOY_DIR/app.env ]] && ((PREPARED == 0)); }; then
     fail 'Unmanaged deployment files already exist in this directory; use an empty directory'
 fi
+if ((RELEASE_MAIL)); then
+    # The mail a module upgrade held (verify-upgrade), queued again after the
+    # owner reviewed it. Only the rows that upgrade held, and only once the
+    # deployment of this release finished (the database is stamped READY).
+    ! unverified || fail "The first deployment in $DEPLOY_DIR stopped before it used its database: there is no held mail"
+    printf 'Queuing the mail that the module upgrade held in database %s again...\n' "$DB_NAME"
+    released=$(docker compose --project-name "$PROJECT_NAME" --file "$DEPLOY_DIR/compose.yml" \
+        run --rm --no-deps -T odoo python3 /opt/deploy/preflight.py release-mail </dev/null) \
+        || fail 'The held mail was not released, for the reason above. Nothing was changed'
+    [[ $released =~ ^RELEASED\ ([0-9]+)$ ]] || fail "Unexpected answer from the database check: $released"
+    printf '%s held mail(s) are queued again (outgoing): Odoo sends them with its mail queue.\n' "${BASH_REMATCH[1]}"
+    exit 0
+fi
 containers=$(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT_NAME")
 for container in $containers; do
     owner=$(docker inspect --format '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}' "$container")
@@ -569,7 +656,25 @@ cat > "$TEMP_DIR/preflight.py" <<'PY'
 # and are held to RESTORED_MODULES exactly as before.
 # public-urls, on any initialized database: report.url, and with BASE_URL a
 # frozen web.base.url. Prints PUBLIC_URLS_SET.
-import ast, hashlib, os, pathlib, re, sys
+#
+# A module upgrade (deploy-app.sh --upgrade to other modules), in this order:
+#   upgrade-check FROM   check, with the module upgrade's refusals when the
+#                        stored fingerprint is FROM: prints RETIRED lines, the
+#                        MODULES to upgrade, then MODULE_UPGRADE <attachments>
+#   retired-export       the rows the upgrade deletes, as CSV in a tar.gz
+#   mark-upgrading FROM OLD NEW
+#                        saves the cron flags and the last mail id, and sets
+#                        perodua.image_modhash to 'upgrading:FROM'. Neither the
+#                        old release's check nor this one's accepts that.
+#   verify-upgrade       after -u: puts the cron flags back (a mock intake pull
+#                        stays off), holds the mail -u queued, checks the
+#                        result and sets 'upgraded:<fingerprint>'
+#   check --accept-pending
+#                        prints UPGRADE_PENDING <attachments> for that state;
+#                        without the option check refuses it
+#   stamp-upgrade        after the deployment: the fingerprint, then READY
+#   release-mail         queues the held mail again: RELEASED <count>
+import ast, csv, hashlib, io, json, os, pathlib, re, sys, tarfile, time
 import psycopg2
 mode = sys.argv[1]
 init_modules = os.environ['INIT_MODULES'].split(',')
@@ -624,11 +729,302 @@ def image_versions():
         version = str(ast.literal_eval(manifest.read_text()).get('version', '1.0'))
         versions[manifest.parent.name] = version if version.startswith('19.0.') and version != '19.0' else '19.0.' + version
     return versions
+
+# ── Module upgrade ───────────────────────────────────────────────────────────
+UPGRADING, UPGRADED = 'upgrading:', 'upgraded:'
+KIT_PARAM = 'perodua.kit_upgrade'
+HOLD_REASON = 'Held by deploy-app.sh --upgrade (module upgrade): release it with deploy-app.sh --release-queued-mail'
+# Gone from the new release: perodua_ui 1.79.0 uninstalls the first three in
+# the same -u. perodua_demo_ui retires the bridge, which may stay recorded.
+RETIRED_MODULES = ('perodua_hw_sim', 'perodua_supplier_transport_ext', 'perodua_warehouse_ext')
+ALLOWED_ABSENT = ('perodua_demo_client_ui',)
+NEVER_INSTALLED = ('perodua_demo_client', 'perodua_reporting', 'perodua_e2e')
+# The data the upgrade deletes with them (plan WP5, D3): tables, columns with a
+# value other than their default, and the attachments of the retired models.
+RETIRED_TABLES = ('perodua_transporter_rate', 'perodua_transporter_process', 'perodua_supplier_process',
+                  'perodua_trip_volume_wizard', 'perodua_supplier_delivery_report_wizard',
+                  'perodua_po_invoice_report_wizard', 'perodua_import_receipt_wizard',
+                  'perodua_overflow_move_wizard', 'perodua_warehouse_dispatch_wizard_line',
+                  'perodua_warehouse_dispatch_wizard', 'perodua_warehouse_putaway_wizard',
+                  'perodua_warehouse_stock_count_wizard', 'perodua_demo_control',
+                  'perodua_outbound_route_stop', 'perodua_outbound_route', 'perodua_driver_checkin')
+RETIRED_MODELS = tuple(t.replace('_', '.') for t in RETIRED_TABLES) + ('perodua.hw.sim',)
+RETIRED_COLUMNS = (
+    ('stock_location', 'perodua_is_overflow', 'perodua_is_overflow IS TRUE'),
+    ('stock_picking', 'perodua_wcs_pick_instruction_id',
+     "perodua_wcs_pick_instruction_id IS NOT NULL AND perodua_wcs_pick_instruction_id <> ''"),
+    ('stock_picking', 'perodua_dispatch_state',
+     "perodua_dispatch_state IS NOT NULL AND perodua_dispatch_state <> 'none'"),
+    ('stock_picking', 'perodua_outbound_route_id', 'perodua_outbound_route_id IS NOT NULL'),
+)
+# Reference records with a unique code that the upgrade creates again when
+# their XML ID is missing. The new release adopts a user's record with the
+# same code, or keeps the record away; it cannot when the XML ID still exists
+# but its record was deleted, and another record holds the code.
+REFERENCE_RECORDS = (
+    ('perodua_master_data', 'holiday_type_public', 'perodua_holiday_type', 'PUBLIC'),
+    ('perodua_master_data', 'holiday_type_state', 'perodua_holiday_type', 'STATE'),
+    ('perodua_master_data', 'holiday_type_shutdown', 'perodua_holiday_type', 'SHUTDOWN'),
+    ('perodua_master_data', 'holiday_type_company', 'perodua_holiday_type', 'COMPANY'),
+    ('perodua_master_data', 'order_cycle_daily', 'perodua_order_cycle', 'DAILY'),
+    ('perodua_master_data', 'order_cycle_weekly', 'perodua_order_cycle', 'WEEKLY'),
+    ('perodua_master_data', 'order_cycle_bimonthly', 'perodua_order_cycle', 'BIMONTHLY'),
+    ('perodua_master_data', 'order_cycle_monthly', 'perodua_order_cycle', 'MONTHLY'),
+    ('perodua_orders_ext', 'customer_category_service', 'perodua_customer_category', 'CAT-SERVICE'),
+    ('perodua_orders_ext', 'customer_category_body_paint', 'perodua_customer_category', 'CAT-BP'),
+)
+HOST_CODES = ('rp', 'sp', 'cp')
+# The scheduled pulls that read a mock feed while their system resolves to
+# mock (perodua_integration.mode.<SYSTEM>, else perodua_integration.mode, else
+# mock). verify-upgrade never switches one of them on in that case.
+MOCK_INTAKE_CRONS = {
+    'perodua_integration.cron_consume_promise_feed': 'PROMISE',
+    'perodua_orders_ext.cron_pull_pss_orders': 'PSS',
+    'perodua_orders_ext.cron_pull_psos_orders': 'PSOS',
+    'perodua_orders_ext.cron_pull_pcircle_orders': 'PCircle',
+}
+
+def table_exists(cur, table):
+    cur.execute('SELECT to_regclass(%s)', ('public.' + table,))
+    return cur.fetchone()[0] is not None
+def column_exists(cur, table, column):
+    cur.execute("SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public' AND table_name = %s AND column_name = %s",
+                (table, column))
+    return cur.fetchone()[0] > 0
+def version_key(version):
+    return tuple(int(part) for part in re.findall(r'[0-9]+', version or ''))
+def params_like(cur, *patterns):
+    cur.execute('SELECT key, value FROM ir_config_parameter WHERE ' + ' OR '.join(['key LIKE %s'] * len(patterns)), patterns)
+    return dict(cur.fetchall())
+def kit_record(cur):
+    cur.execute('SELECT value FROM ir_config_parameter WHERE key = %s', (KIT_PARAM,))
+    row = cur.fetchone()
+    try:
+        return json.loads(row[0]) if row else None
+    except ValueError:
+        fail(KIT_PARAM + ' is not readable')
+def in_list(column, values):  # "column IN (%s, ...)" and its values; never empty
+    return column + ' IN (' + ', '.join(['%s'] * len(values)) + ')', tuple(values)
+def system_mode(params, system):
+    # perodua.connector.mixin._resolve_mode, from the parameters alone.
+    for key in ('perodua_integration.mode.' + system, 'perodua_integration.mode'):
+        if params.get(key) in ('mock', 'live'):
+            return params[key]
+    return 'mock'
+def retired_counts(cur):
+    counts = []
+    for table in RETIRED_TABLES:
+        if table_exists(cur, table):
+            cur.execute('SELECT count(*) FROM "%s"' % table)
+            counts.append(('table', table, cur.fetchone()[0]))
+    for table, column, condition in RETIRED_COLUMNS:
+        if column_exists(cur, table, column):
+            cur.execute('SELECT count(*) FROM "%s" WHERE %s' % (table, condition))
+            counts.append(('column', table + '.' + column, cur.fetchone()[0]))
+    where, values = in_list('res_model', RETIRED_MODELS)
+    cur.execute('SELECT res_model, count(*) FROM ir_attachment WHERE ' + where + ' GROUP BY res_model ORDER BY res_model', values)
+    counts += [('attachments', model, count) for model, count in cur.fetchall()]
+    return counts
+def upgrade_modules(installed, image):
+    return sorted(name for name in installed if name.startswith('perodua_') and name in image)
+def module_upgrade_problems(cur, modules, installed, uat, excluded_rows):
+    # Every reason the new release's -u must not run on this database.
+    problems = []
+    if uat != 'complete':
+        problems.append('perodua.uat_init is %s, not complete: only a UAT database that deploy-app.sh --init-db set up takes a module upgrade, not a restored one' % (uat or 'not set'))
+    for name in NEVER_INSTALLED:
+        if name in installed:
+            problems.append(name + ' is installed')
+    if excluded_rows:
+        problems.append('%d records of %s are in ir_model_data' % (excluded_rows, NEVER_INSTALLED[0]))
+    image = image_versions()
+    for name in sorted(installed):
+        if not name.startswith('perodua_'):
+            continue
+        if name not in image:
+            if name not in RETIRED_MODULES + ALLOWED_ABSENT:
+                problems.append(name + ' is installed but is not a module of this release')
+        elif version_key(image[name]) < version_key(modules[name][2]):
+            problems.append('%s would go down from version %s to %s' % (name, modules[name][2], image[name]))
+    hosts = params_like(cur, 'perodua_client_stable.hosts').get('perodua_client_stable.hosts')
+    if hosts:
+        try:
+            workspaces = json.loads(hosts)['workspaces']
+            codes = {code for listed in workspaces.values() for code in listed}
+        except (ValueError, KeyError, TypeError, AttributeError):
+            problems.append('perodua_client_stable.hosts is not a host table')
+        else:
+            unknown = sorted(str(code) for code in codes if code not in HOST_CODES)
+            if unknown:
+                problems.append('perodua_client_stable.hosts names the workspace codes %s; this release knows only %s'
+                                % (', '.join(unknown), ', '.join(HOST_CODES)))
+    seed = params_like(cur, 'perodua_demo.seed_mode', 'perodua_demo.seeded', '%.sample_data')
+    samples = {key: value for key, value in seed.items() if key.endswith('.sample_data')}
+    mode_value = seed.get('perodua_demo.seed_mode')
+    if mode_value is None and not samples:
+        problems.append('neither perodua_demo.seed_mode nor a <module>.sample_data parameter is set, so nothing keeps the sample data of the new release out')
+    if mode_value is not None and mode_value != 'none':
+        problems.append('perodua_demo.seed_mode is %s, not none' % mode_value)
+    loaded = sorted(key for key, value in samples.items() if value != 'none')
+    if loaded:
+        problems.append('sample data is on for: ' + ', '.join(loaded))
+    if seed.get('perodua_demo.seeded'):
+        problems.append('perodua_demo.seeded is set: a demonstration database')
+    for module, name, table, code in REFERENCE_RECORDS:
+        if not table_exists(cur, table):
+            continue
+        cur.execute('SELECT res_id FROM ir_model_data WHERE module = %s AND name = %s', (module, name))
+        row = cur.fetchone()
+        if row is None:
+            continue
+        cur.execute('SELECT count(*) FROM "%s" WHERE id = %%s' % table, (row[0],))
+        if cur.fetchone()[0]:
+            continue
+        cur.execute('SELECT id FROM "%s" WHERE code = %%s ORDER BY id' % table, (code,))
+        other = cur.fetchone()
+        if other:
+            problems.append('%s.%s names a deleted record, and record %s of %s has its code %s: the upgrade would create it again and stop on the unique code'
+                            % (module, name, other[0], table, code))
+    return problems
+def refuse(problems):
+    for problem in problems:
+        print('Database preflight: module upgrade refused: ' + problem, file=sys.stderr)
+    sys.exit(1)
+def retired_export(cur):
+    # Each retired table, the rows of each retired column with a value, and the
+    # retired attachments (their files are in filestore.tar.gz), as CSV.
+    buffer = io.BytesIO()
+    def add(archive, name, header, rows):
+        text = io.StringIO()
+        writer = csv.writer(text)
+        writer.writerow(header)
+        writer.writerows(rows)
+        data = text.getvalue().encode()
+        info = tarfile.TarInfo('retired-data/' + name)
+        info.size, info.mtime, info.mode = len(data), int(time.time()), 0o600
+        archive.addfile(info, io.BytesIO(data))
+    with tarfile.open(fileobj=buffer, mode='w:gz') as archive:
+        for table in RETIRED_TABLES:
+            if table_exists(cur, table):
+                cur.execute('SELECT * FROM "%s" ORDER BY id' % table)
+                add(archive, 'tables/' + table + '.csv', [d[0] for d in cur.description], cur.fetchall())
+        for table, column, condition in RETIRED_COLUMNS:
+            if column_exists(cur, table, column):
+                cur.execute('SELECT id, "%s" FROM "%s" WHERE %s ORDER BY id' % (column, table, condition))
+                add(archive, 'columns/' + table + '.' + column + '.csv', ['id', column], cur.fetchall())
+        where, values = in_list('res_model', RETIRED_MODELS)
+        cur.execute('SELECT id, name, res_model, res_field, res_id, store_fname, checksum, mimetype, file_size FROM ir_attachment WHERE '
+                    + where + ' ORDER BY id', values)
+        add(archive, 'attachments.csv', [d[0] for d in cur.description], cur.fetchall())
+    sys.stdout.buffer.write(buffer.getvalue())
+def mark_upgrading(cn, cur, installed, fingerprint):
+    # Before -u: the cron flags, the last mail and the modules, then the mark.
+    old_fingerprint, old_release, new_release = sys.argv[2:5]
+    cur.execute('SELECT id, active FROM ir_cron ORDER BY id')
+    crons = {str(cron): bool(active) for cron, active in cur.fetchall()}
+    mail = 0
+    if table_exists(cur, 'mail_mail'):
+        cur.execute('SELECT max(id) FROM mail_mail')
+        mail = cur.fetchone()[0] or 0
+    cur.execute("SELECT count(*) FROM res_users WHERE login = 'agent'")
+    record = {'from_fingerprint': old_fingerprint, 'to_fingerprint': fingerprint, 'from_release': old_release,
+              'to_release': new_release, 'marked_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+              'modules': upgrade_modules(installed, image_versions()), 'crons': crons, 'mail_max_id': mail,
+              'agent_login': cur.fetchone()[0] > 0, 'held_mail': [], 'released_mail': []}
+    put(cur, KIT_PARAM, json.dumps(record, sort_keys=True))
+    put(cur, 'perodua.image_modhash', UPGRADING + old_fingerprint)
+    cn.commit()
+    print('MARKED')
+    sys.exit(0)
+def verify_upgrade(cn, cur, modules, stored, fingerprint):
+    record = kit_record(cur)
+    if not record or stored.get('perodua.image_modhash') != UPGRADING + record.get('from_fingerprint', ''):
+        fail('the mark of this module upgrade is missing or damaged')
+    if record['to_fingerprint'] != fingerprint:
+        fail('the module upgrade was marked for other modules than this release has')
+    # First what keeps the running App safe, whatever the checks below find.
+    # The cron flags as they were before -u. A cron the upgrade created keeps
+    # its flag. A mock intake pull never goes on while its system is mock.
+    params = params_like(cur, 'perodua_integration.mode%')
+    cur.execute("SELECT res_id, module, name FROM ir_model_data WHERE model = 'ir.cron'")
+    xmlids = {res_id: module + '.' + name for res_id, module, name in cur.fetchall()}
+    cur.execute('SELECT id, active FROM ir_cron ORDER BY id')
+    restored, kept_off, new = 0, [], []
+    for cron, active in cur.fetchall():
+        before = record['crons'].get(str(cron))
+        target = bool(active) if before is None else before
+        system = MOCK_INTAKE_CRONS.get(xmlids.get(cron))
+        if system and system_mode(params, system) == 'mock' and target:
+            target = False
+            kept_off.append(xmlids[cron])
+        if before is None:
+            new.append('%s (%s)' % (xmlids.get(cron, 'id %d' % cron), 'on' if target else 'off'))
+        if target != bool(active):
+            cur.execute('UPDATE ir_cron SET active = %s WHERE id = %s', (target, cron))
+            restored += target == before
+    # Every mail the run queued waits for the owner's review.
+    held = []
+    if table_exists(cur, 'mail_mail'):
+        cur.execute("SELECT id FROM mail_mail WHERE id > %s AND state = 'outgoing' ORDER BY id", (record['mail_max_id'],))
+        held = [row[0] for row in cur.fetchall()]
+        if held:
+            where, values = in_list('id', held)
+            cur.execute("UPDATE mail_mail SET state = 'exception', failure_reason = %s WHERE " + where, (HOLD_REASON,) + values)
+    record['held_mail'] = sorted(set(record['held_mail']) | set(held))
+    put(cur, KIT_PARAM, json.dumps(record, sort_keys=True))
+    cn.commit()
+    print('Cron jobs: %d flags put back as before the upgrade.' % restored)
+    for xmlid in kept_off:
+        print('Cron jobs: %s stays off: it reads the mock feed while its system resolves to mock.' % xmlid)
+    if new:
+        print('Cron jobs new with this release: ' + ', '.join(new) + '.')
+    print('Mail: %d messages the upgrade queued are held (state exception), until deploy-app.sh --release-queued-mail.' % len(held))
+    # Then the result itself (plan section 3, go/no-go).
+    installed = {name for name, (state, _, _) in modules.items() if state == 'installed'}
+    problems = ['%s is %s' % (name, state) for name, (state, _, _) in sorted(modules.items())
+                if state in ('to install', 'to upgrade', 'to remove')]
+    problems += [name + ' is still installed' for name in RETIRED_MODULES + NEVER_INSTALLED if name in installed]
+    image = image_versions()
+    for name in sorted(installed):
+        if name.startswith('perodua_') and image.get(name) != modules[name][2]:
+            problems.append('%s is at version %s, the release at %s' % (name, modules[name][2], image.get(name, 'none (not in the release)')))
+    problems += [name + ' is no longer installed' for name in record['modules'] if name not in installed]
+    seed = params_like(cur, 'perodua_demo.seeded', 'perodua.uat_init', 'perodua.runtime_profile')
+    if seed.get('perodua_demo.seeded'):
+        problems.append('perodua_demo.seeded is set: sample data was loaded')
+    if seed.get('perodua.uat_init') != 'complete' or seed.get('perodua.runtime_profile') != PROFILE:
+        problems.append('the release stamps perodua.uat_init and perodua.runtime_profile changed')
+    cur.execute("SELECT count(*) FROM res_users WHERE login = 'agent'")
+    if cur.fetchone()[0] and not record['agent_login']:
+        problems.append('the sample user agent was created')
+    if problems:
+        for problem in problems:
+            print('Database preflight: the upgraded database is not right: ' + problem, file=sys.stderr)
+        sys.exit(1)
+    put(cur, 'perodua.image_modhash', UPGRADED + fingerprint)
+    cn.commit()
+    print('UPGRADE_VERIFIED %d' % len(held))
+    sys.exit(0)
+def release_mail(cn, cur):
+    record = kit_record(cur)
+    held = (record or {}).get('held_mail') or []
+    released = 0
+    if held:
+        where, values = in_list('id', held)
+        cur.execute("UPDATE mail_mail SET state = 'outgoing', failure_reason = NULL WHERE state = 'exception' AND failure_reason = %s AND "
+                    + where, (HOLD_REASON,) + values)
+        released = cur.rowcount
+        record['released_mail'] = sorted(set(record.get('released_mail', [])) | set(held))
+        record['held_mail'] = []
+        put(cur, KIT_PARAM, json.dumps(record, sort_keys=True))
+        cn.commit()
+    print('RELEASED %d' % released)
+    sys.exit(0)
 with connect(db) as cn:
     with cn.cursor() as cur:
         cur.execute("SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind IN ('r','p','v','m','S')")
         if not cur.fetchone()[0]:
-            if mode != 'check': fail('database is still empty; cannot ' + mode)
+            if mode not in ('check', 'upgrade-check'): fail('database is still empty; cannot ' + mode)
             print('EMPTY')
             sys.exit(0)
         cur.execute("SELECT to_regclass('public.ir_module_module'), to_regclass('public.ir_config_parameter')")
@@ -641,6 +1037,16 @@ with connect(db) as cn:
         cur.execute("SELECT key,value FROM ir_config_parameter WHERE key IN ('perodua.runtime_profile','perodua.image_modhash','perodua.uat_init')")
         stored = dict(cur.fetchall())
         uat = stored.get('perodua.uat_init')
+        modhash = stored.get('perodua.image_modhash') or ''
+        if modhash.startswith(UPGRADING):
+            # A module upgrade marked this database: whether -u ran, ran part
+            # of the way or ran fully, only verify-upgrade may continue.
+            if mode == 'verify-upgrade':
+                verify_upgrade(cn, cur, modules, stored, fingerprint)
+            fail('database is marked by a module upgrade that did not finish (perodua.image_modhash ' + modhash + '): no release can run on it.'
+                 ' Restore the backup that deploy-app.sh --upgrade made before it: restore.txt in its backup folder')
+        if mode == 'verify-upgrade':
+            fail('verify-upgrade applies only to a database that a module upgrade marked')
         if any(state in ('to install', 'to upgrade', 'to remove') for state, _, _ in modules.values()):
             # Odoo commits each module as it installs it, so a killed -i
             # (timeout, Ctrl-C, lost session) leaves the rest 'to install'.
@@ -663,6 +1069,9 @@ with connect(db) as cn:
                 put(cur, 'web.base.url.freeze', 'True')
             cn.commit()
             print('PUBLIC_URLS_SET')
+            sys.exit(0)
+        if mode == 'retired-export':
+            retired_export(cur)
             sys.exit(0)
         def excluded_records():
             cur.execute('SELECT count(*) FROM ir_model_data WHERE module=%s', (excluded,))
@@ -694,11 +1103,12 @@ with connect(db) as cn:
             cn.commit()
             print('PENDING')
             sys.exit(0)
+        checking = mode in ('check', 'upgrade-check')
         if uat is None and 'perodua.runtime_profile' not in stored:
             # Initialized but neither marked nor stamped: an --init-db that
             # stopped between installing the modules and recording that, or
             # not a release database at all. Only the former may be finished.
-            if mode != 'check': fail(mode + ' applies only to a fresh initialization that is awaiting its UAT setup')
+            if not checking: fail(mode + ' applies only to a fresh initialization that is awaiting its UAT setup')
             problem = fresh_problem()
             if problem:
                 fail('database is initialized but has no release stamp and is not a complete fresh UAT initialization (' + problem + '). If an earlier --init-db failed part-way, recreate the empty database on the DB server; see docs/DEPLOYMENT.md')
@@ -706,7 +1116,7 @@ with connect(db) as cn:
             sys.exit(0)
         if uat == 'pending':
             fresh_checks()
-            if mode == 'check':
+            if checking:
                 print('SETUP_PENDING')
                 sys.exit(0)
             if mode == 'verify-fresh':
@@ -718,7 +1128,7 @@ with connect(db) as cn:
                 for key in ('perodua.runtime_profile', 'perodua.image_modhash'): put(cur, key, stored[key])
                 put(cur, 'perodua.uat_init', 'complete')
                 uat = 'complete'
-        elif mode != 'check':
+        elif not checking and mode not in ('mark-upgrading', 'stamp-upgrade', 'release-mail'):
             fail(mode + ' applies only to a fresh initialization that is awaiting its UAT setup')
         required = init_modules if uat == 'complete' else restored_modules
         missing = sorted(set(required) - installed)
@@ -727,10 +1137,43 @@ with connect(db) as cn:
             fail(excluded + ' was installed into this UAT database after its initialization')
         if stored.get('perodua.runtime_profile') != PROFILE:
             fail('runtime profile does not match client-stable-uiux; restore the correct database')
-        if stored.get('perodua.image_modhash') != fingerprint:
-            fail('database module fingerprint does not match this release; upgrades require a separate plan')
         cur.execute("SELECT count(*) FROM ir_attachment WHERE store_fname IS NOT NULL")
         attachments = cur.fetchone()[0]
+        modhash = stored.get('perodua.image_modhash') or ''  # a fresh stamp above has just set it
+        upgrade_from = sys.argv[2] if mode in ('upgrade-check', 'mark-upgrading') and len(sys.argv) > 2 else ''
+        if modhash != fingerprint and upgrade_from and modhash == upgrade_from:
+            # The modules of the release the module upgrade starts from. The
+            # mark checks again what upgrade-check checked.
+            problems = module_upgrade_problems(cur, modules, installed, uat, excluded_records())
+            if problems:
+                refuse(problems)
+            if mode == 'mark-upgrading':
+                mark_upgrading(cn, cur, installed, fingerprint)
+            for kind, name, count in retired_counts(cur):
+                print('RETIRED %s %s %d' % (kind, name, count))
+            print('MODULES ' + ','.join(upgrade_modules(installed, image_versions())))
+            print('MODULE_UPGRADE ' + str(attachments))
+            sys.exit(0)
+        if modhash == UPGRADED + fingerprint:
+            # Upgraded and verified; the deployment of this release finishes it.
+            if mode == 'stamp-upgrade':
+                put(cur, 'perodua.image_modhash', fingerprint)
+                cn.commit()
+                modhash = fingerprint
+            elif mode == 'upgrade-check' or (mode == 'check' and '--accept-pending' in sys.argv[2:]):
+                print('UPGRADE_PENDING ' + str(attachments))
+                sys.exit(0)
+            else:
+                fail('the module upgrade of this database to this release is checked but not finished: run deploy-app.sh --dir DIR from the'
+                     ' scripts folder of the new release, without --upgrade (it runs no module upgrade again)')
+        elif mode in ('mark-upgrading', 'stamp-upgrade'):
+            fail(mode + ' does not apply to this database (perodua.image_modhash ' + modhash + ')')
+        if modhash != fingerprint:
+            if mode == 'upgrade-check':
+                fail('database module fingerprint does not match this release, and is not the fingerprint this release upgrades modules from')
+            fail('database module fingerprint does not match this release; upgrades require a separate plan')
+        if mode == 'release-mail':
+            release_mail(cn, cur)
         print('READY ' + str(attachments))
 PY
 cat > "$TEMP_DIR/compose.yml" <<YAML
@@ -801,21 +1244,147 @@ for helper in uat_guard.py uat_admins.py; do install -m 0444 -- "$SCRIPT_DIR/$he
 staged() { docker compose --project-name "$PROJECT_NAME" --file "$TEMP_DIR/compose.yml" "$@"; }
 current() { docker compose --project-name "$PROJECT_NAME" --file "$DEPLOY_DIR/compose.yml" "$@"; }
 upgrade_check_database() {
-    local state
+    local state report
     install -d -m 0700 "$TEMP_DIR/secrets"
     cp -p -- "$TEMP_DIR/db_password" "$TEMP_DIR/secrets/db_password"
     staged config --quiet
     printf 'Checking database %s for %s before anything is changed...\n' "$DB_NAME" "$RELEASE"
-    if ! state=$(staged run --rm --no-deps -T odoo python3 /opt/deploy/preflight.py check </dev/null 2> "$TEMP_DIR/check.log"); then
+    if ! report=$(staged run --rm --no-deps -T odoo python3 /opt/deploy/preflight.py upgrade-check "$MODULE_UPGRADE_FROM" \
+            </dev/null 2> "$TEMP_DIR/check.log"); then
         cat "$TEMP_DIR/check.log" >&2
         if grep -q 'module fingerprint does not match' "$TEMP_DIR/check.log"; then
-            fail "$RELEASE has other Odoo modules than the release that set up database $DB_NAME. --upgrade never upgrades modules (-u); a module upgrade needs its own plan"
+            fail "$RELEASE has other Odoo modules than the release that set up database $DB_NAME. It upgrades modules (-u) only from the modules of v1.0.3 to v1.0.8 (fingerprint $MODULE_UPGRADE_FROM)"
+        fi
+        if grep -q 'marked by a module upgrade that did not finish' "$TEMP_DIR/check.log"; then
+            DB_MARKED=1
+            fail "An earlier module upgrade of database $DB_NAME stopped part-way. Restore its backup first (above)"
+        fi
+        if grep -q 'module upgrade refused' "$TEMP_DIR/check.log"; then
+            fail "$RELEASE has other Odoo modules than database $DB_NAME, and the module upgrade (-u) is refused for the reasons above"
         fi
         fail 'The database check above failed'
     fi
-    [[ $state == READY\ * ]] \
-        || fail "--upgrade needs an initialized database, and the check of $DB_NAME reports $state"
-    printf 'Database %s fits %s: the same Odoo modules, %s attachments.\n' "$DB_NAME" "$RELEASE" "${state#READY }"
+    state=${report##*$'\n'}
+    case $state in
+        READY\ *)
+            printf 'Database %s fits %s: the same Odoo modules, %s attachments.\n' "$DB_NAME" "$RELEASE" "${state#READY }"
+            return ;;
+        MODULE_UPGRADE\ *|UPGRADE_PENDING\ *) ;;
+        *) fail "--upgrade needs an initialized database, and the check of $DB_NAME reports $state" ;;
+    esac
+    [[ ,$OLD_RELEASES_ACCEPTED, == *,"$OLD_RELEASE",* ]] \
+        || fail "$RELEASE upgrades the Odoo modules only of a deployment of ${OLD_RELEASES_ACCEPTED//,/, }, and $DEPLOY_DIR runs $OLD_RELEASE. Upgrade it to one of those first"
+    MODULE_UPGRADE=1
+    if [[ $state == UPGRADE_PENDING\ * ]]; then
+        # An earlier --upgrade upgraded and checked the modules, then stopped
+        # before its switch. Its backup holds the data from before.
+        PENDING_ONLY=1
+        printf 'An earlier --upgrade upgraded the Odoo modules of database %s to %s and checked them, then stopped before its switch. This run makes the switch and deploys %s, without a new backup or module upgrade. The backup of that run (in %s/backups, or its --backup-dir) holds the data from before.\n' \
+            "$DB_NAME" "$RELEASE" "$RELEASE" "$DEPLOY_DIR"
+        return
+    fi
+    UPGRADE_MODULES=$(sed -n 's/^MODULES //p' <<< "$report")
+    [[ $UPGRADE_MODULES =~ ^perodua_[a-z0-9_]+(,perodua_[a-z0-9_]+)*$ ]] || fail "Unexpected module list from the database check: $UPGRADE_MODULES"
+    local kind name count lines=()
+    while read -r kind name count; do
+        [[ $count =~ ^[0-9]+$ ]] || fail "Unexpected retired-data count from the database check: $kind $name $count"
+        ((count == 0)) || lines+=("$(printf '  %-11s %s: %s' "$kind" "$name" "$count")")
+        RETIRED_TOTAL=$((RETIRED_TOTAL + count))
+    done < <(sed -n 's/^RETIRED //p' <<< "$report")
+    printf 'Database %s has the modules of %s (fingerprint %s). %s has other modules: this upgrade runs a module upgrade (-u) of %s modules. %s attachments.\n' \
+        "$DB_NAME" "$OLD_RELEASE" "$MODULE_UPGRADE_FROM" "$RELEASE" "$(tr ',' '\n' <<< "$UPGRADE_MODULES" | wc -l | tr -d ' ')" "${state#MODULE_UPGRADE }"
+    if ((RETIRED_TOTAL == 0)); then
+        printf 'Retired data: none. The tables, columns and attachments of the retired modules hold nothing that the upgrade deletes.\n'
+        return
+    fi
+    printf 'Retired data that the module upgrade deletes (the modules that owned it are gone from %s):\n' "$RELEASE"
+    printf '%s\n' "${lines[@]}"
+    ((DROP_RETIRED)) \
+        || fail "The module upgrade deletes the retired data above. Once its owner agreed, run --upgrade again with --drop-retired-data: the rows are saved as CSV in the backup folder (retired-data.tar.gz) before the upgrade"
+    printf 'With --drop-retired-data: the rows above are saved as CSV in the backup folder, then deleted by the upgrade.\n'
+}
+module_upgrade_guard() {  # before anything changes: the modules -u touches never need perodua_demo_client
+    printf 'Checking that the module upgrade keeps %s out of database %s...\n' "$EXCLUDED_MODULE" "$DB_NAME"
+    if ! staged run --rm --no-deps -T odoo python3 /opt/deploy/uat_guard.py guard --modules "$UPGRADE_MODULES" \
+            --exclude "$EXCLUDED_MODULE" --odoo-config /etc/odoo/odoo.conf --json \
+            </dev/null > "$TEMP_DIR/uat-guard.json" 2> "$TEMP_DIR/uat-guard.log"; then
+        cat "$TEMP_DIR/uat-guard.log" >&2
+        fail "Refused before any change: the modules of $RELEASE cannot keep $EXCLUDED_MODULE out of database $DB_NAME safely (above)"
+    fi
+    cat "$TEMP_DIR/uat-guard.log"
+    DEMO_FLAG=$(staged run --rm --no-deps -T odoo python3 /opt/deploy/uat_guard.py demo-flag --odoo-config /etc/odoo/odoo.conf \
+        </dev/null 2>> "$TEMP_DIR/uat-guard.log") \
+        || fail "Cannot determine how the Odoo of $RELEASE disables demo data (above)"
+    [[ $DEMO_FLAG =~ ^--[a-z-]+=[A-Za-z0-9]+$ ]] || fail 'Unexpected demo-data option reported by the image'
+}
+module_upgrade_confirm() {
+    local answer
+    cat <<PLAN
+The module upgrade of database $DB_NAME on $DB_HOST, from $OLD_RELEASE to $RELEASE:
+  1. Stop the App, then save the database and the attachments (as every --upgrade does).
+  2. Remove the containers of $OLD_RELEASE. From then on $OLD_RELEASE cannot run on
+     this database, and the only way back is to restore the backup (restore.txt).
+  3. Upgrade the modules once (-u, no -i, cron jobs off). Mail the upgrade
+     queues is held; release it after review with --release-queued-mail.
+  4. Check the result, put the cron flags back, deploy $RELEASE.
+Point of no return: once users write data with $RELEASE, going back to the
+backup loses that data. After that point, fix forward.
+PLAN
+    if [[ -n $CONFIRM ]]; then
+        [[ $CONFIRM == "$DB_NAME" ]] || fail "--confirm must be exactly $DB_NAME, the database of $DEPLOY_DIR"
+        return
+    fi
+    if ((NON_INTERACTIVE)) || [[ ! -t 0 ]]; then
+        fail "A module upgrade needs a confirmation: run on a terminal, or pass --confirm $DB_NAME"
+    fi
+    read -r -p "Type $DB_NAME to start the module upgrade: " answer || fail 'Input cancelled'
+    [[ $answer == "$DB_NAME" ]] || fail 'The confirmation did not match'
+}
+export_retired_data() {  # the owner agreed (--drop-retired-data): keep a copy next to the backup
+    printf 'Saving the retired data to %s/retired-data.tar.gz...\n' "$BACKUP_DIR"
+    staged --file "$TEMP_DIR/no-log.yml" run --rm --no-deps -T odoo python3 /opt/deploy/preflight.py retired-export \
+        </dev/null > "$BACKUP_DIR/retired-data.tar.gz" || fail 'The export of the retired data failed (above)'
+    tar -tzf "$BACKUP_DIR/retired-data.tar.gz" > "$TEMP_DIR/retired.list" \
+        || fail "The export $BACKUP_DIR/retired-data.tar.gz cannot be read back"
+    printf 'Saved: %s\n' "$(paste -sd ' ' - < "$TEMP_DIR/retired.list")"
+}
+module_upgrade() {  # after the backup: the mark, -u, and the check of its result
+    local state status=0
+    UPGRADE_STATE=marked
+    printf 'Removing the containers of %s (its compose.yml and images stay): from here on it does not start again on this database.\n' "$OLD_RELEASE"
+    current rm --stop --force odoo web
+    state=$(staged run --rm --no-deps -T odoo python3 /opt/deploy/preflight.py mark-upgrading \
+        "$MODULE_UPGRADE_FROM" "$OLD_RELEASE" "$RELEASE" </dev/null) || fail 'Could not mark the database for the module upgrade (above)'
+    [[ $state == MARKED ]] || fail "Unexpected answer to the mark of the module upgrade: $state"
+    UPGRADE_CONTAINER=$PROJECT_NAME-module-upgrade
+    docker rm -f "$UPGRADE_CONTAINER" >/dev/null 2>&1 || true
+    UPGRADE_STATE=migrating
+    printf 'Upgrading the Odoo modules of %s (-u, at most INIT_TIMEOUT=%s seconds). Log: %s/module-upgrade.log (follow with tail -f in another terminal).\n' \
+        "$DB_NAME" "$INIT_TIMEOUT" "$BACKUP_DIR"
+    # One run of Odoo, through bash -c so that the image's entrypoint runs it
+    # as it is (no init flow) and the password stays off the command line. In
+    # the background, so that a lost session stops it at once (cleanup).
+    # shellcheck disable=SC2016
+    timeout "$INIT_TIMEOUT" docker compose --project-name "$PROJECT_NAME" --file "$TEMP_DIR/compose.yml" \
+        run --rm --no-deps -T --name "$UPGRADE_CONTAINER" \
+        -e PERODUA_UPGRADE_MODULES="$UPGRADE_MODULES" -e PERODUA_DEMO_FLAG="$DEMO_FLAG" odoo bash -c \
+        'PGPASSWORD="$DB_PASSWORD" exec odoo -c /etc/odoo/odoo.conf -d "$DB_NAME" --db_host="$DB_HOST" --db_port="$DB_PORT" --db_user="$DB_USER" -u "$PERODUA_UPGRADE_MODULES" "$PERODUA_DEMO_FLAG" --max-cron-threads=0 --stop-after-init --log-handler=odoo.modules.migration:INFO' \
+        </dev/null > "$BACKUP_DIR/module-upgrade.log" 2>&1 &
+    UPGRADE_PID=$!
+    wait "$UPGRADE_PID" || status=$?
+    UPGRADE_PID=''
+    ((status != 124)) || fail "The module upgrade did not finish within INIT_TIMEOUT=$INIT_TIMEOUT seconds; see $BACKUP_DIR/module-upgrade.log"
+    ((status == 0)) || fail "The module upgrade (-u) failed; see $BACKUP_DIR/module-upgrade.log"
+    UPGRADE_STATE=migrated
+    printf 'Module upgrade finished. Checking the result, putting the cron flags back and holding the queued mail...\n'
+    if ! state=$(staged run --rm --no-deps -T odoo python3 /opt/deploy/preflight.py verify-upgrade </dev/null 2> "$TEMP_DIR/verify.log"); then
+        cat "$TEMP_DIR/verify.log" >&2
+        fail 'The upgraded database failed its checks (above)'
+    fi
+    [[ ${state##*$'\n'} =~ ^UPGRADE_VERIFIED\ ([0-9]+)$ ]] || fail "Unexpected answer from the check of the upgraded database: $state"
+    HELD_MAIL=${BASH_REMATCH[1]}
+    [[ $state != *$'\n'* ]] || printf '%s\n' "${state%$'\n'*}"
+    printf 'The upgraded database passed its checks.\n'
 }
 upgrade_space() {  # the backup must fit, before the App stops
     local sizes database attachments base free
@@ -908,6 +1477,18 @@ PostgreSQL 16 does not know (SET transaction_timeout), which step 3 leaves out.
    before the upgrade (a scripts folder of $OLD_RELEASE needs no --upgrade):
 $(go_back_steps)
 HINT
+    # A module upgrade: check-upgrade-backup.sh reads this function without it.
+    ((${MODULE_UPGRADE:-0})) || return 0
+    cat <<HINT
+
+This upgrade runs a module upgrade (-u). From the removal of the containers of
+$OLD_RELEASE on, $OLD_RELEASE cannot run on database $DB_NAME: steps 1 to 5
+are then the only way back, and each of them is needed. Point of no return:
+once users write data with $RELEASE, these steps lose that data; after that
+point, fix forward instead. Also in this folder: module-upgrade.log (the log
+of -u), uat-guard.json (the check of the modules) and, when there was retired
+data, retired-data.tar.gz (the retired rows as CSV, before the upgrade).
+HINT
 }
 go_back_steps() {  # back to OLD_RELEASE, from any of its scripts folders
     local dir backup
@@ -918,7 +1499,18 @@ go_back_steps() {  # back to OLD_RELEASE, from any of its scripts folders
 }
 if ((UPGRADE)); then
     upgrade_check_database
-    upgrade_backup
+    if ((PENDING_ONLY == 0)); then
+        if ((MODULE_UPGRADE)); then
+            module_upgrade_guard
+            module_upgrade_confirm
+        fi
+        upgrade_backup
+        if ((MODULE_UPGRADE)); then
+            ((RETIRED_TOTAL == 0)) || export_retired_data
+            cp -p -- "$TEMP_DIR/uat-guard.json" "$BACKUP_DIR/uat-guard.json"
+            module_upgrade
+        fi
+    fi
     UPGRADE_STATE=switched
 fi
 install -d -m 0700 "$DEPLOY_DIR/secrets"
@@ -981,7 +1573,10 @@ clear_leftover_attachments() {
 bind_directory() {  # from here on, this directory belongs to this database
     rm -f -- "$UNVERIFIED"
 }
-if ! state=$(preflight check); then
+# --accept-pending: a database that a module upgrade upgraded and checked
+# reports UPGRADE_PENDING, and this deployment finishes it. Every other caller
+# of check (service.sh, of any release) is refused it.
+if ! state=$(preflight check --accept-pending); then
     unverified || fail 'The database check above failed. Fix the cause and run deploy-app.sh again'
     fail "The database check above failed, before this deployment used the database. This App server's addresses: $(server_addresses | paste -sd ' ' -). Correct DB_HOST, DB_PORT, DB_NAME or DB_USER in $DEPLOY_DIR/app.env, or the settings on the DB server (the App server address it accepts, its firewall), then run deploy-app.sh again: on a terminal it asks for the database password again"
 fi
@@ -1030,6 +1625,12 @@ case $state in
         if ((ADOPTED)); then
             printf 'Using the attachments volume %s that an earlier deployment of this project left; it is checked against the database below.\n' "$FILESTORE_VOLUME"
         fi ;;
+    UPGRADE_PENDING\ *)
+        # Upgraded and checked by --upgrade (this run or an earlier one); the
+        # stamp follows the checks below. No module upgrade runs here.
+        printf 'The Odoo modules of database %s are upgraded to %s and checked: deploying it, with no module upgrade.\n' "$DB_NAME" "$RELEASE"
+        bind_directory
+        PENDING_STAMP=1 ;;
     *) fail 'Unexpected database preflight response' ;;
 esac
 if ((FRESH)); then
@@ -1037,6 +1638,8 @@ if ((FRESH)); then
     # Until then it stays SETUP_PENDING, so a rerun with --init-db checks it all
     # again instead of accepting a system nobody could sign in to.
     attachments=${state#VERIFIED }
+elif ((PENDING_STAMP)); then
+    attachments=${state#UPGRADE_PENDING }
 else
     [[ $state == READY\ * ]] || fail 'Database initialization did not reach READY'
     attachments=${state#READY }
@@ -1220,9 +1823,20 @@ if ((FRESH)); then
     state=$(preflight stamp)
     [[ $state == READY\ * ]] || fail 'Fresh UAT database could not be stamped READY'
 fi
+if ((PENDING_STAMP)); then
+    # From here on the database check reports READY: the upgrade is done.
+    state=$(preflight stamp-upgrade)
+    [[ $state == READY\ * ]] || fail 'The upgraded database could not be stamped READY. Run deploy-app.sh again'
+fi
 printf '\nDeployment verified: %s (%s)\n' "$RELEASE" "$REVISION"
-if ((UPGRADE)); then
+if ((UPGRADE)) && [[ -n $BACKUP_DIR ]]; then
     printf 'Upgraded from %s. The data as it was before: %s (restore.txt explains how to put it back).\n' "$OLD_RELEASE" "$BACKUP_DIR"
+fi
+if ((PENDING_STAMP)); then
+    printf 'The Odoo modules were upgraded (-u). %s cannot run on this database any more: the backup is the only way back, and only until users write data (the point of no return).\n' \
+        "${OLD_RELEASE:-The release before}"
+    [[ -z $HELD_MAIL ]] || printf 'Held mail: %s messages that the module upgrade queued.\n' "$HELD_MAIL"
+    printf 'Review the held mail (Settings > Technical > Emails, state Exception), then send it with: sudo bash deploy-app.sh --release-queued-mail --dir %q\n' "$DEPLOY_DIR"
 fi
 if [[ $BIND_IP == 127.0.0.1 ]]; then
     printf 'HTTP URL: http://127.0.0.1:%s%s/app/ (this server only). From your computer: ssh -N -L %s:127.0.0.1:%s <user>@<APP_SERVER_IP>, then open http://localhost:%s%s/app/\n' \

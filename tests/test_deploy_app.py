@@ -148,7 +148,7 @@ if os.environ.get('FAKE_DOCKER_MODE') in ('auth', 'network'):
     if args and args[0] == 'compose' and 'run' in args:
         # FAKE_PREFLIGHT_STATE: the database check answers with this state,
         # and the fixture stops at the next Docker command instead.
-        if os.environ.get('FAKE_PREFLIGHT_STATE') and args[-2:] == ['/opt/deploy/preflight.py', 'check']:
+        if os.environ.get('FAKE_PREFLIGHT_STATE') and args[-3:] == ['/opt/deploy/preflight.py', 'check', '--accept-pending']:
             print(os.environ['FAKE_PREFLIGHT_STATE']); sys.exit(0)
         print('Fixture stopped before any database or container operation', file=sys.stderr)
         sys.exit(92)

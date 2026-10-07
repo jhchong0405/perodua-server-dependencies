@@ -384,10 +384,11 @@ come from `app.env` there. The upgrade goes ahead only when:
 - the directory runs the same project and the same database (server, port,
   name and user). Its `.deployment-identity` differs from the new one only in
   the release;
-- the new release has the same Odoo modules. The database check with the new
-  image must report `READY` with the same module fingerprint. A release that
-  changes modules needs a module upgrade (`-u`), and that needs its own plan:
-  `--upgrade` stops and changes nothing.
+- the new release has the same Odoo modules (the database check with the new
+  image reports `READY` with the same module fingerprint), or the release
+  upgrades the modules of this database. See
+  [Module upgrade](#module-upgrade--u). v1.0.3 to v1.0.8 have the same
+  modules, so no module upgrade runs between them.
 
 Then it stops the App and saves the database (`pg_dump -Fc`) and the
 attachments in `/opt/perodua-app/backups/TIME-OLD_RELEASE/` (or in a folder
@@ -413,6 +414,41 @@ SSH session stops the upgrade (before the switch, the old App starts again).
 
 Uninstall deletes `/opt/perodua-app` and the backups in it: copy them elsewhere
 first. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#upgrade-to-a-new-release-keeping-the-data-deploy-appsh---upgrade).
+
+### Module upgrade (-u)
+
+A release with other Odoo modules (from v1.2.0) upgrades the modules of the
+database in the same `--upgrade`. It does this only when:
+
+- the database has the modules of v1.0.3 to v1.0.8 (module fingerprint
+  `3b62a97697d2974ef37328de7f3d034d`), and the directory runs v1.0.5, v1.0.6,
+  v1.0.7 or v1.0.8;
+- the database is a UAT database that `--init-db` set up, without sample data
+  and without `perodua_demo_client`. A restored database is refused;
+- the checks of [the module upgrade](docs/DEPLOYMENT.md#module-upgrade--u)
+  find no other problem.
+
+A module upgrade asks you to type the database name. With `--non-interactive`,
+give it with `--confirm DATABASE`. When the retired modules left data (the
+check lists it), add `--drop-retired-data` after the owner agreed: the rows are
+saved as CSV in the backup folder (`retired-data.tar.gz`) before the upgrade
+deletes them.
+
+After the backup, the upgrade removes the containers of the old release and
+runs the module upgrade once. **From that point the old release cannot run on
+the database.** If the upgrade stops, it does not start the old App again: the
+only way back is `restore.txt` in the backup folder, all of its steps.
+
+**Point of no return.** Go back with `restore.txt` only before users write data
+with the new release. All data written after the backup is lost by the
+restore. After that point, fix forward.
+
+The mail that the module upgrade queues is held. Review it (Settings >
+Technical > Emails, state Exception), then send it:
+
+```bash
+sudo bash deploy-app.sh --release-queued-mail
+```
 
 ## Upgrade an App server to v1.0.8
 
