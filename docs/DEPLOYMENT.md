@@ -480,16 +480,16 @@ again under Settings > Technical > Scheduled Actions once real systems are
 connected. Demo Control's Reset & Reseed is refused on such a database, because
 it would load the sample data.
 
-A database initialized with v1.0.0 to v1.0.2 cannot be used with v1.0.7: its
+A database initialized with v1.0.0 to v1.0.2 cannot be used with v1.0.8: its
 module fingerprint differs and the App refuses it. Run
-`sudo bash service.sh --role app reset` from the v1.0.7 `scripts` folder on the
+`sudo bash service.sh --role app reset` from the v1.0.8 `scripts` folder on the
 App Server (see [Stop, start and reset](#stop-start-and-reset-servicesh); it
-deletes the data), or uninstall both servers and initialize again. v1.0.7 has
-the same Odoo modules as v1.0.6, v1.0.5, v1.0.4 and v1.0.3, so a directory deployed with
+deletes the data), or uninstall both servers and initialize again. v1.0.8 has
+the same Odoo modules as v1.0.7, v1.0.6, v1.0.5, v1.0.4 and v1.0.3, so a directory deployed with
 one of them keeps its data with `sudo bash deploy-app.sh --upgrade` from the
-v1.0.7 `scripts` folder (see [Upgrade to a new release](#upgrade-to-a-new-release-keeping-the-data-deploy-appsh---upgrade),
+v1.0.8 `scripts` folder (see [Upgrade to a new release](#upgrade-to-a-new-release-keeping-the-data-deploy-appsh---upgrade),
 and the steps in the README:
-[Upgrade an App server to v1.0.7](../README.md#upgrade-an-app-server-to-v107)).
+[Upgrade an App server to v1.0.8](../README.md#upgrade-an-app-server-to-v108)).
 Without `--upgrade` such a directory is refused, because it records its release.
 
 If the initialization stops after the modules are installed, for example on a
@@ -588,9 +588,9 @@ deployment directory (default `/opt/perodua-app`) to that release. The
 database, the attachments volume and the settings in `app.env` stay. A plain
 `deploy-app.sh` refuses a directory that another release deployed and points to
 `--upgrade`. `--upgrade` does not combine with `--init-db` or `--check-config`.
-For the move to v1.0.7 (from v1.0.4, v1.0.5 or v1.0.6), the README gives the
-steps in order, HTTPS and the acceptance checks included:
-[Upgrade an App server to v1.0.7](../README.md#upgrade-an-app-server-to-v107).
+For the move to v1.0.8 (from v1.0.4 to v1.0.7), the README gives the steps in
+order, HTTPS and the acceptance checks included:
+[Upgrade an App server to v1.0.8](../README.md#upgrade-an-app-server-to-v108).
 
 **What it requires.** Each check below stops the upgrade before anything
 changes:
@@ -858,7 +858,7 @@ server's private address when F5 connects to the web ports directly.
    `DB_USER` with the same password, or a user each. Each database is recorded
    separately.
 2. On the App server, keep one `scripts` folder per release, for example
-   `/root/perodua-v1.0.7/scripts`. Write one configuration file per environment
+   `/root/perodua-v1.0.8/scripts`. Write one configuration file per environment
    (see `app.env.example`), for example `/root/perodua-dev.env`:
 
    ```
