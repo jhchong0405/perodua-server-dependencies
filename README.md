@@ -1,6 +1,6 @@
 # Server setup
 
-Client Stable UIUX v1.0.5 on Ubuntu 24.04 amd64 servers with sudo and internet access:
+Client Stable UIUX v1.0.6 on Ubuntu 24.04 amd64 servers with sudo and internet access:
 
 - **DB server**: PostgreSQL 16.
 - **App server**: Odoo and web containers, pulled from `perodua-deploy.novutal.com`.
@@ -15,11 +15,20 @@ servers, allow **App → DB port 5432**. Browsers need **App port 8110**.
 
 The steps below create a **fresh UAT system** with an empty database.
 To restore an existing database instead, see [From a backup](#from-a-backup).
-An App server that runs v1.0.4 (or v1.0.3) keeps its data: see
-[Upgrade an App server from v1.0.4 to v1.0.5](#upgrade-an-app-server-from-v104-to-v105).
+An App server that runs v1.0.5, v1.0.4 (or v1.0.3) keeps its data: see
+[Upgrade an App server to v1.0.6](#upgrade-an-app-server-to-v106).
 A system set up with v1.0.0 to v1.0.2 cannot keep its data: download this
 version on the App server and run a [reset](#stop-start-and-reset) there. The DB
 server needs no step.
+
+## What v1.0.6 changes
+
+v1.0.6 (revision `32600679`) corrects one defect of v1.0.5 in the web page:
+after the sign-in hand-over, every page of `stgissrp`, `stgisssp` and
+`stgisscp` showed "Something went wrong" (the browser console showed
+`TypeError: Illegal invocation`). The Odoo modules are the same as in v1.0.4
+and v1.0.5, so `deploy-app.sh --upgrade` keeps the data and runs no module
+upgrade. A server that runs v1.0.5 must move to v1.0.6.
 
 ## What v1.0.5 changes
 
@@ -242,7 +251,7 @@ Portal) and `stgisscp` (Customer Portal). Each name shows only its own module.
   stays off: each name keeps its own password sign-in, as in v1.0.4, and
   `deploy-app.sh` prints a warning.
   After you change the value, run `deploy-app.sh` again (`--upgrade` when you
-  move to v1.0.5).
+  move to a new release).
 - **Sign in at stgiss:** `https://stgiss.perodua.com.my/dev/app/`. After the
   sign-in, stgiss shows no module, but links to the modules the user may open.
 - **Module names send users to stgiss:** a module name without a sign-in sends
@@ -333,8 +342,8 @@ and run it again.
 
 ## Upgrade to a new release
 
-An upgrade keeps the data. For the move from v1.0.4 to v1.0.5, follow
-[the steps below](#upgrade-an-app-server-from-v104-to-v105). Put the `scripts`
+An upgrade keeps the data. For the move to v1.0.6, follow
+[the steps below](#upgrade-an-app-server-to-v106). Put the `scripts`
 folder of the new release next to the old one, and keep the old one. Then run
 this on the App server, from the new folder:
 
@@ -378,10 +387,13 @@ SSH session stops the upgrade (before the switch, the old App starts again).
 Uninstall deletes `/opt/perodua-app` and the backups in it: copy them elsewhere
 first. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#upgrade-to-a-new-release-keeping-the-data-deploy-appsh---upgrade).
 
-## Upgrade an App server from v1.0.4 to v1.0.5
+## Upgrade an App server to v1.0.6
 
-v1.0.5 has the same Odoo modules as v1.0.4. The upgrade keeps the database and
-the attachments and runs no module upgrade. Do the steps on the App server only;
+These steps move a server from v1.0.4 or from v1.0.5 to v1.0.6. v1.0.6 has the
+same Odoo modules as both. The upgrade keeps the database and the attachments
+and runs no module upgrade. On a server that runs v1.0.5, steps 7 to 10 were
+done for v1.0.5: do them again, they change nothing when the settings are
+already correct. Do the steps on the App server only;
 the DB server needs no step. The commands use the deployment directory
 `/opt/perodua-app`: if yours is another, use it in its place.
 [Upgrade to a new release](#upgrade-to-a-new-release) tells what `--upgrade`
@@ -405,40 +417,40 @@ folder. Keep the old folder: the way back uses it.
 2. Download the new release:
 
    ```bash
-   curl -fL https://api.github.com/repos/jhchong0405/perodua-server-dependencies/tarball/main -o setup-v1.0.5.tar.gz
+   curl -fL https://api.github.com/repos/jhchong0405/perodua-server-dependencies/tarball/main -o setup-v1.0.6.tar.gz
    ```
 
 3. Make a new folder for it, next to the old one:
 
    ```bash
-   mkdir setup-v1.0.5
+   mkdir setup-v1.0.6
    ```
 
 4. Unpack the release into the new folder:
 
    ```bash
-   tar -xzf setup-v1.0.5.tar.gz -C setup-v1.0.5 --strip-components=1
+   tar -xzf setup-v1.0.6.tar.gz -C setup-v1.0.6 --strip-components=1
    ```
 
 5. Go to its `scripts` folder. All the commands below run there.
 
    ```bash
-   cd setup-v1.0.5/scripts
+   cd setup-v1.0.6/scripts
    ```
 
-6. Make sure that the folder pins v1.0.5:
+6. Make sure that the folder pins v1.0.6:
 
    ```bash
    grep -E '^(RELEASE|REVISION)=' deploy-app.sh
    ```
 
-   It shows `RELEASE=client-stable-uiux-v1.0.5` and
-   `REVISION=bd9848e4138854715cfa336985c8fa178ea19fe0`. If it shows another
-   release, stop: these steps are for v1.0.5.
+   It shows `RELEASE=client-stable-uiux-v1.0.6` and
+   `REVISION=326006794aaf780d8dfcb97f762eacb74fc45103`. If it shows another
+   release, stop: these steps are for v1.0.6.
 
 With git, in place of steps 2 to 5:
-`git clone https://github.com/jhchong0405/perodua-server-dependencies.git perodua-v1.0.5`,
-then `cd perodua-v1.0.5/scripts`. Do not run `git pull` in the old folder.
+`git clone https://github.com/jhchong0405/perodua-server-dependencies.git perodua-v1.0.6`,
+then `cd perodua-v1.0.6/scripts`. Do not run `git pull` in the old folder.
 
 **The address of the sign-in host.**
 
@@ -463,7 +475,7 @@ then `cd perodua-v1.0.5/scripts`. Do not run `git pull` in the old folder.
    sudo bash deploy-app.sh --check-config --dir /opt/perodua-app
    ```
 
-   It shows `Configuration valid for client-stable-uiux-v1.0.5. Nothing was changed.`
+   It shows `Configuration valid for client-stable-uiux-v1.0.6. Nothing was changed.`
    A line `Warning: PUBLIC_BASE_URL ...` tells you that the hand-over stays
    off, and why. Correct the value (step 7) and do this step again.
 
@@ -489,7 +501,7 @@ then `cd perodua-v1.0.5/scripts`. Do not run `git pull` in the old folder.
     ```
 
     nginx now marks the Odoo session cookie (`session_id`) `Secure` and
-    `SameSite=Lax`, so that browsers send it over HTTPS only. In v1.0.5 the
+    `SameSite=Lax`, so that browsers send it over HTTPS only. From v1.0.5 the
     stgiss cookie signs in every module name, so it must not go over plain
     HTTP. The command ends with `nginx serves HTTPS for:` and the routes. From
     now on, run `https.sh` from the new folder: an `apply` from the old folder
@@ -505,26 +517,29 @@ then `cd perodua-v1.0.5/scripts`. Do not run `git pull` in the old folder.
 
     When it asks, enter the registry username and password. The script:
 
-    - pulls the v1.0.5 images and checks the database with them, while the App
-      still runs (`Database DB_NAME fits client-stable-uiux-v1.0.5: the same Odoo modules, N attachments.`);
+    - pulls the v1.0.6 images and checks the database with them, while the App
+      still runs (`Database DB_NAME fits client-stable-uiux-v1.0.6: the same Odoo modules, N attachments.`);
     - checks that the disk has room for the backup, then stops the App;
     - saves the database (`database.dump`, `pg_dump -Fc`), the attachments
       (`filestore.tar.gz`), the old `deployment-identity` and `app.env`, and
-      `restore.txt` in `/opt/perodua-app/backups/TIME-client-stable-uiux-v1.0.4/`;
-    - starts v1.0.5 and does the usual self-check.
+      `restore.txt` in `/opt/perodua-app/backups/TIME-OLD_RELEASE/`, for
+      example `TIME-client-stable-uiux-v1.0.5/`;
+    - starts v1.0.6 and does the usual self-check.
 
     The App is down from the stop until the self-check passes: the backup time,
     which increases with the size of the database and the attachments, and the
-    start of v1.0.5. If the upgrade stops before the backup is complete,
-    nothing changes and the App of v1.0.4 runs again. If it stops later, its
+    start of v1.0.6. If the upgrade stops before the backup is complete,
+    nothing changes and the App of the old release runs again. If it stops later, its
     message gives the state of the server and the way back. When the upgrade
     is successful, the output shows these lines, and no
     `Warning: PUBLIC_BASE_URL` line:
 
     ```
-    Deployment verified: client-stable-uiux-v1.0.5 (bd9848e4138854715cfa336985c8fa178ea19fe0)
-    Upgraded from client-stable-uiux-v1.0.4. The data as it was before: /opt/perodua-app/backups/TIME-client-stable-uiux-v1.0.4 (restore.txt explains how to put it back).
+    Deployment verified: client-stable-uiux-v1.0.6 (326006794aaf780d8dfcb97f762eacb74fc45103)
+    Upgraded from client-stable-uiux-v1.0.5. The data as it was before: /opt/perodua-app/backups/TIME-client-stable-uiux-v1.0.5 (restore.txt explains how to put it back).
     ```
+
+    From v1.0.4, the second line names v1.0.4.
 
 **Acceptance.** Use a browser that reaches the HTTPS names. A private window
 does not use an earlier sign-in.
@@ -534,7 +549,7 @@ does not use an earlier sign-in.
 13. Open each module with its link. `https://stgissrp.perodua.com.my/dev/app/`
     shows only Perodua SPD (Resource Planning), `stgisssp` only the Supplier
     Portal and `stgisscp` only the Customer Portal. No module asks for the
-    password again.
+    password again, and no page shows "Something went wrong".
 14. Sign out on one module name. Then reload the page of another name: it
     sends you to the sign-in on stgiss.
 15. On the App server, check HTTPS again:
@@ -547,7 +562,11 @@ does not use an earlier sign-in.
     and each of the four names shows `port listening: yes`.
 
 **The way back to v1.0.4.** v1.0.4 has the same modules, so it runs on the
-current data. Use the backup folder that step 11 showed in place of `BACKUP`:
+current data. Do not go back to v1.0.5: its module pages show "Something went
+wrong" after the sign-in hand-over. Use a backup folder of v1.0.4 in place of
+`BACKUP`: the one that step 11 showed when the server came from v1.0.4, or,
+when it came from v1.0.5, the older folder whose name ends in
+`-client-stable-uiux-v1.0.4` (from the move to v1.0.5):
 
 1. Put back the identity of the directory:
 
@@ -574,10 +593,10 @@ current data. Use the backup folder that step 11 showed in place of `BACKUP`:
    sudo bash deploy-app.sh --dir /opt/perodua-app
    ```
 
-The data that users entered in v1.0.5 stays. To also put back the data from
-before the upgrade, follow `restore.txt` in the backup folder instead: then all
-users must sign in again. The HTTPS configuration of step 10 can stay; v1.0.4
-works with it. Keep the backup folder until v1.0.5 is accepted.
+The data that users entered in v1.0.5 and v1.0.6 stays. To also put back the
+data from before an upgrade, follow `restore.txt` in its backup folder instead:
+then all users must sign in again. The HTTPS configuration of step 10 can stay;
+v1.0.4 works with it. Keep the backup folders until v1.0.6 is accepted.
 
 ## Uninstall
 
