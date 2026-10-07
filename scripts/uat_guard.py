@@ -88,6 +88,9 @@ REVIEWED_REFERENCES = (
             'the same file) '
             'and client-stable-uiux-v1.0.6 '
             '(sha256:e50cdfc880b51467d5b002812db239034c1137bb5e45fc00df0fd24196139ec1, '
+            'the same file) '
+            'and client-stable-uiux-v1.0.7 '
+            '(sha256:24fd9ffc00d08a949c4bf9b823a74f637d57c3c17c0316f31288ad0240289e1a, '
             'the same file), '
             'whose perodua_demo changes do not touch this key.'),
     },
