@@ -518,8 +518,9 @@ then `cd perodua-v1.0.8/scripts`. Do not run `git pull` in the old folder.
    `stgisscp` (`.perodua.com.my`), with the path `/dev/`, to the App's port
    (`8110`), each with `port listening: yes`. The certificate must cover them:
    there is no `does NOT cover` line. The `nginx:` line can end with
-   `(the routes changed since: apply)`: the new `https.sh` adds the cookie
-   setting of step 10. If a name is missing, see [HTTPS](#https) first.
+   `(the routes or https.sh changed since: apply)`: the new `https.sh` adds
+   the cookie setting of step 10. If a name is missing, see [HTTPS](#https)
+   first.
 
 10. Apply the HTTPS configuration of the new folder:
 
@@ -591,8 +592,9 @@ does not use an earlier sign-in.
     sudo bash https.sh status
     ```
 
-    The `nginx:` line does not end with `(the routes changed since: apply)`,
-    and each of the four names shows `port listening: yes`.
+    The `nginx:` line does not end with
+    `(the routes or https.sh changed since: apply)`, and each of the four names
+    shows `port listening: yes`.
 
 **The way back.** v1.0.7, v1.0.6 and v1.0.4 have the same modules, so they run
 on the current data. Do not go back to v1.0.5: its module pages show "Something went
@@ -738,6 +740,42 @@ runs again.
 | `FAIL database ... is not reachable from the container` | No network path to the database port: firewall, VPN, or a wrong `DB_HOST` / `DB_PORT` |
 | `FAIL GET / -> 500` | The API cannot sign in (`ORA-01017`), or the request log table or a grant is missing (`ORA-00942`). The error is in `sudo bash iss-api.sh logs` |
 | A query with a key gets 401 | Wrong key. Issue a new one with `gen-key` |
+
+### Publish it with HTTPS
+
+1. Install with the default **Only this server**: the API listens on
+   `127.0.0.1:8000`, and only nginx on this server reaches it.
+2. Add the route of the API to the table of [https.sh](#https),
+   `/etc/perodua-https/routes.conf`. On the grey DEV server, where the
+   customer's WAF connects to port 80:
+
+   ```
+   stgiss.perodua.com.my           /api/       8000   strip,http,api
+   ```
+
+   On a server without such a front, use `strip,api`. `strip` sends `/api/x` to
+   the API as `/x`; `api` closes the documentation pages and limits the requests
+   (see [An API route](#an-api-route)). First remove every nginx file that was
+   written by hand for the API, such as one with its own default server for
+   port 443 or its own rate limit: `apply` refuses the first, and the second
+   adds a second limit.
+3. Write the nginx configuration and check it:
+
+   ```bash
+   sudo bash https.sh apply
+   sudo bash https.sh status
+   ```
+
+The calling systems then use `https://stgiss.perodua.com.my/api/...`:
+
+- Use the exact paths. The seven `/accounting/...` list routes end with `/`, the
+  other routes do not. With a wrong `/`, the API redirects to an address outside
+  `/api/`, where this server answers 404.
+- Do not follow redirects.
+- Send the key in the `X-API-Key` header.
+
+Behind the WAF, the request log records the WAF's address as `CLIENT_IP`, not
+the address of the calling system.
 
 ### Request log table for the DBA
 
@@ -905,7 +943,7 @@ nginx configuration all come from it. Run the commands from the `scripts` folder
    # HOST                          PATH        PORT   OPTION
    stgissrp.perodua.com.my         /dev/       8110
    stgissrp.perodua.com.my         /uat/       8111
-   api.example.perodua.com.my      /dev/api/   8000   strip
+   api.example.perodua.com.my      /dev/api/   8000   strip,api
    ```
 
    Paths are forwarded as they are; `strip` removes the path first, for a service
@@ -914,9 +952,12 @@ nginx configuration all come from it. Run the commands from the `scripts` folder
    answers 404 for it until the port is set and `apply` runs again (the template
    has WOM and TMS like that). `http` also serves the route on port 80, for a TLS
    front that connects to port 80: see
-   [Behind a TLS front on port 80](#behind-a-tls-front-on-port-80). Put every host
-   name that needs HTTPS in the table now: the certificate is requested for
-   exactly these names.
+   [Behind a TLS front on port 80](#behind-a-tls-front-on-port-80). `api` closes
+   the documentation pages of an API and limits its requests: see
+   [An API route](#an-api-route). OPTION is one of these words, or several of them
+   separated by commas without spaces, in any order, such as `strip,http,api`.
+   Put every host name that needs HTTPS in the table now: the certificate is
+   requested for exactly these names.
 2. **The certificate request (CSR).**
 
    ```bash
@@ -999,9 +1040,19 @@ nginx configuration all come from it. Run the commands from the `scripts` folder
    package mirrors, or an apt proxy. It then writes `/etc/nginx/conf.d/perodua-https.conf`:
    port 80 redirects to HTTPS (except the routes with `http`), and on 443 each
    host forwards its paths to `127.0.0.1:PORT` and answers 404 for any other
-   path. The services get the host name, `X-Forwarded-Proto: https` and the
-   caller's address in `X-Forwarded-For` and `X-Real-IP`, replacing whatever the
-   caller sent. The Odoo session cookie
+   path. On 443, a host name that is not in the table, and the server's IP
+   address, get the connection closed without an answer. A front that connects
+   to 443 without the host name in TLS (SNI) still reaches the host name that it
+   sends in the `Host` header. A front or a health check that connects to 443
+   must send HTTP/1.1 with a host name of the table in the `Host` header: a
+   request without `Host`, or with the IP address in it, also gets the
+   connection closed. Earlier versions of `https.sh` answered these requests
+   with the first host name of the table. On a server that already runs
+   `https.sh`, make sure before `apply` that no monitor, health check or front
+   calls port 443 with the IP address or another name. The services get the
+   host name, `X-Forwarded-Proto: https` and the caller's address in
+   `X-Forwarded-For` and `X-Real-IP`, replacing whatever the caller sent. The
+   Odoo session cookie
    (`session_id`) gets `Secure` and `SameSite=Lax`, so browsers send it over HTTPS
    only, on every port. `apply` sends no `Strict-Transport-Security`: making these
    host names HTTPS-only in browsers for a long time is the customer's decision,
@@ -1010,13 +1061,17 @@ nginx configuration all come from it. Run the commands from the `scripts` folder
    (one that is not on the PATH, such as a build in `/usr/local/nginx`), stops
    `apply` before anything changes. `apply` also refuses host names that another
    nginx file serves, such as a copy of the HTTP-only
-   `docs/front-proxy.example.conf`: remove that file first. The change is kept only
+   `docs/front-proxy.example.conf`: remove that file first. It also refuses
+   another nginx file that is already the default server for port 443 (a line
+   such as `listen 443 ssl default_server;`), because the block that closes the
+   unknown host names must be that default server: remove `default_server` from
+   that line, or the file, then run `apply` again. The change is kept only
    if `nginx -t` accepts it and nginx then runs it; otherwise the previous
    configuration comes back. If ufw is active, allow ports 80 and 443 (`apply`
    prints the command). `status` shows the certificate, its expiry, whether nginx
    is installed (if not, `apply` installs it), whatever would stop `apply` on ports
    80 and 443, and every route (a route with `http` also with its answer on port
-   80).
+   80, a route with `api` with `API: docs closed, rate limited`).
 
 Behind HTTPS, the App's `PUBLIC_BASE_URL` starts with `https://` (in the grey
 environment `https://stgiss.perodua.com.my/dev`, see
@@ -1071,6 +1126,37 @@ Know these risks before you use `http`:
 
 Do not use `http` when browsers connect to this server directly: then port 80
 must redirect them to HTTPS.
+
+### An API route
+
+Add the option `api` to the route of an API, such as the
+[ISS-Oracle API](#iss-oracle-api), then run `apply`:
+
+```
+api.example.perodua.com.my      /dev/api/   8000   strip,api
+```
+
+On such a route, on 443 and (with `http`) on port 80:
+
+- PATH followed by `docs`, `redoc` or `openapi.json` (here `/dev/api/docs`,
+  `/dev/api/redoc` and `/dev/api/openapi.json`) answers 404. A FastAPI service,
+  such as the ISS-Oracle API, shows its documentation there, with every route,
+  to callers without a key.
+- Each caller address can send at most 10 requests a second, with bursts of
+  20. Above that, nginx answers 429 (Too Many Requests) and does not forward
+  the request. The limit is for all `api` routes of this server together, on
+  443 and on port 80. Every request to the ISS-Oracle API, also one without a
+  key, opens a database session and writes a row in the request log.
+- Behind a front (a WAF or F5), nginx sees the front's address as the caller.
+  The limit is then for each front node, not for each calling system.
+
+The numbers are `API_RATE` (requests a second, such as `10r/s`) and
+`API_BURST` at the top of `https.sh`. If you change them, also change them in
+this section and in `https-routes.conf.example`. Routes without `api` do not
+change. `apply` marks the `api` routes, and `status` shows
+`API: docs closed, rate limited` on them. As with `http`, `apply` also updates
+the copy of `https.sh` that the Let's Encrypt renewal timer runs: an older copy
+refuses `api`.
 
 ### Later
 

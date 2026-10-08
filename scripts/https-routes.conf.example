@@ -4,13 +4,19 @@
 #   PATH    starts and ends with /; a / alone takes the whole host
 #   PORT    the port the service listens on at 127.0.0.1, or - while it is not known:
 #           such a host is in the certificate, and answers 404 until its port is set
-#   OPTION  optional: strip, http, or both as strip,http
+#   OPTION  optional: strip, http, api, or several of them separated by commas
+#           without spaces, in any order, such as strip,http,api
 #           strip: remove PATH before forwarding, for a service that expects /
 #           (an API published under /dev/api/). Without it the path is forwarded as is.
 #           http: also serve the route on port 80 over plain HTTP, without the redirect
 #           to HTTPS, for a TLS front (a WAF or F5) that takes the browsers' HTTPS and
 #           connects to this server on port 80. Port 80 then serves the route
 #           unencrypted to anybody who can reach it: limit port 80 with a firewall.
+#           api: for an API, such as the ISS-Oracle API: PATH docs, PATH redoc and
+#           PATH openapi.json (its documentation) answer 404, and each caller
+#           address can send at most 10 requests a second, with bursts of 20
+#           (429 above that), to all api routes together. Behind a front, the
+#           caller address is the front's.
 # Other paths of a host answer 404 (on port 80 of a host without http routes: a
 # redirect to HTTPS). Everything after # is a comment.
 #
@@ -26,6 +32,6 @@ stgisscp.perodua.com.my         /dev/       8110
 stgisstms.perodua.com.my        /dev/       -
 # A UAT deployment at port 8111 later: one /uat/ line per host name.
 # stgissrp.perodua.com.my       /uat/       8111
-# api.example.perodua.com.my    /dev/api/   8000   strip
+# api.example.perodua.com.my    /dev/api/   8000   strip,api
 # Behind a TLS front that connects to port 80, such as a WAF: add http to the line.
 # stgiss.perodua.com.my         /dev/       8110   http
