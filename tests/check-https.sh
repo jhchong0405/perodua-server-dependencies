@@ -16,7 +16,7 @@ cp -r /src/scripts /work
 cd /work
 STATE=/etc/perodua-https
 RESOLVE=(--resolve api.example.perodua.com.my:443:127.0.0.1 --resolve stgissrp.perodua.com.my:443:127.0.0.1
-         --resolve api.example.perodua.com.my:80:127.0.0.1)
+         --resolve api.example.perodua.com.my:80:127.0.0.1 --resolve stgissrp.perodua.com.my:80:127.0.0.1)
 step() { printf '\n### %s\n' "$*"; }
 pass() { printf 'ok   %s\n' "$*"; }
 fail() { printf 'FAIL %s\n' "$*"; exit 1; }
@@ -144,6 +144,33 @@ bash https.sh status
 env PATH=/usr/bin:/bin bash https.sh status > /tmp/status 2>&1
 grep -qx 'nginx:       /etc/nginx/conf.d/perodua-https.conf' /tmp/status \
     && pass 'status finds nginx without the sbin directories on the PATH' || fail "$(cat /tmp/status)"
+
+step 'http: a route also served on port 80, for a TLS front that connects there'
+cp "$STATE/routes.conf" /tmp/routes.conf
+sed -i 's#/dev/api/   8000   strip$#/dev/api/   8000   strip,http#' "$STATE/routes.conf"
+echo 'api.example.perodua.com.my      /dev/api/v2/  8001   strip' >> "$STATE/routes.conf"   # no http, under a route with it
+bash https.sh apply | grep 'port 80'
+expect http://api.example.perodua.com.my/dev/api/customers '200 port=8000 path=/customers proto=https host=api.example.perodua.com.my xff=127.0.0.1'
+expect https://api.example.perodua.com.my/dev/api/customers '200 port=8000 path=/customers proto=https'
+expect https://api.example.perodua.com.my/dev/api/v2/x '200 port=8001 path=/x proto=https'
+# a redirect of nginx keeps the scheme of the front: no http:// in Location
+code=$(curl -s -D - -o /dev/null "${RESOLVE[@]}" 'http://api.example.perodua.com.my/dev/api?a=1' | tr -d '\r' | grep -i '^location:' || true)
+[[ $code == 'Location: /dev/api/?a=1' ]] && pass "/dev/api?a=1 on port 80 -> $code" || fail "/dev/api?a=1 on port 80 -> $code"
+for url in http://api.example.perodua.com.my/uat/api/x http://stgissrp.perodua.com.my/dev/x \
+           http://api.example.perodua.com.my/dev/api/v2/x http://api.example.perodua.com.my/dev/api/v2; do   # no http: redirected
+    code=$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' "${RESOLVE[@]}" "$url")
+    [[ $code == "301 https://${url#http://}" ]] && pass "$url -> $code" || fail "$url -> $code"
+done
+code=$(curl -s -o /dev/null -w '%{http_code}' "${RESOLVE[@]}" http://api.example.perodua.com.my/other)
+[[ $code == 404 ]] && pass "a path that is no route answers 404 on port 80, as on 443: $code" || fail "/other on port 80 -> $code"
+headers=$(curl -s "${RESOLVE[@]}" -D - -o /dev/null http://api.example.perodua.com.my/dev/api/login | tr -d '\r')
+grep -qx 'Set-Cookie: session_id=echo; Path=/dev/; HttpOnly; Secure; SameSite=Lax' <<< "$headers" \
+    && pass 'session_id gets Secure and SameSite=Lax on port 80 too' || fail "session_id: $(grep -i '^set-cookie' <<< "$headers")"
+bash https.sh status | grep 'HTTP answer on port 80: 200' && pass 'status shows the port 80 answer' || fail 'status: no port 80 answer'
+cp /tmp/routes.conf "$STATE/routes.conf"
+bash https.sh apply > /dev/null
+code=$(curl -s -o /dev/null -w '%{http_code}' "${RESOLVE[@]}" http://api.example.perodua.com.my/dev/api/x)
+[[ $code == 301 ]] && pass "without http, port 80 redirects again: $code" || fail "without http: $code"
 
 step 'renewal: a new request with the same key, installed while nginx runs'
 bash https.sh csr > /dev/null
