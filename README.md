@@ -92,8 +92,8 @@ now marks the session cookie `Secure`. See [Sign in once](#sign-in-once-v105).
 
 | Path | Contents |
 | --- | --- |
-| `scripts/` | `install-dependencies.sh`, `deploy-db.sh`, `deploy-app.sh`, `service.sh`, `uninstall.sh`, the helpers they use (`uat_guard.py`, `uat_admins.py`, `reset_database.py`), `iss-api.sh` (ISS-Oracle API), `rp-adapter.sh` (RP adapter), `https.sh` (HTTPS with nginx, the certificate from an issuer or Let's Encrypt) and the configuration templates. Your `deploy.conf`, backups and filestore archive also go here. |
-| `docs/` | [DEPLOYMENT.md](docs/DEPLOYMENT.md) (full reference) and [RUNBOOK.md](docs/RUNBOOK.md) (self-check after deployment) |
+| `scripts/` | `install-dependencies.sh`, `deploy-db.sh`, `deploy-app.sh`, `service.sh`, `uninstall.sh`, the helpers they use (`uat_guard.py`, `uat_admins.py`, `reset_database.py`), `iss-api.sh` (ISS-Oracle API), `rp-adapter.sh` (RP adapter), `https.sh` (HTTPS with nginx, the certificate from an issuer or Let's Encrypt), `client-check.ps1` (the check of each host name from a Windows PC) and the configuration templates. Your `deploy.conf`, backups and filestore archive also go here. |
+| `docs/` | [DEPLOYMENT.md](docs/DEPLOYMENT.md) (full reference), [RUNBOOK.md](docs/RUNBOOK.md) (self-check after deployment) and [WAF-REDIRECT-LOOP-2026-10-08.md](docs/WAF-REDIRECT-LOOP-2026-10-08.md) (record of a redirect loop behind a WAF) |
 | `tests/` | Automated checks, see [tests/README.md](tests/README.md) |
 
 ## 1. Download (both servers)
@@ -920,8 +920,12 @@ first puts the previous settings and secrets back.
 
 ## HTTPS
 
-`https.sh` puts nginx with HTTPS in front of the services of one server, when the
-host names point at that server directly (A records: nginx listens on IPv4 only).
+`https.sh` puts nginx with HTTPS in front of the services of one server. The
+host names can point at that server directly (A records: nginx listens on IPv4
+only). They can also reach it through a WAF or another front proxy, such as a
+cloud WAF, a CDN or F5. Such a front sends HTTPS to port 443 of this server, or
+plain HTTP to port 80 for the routes with the `http` option: see
+[Behind a WAF or another front proxy](#behind-a-waf-or-another-front-proxy).
 One table, `/etc/perodua-https/routes.conf`, lists the server's host names, paths
 and local ports; the certificate request (CSR), the certificate check and the
 nginx configuration all come from it. Run the commands from the `scripts` folder.
@@ -1034,6 +1038,7 @@ nginx configuration all come from it. Run the commands from the `scripts` folder
    ```bash
    sudo bash https.sh apply
    sudo bash https.sh status
+   sudo bash https.sh diagnose
    ```
 
    `apply` installs nginx if needed, with apt-get: the server needs the Ubuntu
@@ -1071,13 +1076,140 @@ nginx configuration all come from it. Run the commands from the `scripts` folder
    prints the command). `status` shows the certificate, its expiry, whether nginx
    is installed (if not, `apply` installs it), whatever would stop `apply` on ports
    80 and 443, and every route (a route with `http` also with its answer on port
-   80, a route with `api` with `API: docs closed, rate limited`).
+   80, a route with `api` with `API: docs closed, rate limited`). `diagnose`
+   changes nothing. It checks the ports, the nginx files and each host name:
+   HTTPS on this server, HTTP on this server (the redirect to `https://`, or on
+   a route with `http` the same answer as HTTPS) and, with `--front ADDRESS`,
+   the path through a WAF or another front proxy. It also finds recent redirect
+   loops in the access log. See
+   [Behind a WAF or another front proxy](#behind-a-waf-or-another-front-proxy).
 
 Behind HTTPS, the App's `PUBLIC_BASE_URL` starts with `https://` (in the grey
 environment `https://stgiss.perodua.com.my/dev`, see
 [Sign in once](#sign-in-once-v105)), and every service listens on `127.0.0.1`
 only (`BIND_IP=127.0.0.1`), so that browsers reach it through nginx
 ([DEPLOYMENT.md](docs/DEPLOYMENT.md)).
+
+### Behind a WAF or another front proxy
+
+A front is a WAF, a CDN, F5 or another proxy between the browsers and this
+server. The browser connects to the front. The front then connects to this
+server: this is the back-to-source connection, and this server is the origin.
+Each host name can be a separate entry on the front, with its own settings.
+
+**The redirect loop.** On this server, port 80 answers each route without
+`http` with a redirect (301) to `https://` with the same host name and path.
+Port 443 serves the routes. A front that sends HTTPS requests to port 80 for a
+route without `http` therefore gets the redirect back for every request. The
+browser asks again, and the front asks port 80 again: a redirect loop. Edge and
+Chrome stop with `ERR_TOO_MANY_REDIRECTS` ("redirected you too many times").
+Huawei Cloud WAF documents this case:
+[Why Was My Website Redirected So Many Times?](https://support.huaweicloud.com/eu/trouble-waf/waf_01_0117.html)
+The [record of 2026-10-08](docs/WAF-REDIRECT-LOOP-2026-10-08.md) shows such a
+loop in the grey environment. To stop the loop, use setup A or setup B for the
+host name.
+
+**The two setups.** Choose one for each host name. Both work with `https.sh`.
+
+| | A: HTTPS to port 443 | B: HTTP to port 80 |
+|---|---|---|
+| The front connects to | Port 443 of this server, over HTTPS | Port 80 of this server, over plain HTTP |
+| On this server | No change | Add `http` to each route that the front sends to port 80, then run `apply`. See [Behind a TLS front on port 80](#behind-a-tls-front-on-port-80). |
+| The connection from the front to this server | Encrypted | Not encrypted |
+| Port 80 for other callers | Redirects to `https://` | Serves the `http` routes to any caller that reaches it, without encryption |
+| `http://` addresses of the browsers | The front can forward them to port 80: this server redirects them to `https://` | The front must redirect them to `https://` itself |
+| On the grey DEV server (2026-10-09) | `stgissrp`: GICT forwards it to port 443 | `stgiss`, `stgisssp` and `stgisscp`: the owner's decision. The WAF connects to port 80, and port 80 of the App server serves the App to it. It is not known whether the kit's `http` routes or a hand-written nginx file serve port 80 there (the [record](docs/WAF-REDIRECT-LOOP-2026-10-08.md#still-open)). |
+
+In setup A, both connections are encrypted: from the browser to the front, and
+from the front to this server. Setup B has the risks in
+[Behind a TLS front on port 80](#behind-a-tls-front-on-port-80). Know them
+before you choose B.
+
+**What the front must do:**
+
+| Item | Setting |
+|---|---|
+| Back-to-source protocol and port | Setup A: HTTPS, port 443 of this server. Setup B: HTTP, port 80 of this server, only for the routes with `http`. |
+| `Host` header | The original host name, such as `stgiss.perodua.com.my` |
+| TLS server name (SNI) | Setup A: the same host name is recommended. A front without SNI still works: the `Host` header selects the host name (see `apply` above). |
+| Query string and `Location` headers | Unchanged. The sign-in hand-over sends absolute `https://` addresses of the other host names. |
+| Redirects (3xx) | Not cached |
+| Read and write timeouts to this server | 720 seconds or more, for long reports and imports |
+| Upload size | 128 MB or more |
+| The App API path (`/dev/uiux/api/`, `/uat/uiux/api/`) | No JavaScript challenge (anti-crawler) and no CC "verification code". The page calls the API in the background and cannot show a challenge. |
+| Certificate for the browsers | Covers every host name that the front serves |
+| Back-to-source addresses | The front's owner gives the full list of address ranges. Then a firewall can allow port 443 (setup A) or port 80 (setup B) only from these ranges, and port 443 also from the networks that need the direct path, such as support PCs. |
+
+**The front must not:**
+
+- **Send requests to port 80 for a route without `http`.** This makes the
+  redirect loop above.
+- **Send requests to the App port (8110) or to another port of the services.**
+  These ports bypass the nginx of `https.sh`: the session cookie does not get
+  `Secure`, the App does not get `X-Forwarded-Proto: https`, and the `api`
+  limits do not apply. With `BIND_IP=127.0.0.1`, as on the grey DEV server,
+  port 8110 listens on this server only, and a front cannot reach it.
+
+In the access log of this server, the sender of each request is the front, not
+the browser. nginx replaces `X-Forwarded-For` and `X-Real-IP` with the address
+that connects to it, so the services also see the front's addresses. The limit
+of an `api` route is then for each front address
+([An API route](#an-api-route)).
+
+**Check the path of each host name:**
+
+- **On this server:**
+
+  ```bash
+  sudo bash https.sh diagnose
+  sudo bash https.sh diagnose --front ADDRESS[:PORT]
+  ```
+
+  `diagnose` changes no file, does not reload nginx and needs no certificate.
+  `--front` gives an address of the front (port 443 if there is no port). Use
+  an address that the PCs resolve for the host name (`nslookup HOST` on a PC).
+  Without `--front`, `diagnose` uses the address that this server resolves for
+  each host name. It skips that check with a `NOTE` when there is no address,
+  or when the address is one of this server's own. When the host names have
+  different front addresses, run `diagnose` once with an address of each host
+  name, and read the line of that host name.
+  `--access-log FILE` and `--error-log FILE` read other logs (the defaults are
+  `/var/log/nginx/access.log` and `/var/log/nginx/error.log`).
+
+  Each line under a section starts with `OK`, `PROBLEM` or `NOTE`:
+
+  | Section | What it checks |
+  |---|---|
+  | `Ports:` | Ports 22, 80, 443 and the port of each route: listening on all networks, on this server only, or not listening |
+  | `nginx files:` | The nginx files that listen on ports 80 and 443 (`nginx -T`). A `NOTE` when Ubuntu's default site answers other names on port 80. The default server of port 443 in the file of `apply` gives no `NOTE`. A `NOTE` for each other nginx file that serves a host name of the table on port 80 or 443, such as a hand-written front file or a changed default site: `apply` refuses these names, and nginx uses the file that it reads first. The `NOTE` gives the steps in this order: first add `http` to each route that a TLS front reaches on port 80, then remove the file and run `apply`. `nginx -T` creates a missing log file of nginx, so `diagnose` does not run it, and gives a `NOTE`, when the access log or the error log that it reads, or a log file that `nginx -V` names, does not exist. |
+  | `Host names:` | For each host name and path: HTTPS on this server, and HTTP on this server. For a route without `http`, HTTP must be a 301 to `https://` with the same host name and path. For a route with `http`, HTTP must give the same answer as HTTPS. A 301 there is a `PROBLEM`: run `apply`, or remove the other nginx file that serves the name. For a route without `http`, the same answer as HTTPS on port 80 is a `PROBLEM` too: another nginx file serves the route on port 80, or `http` was removed after the last `apply`. If a TLS front connects on port 80 for that route, first add `http` to it. Otherwise `apply` makes port 80 redirect, and the front loops. For each host name, one time: the path through the front, with at most 5 redirects. The check uses the first route without `http` that has a known port, else the first route with a known port. A redirect to the same address, or too many redirects, is a `PROBLEM`: for a route without `http`, the front sends HTTPS requests to port 80 of this server. The line gives the two remedies: setup A on the front, or `http` on the route (setup B). |
+  | `Access log:` | The 301 answers by sender address (the top 5). A redirect loop is 5 or more 301 answers within 10 seconds for the same sender, request and browser (user agent). A loop in the last 30 minutes is a `PROBLEM`, with the two remedies. An earlier loop is a `NOTE` that gives its age in minutes. `diagnose` reads the whole current file, not the rotated files. |
+  | `nginx workers:` | The number of `exited on signal` lines in the error log, and the last one |
+
+  The last line is `Result: no problem found` (exit status 0) or
+  `Result: N problem(s) found` (exit status 4). Each `curl` call stops after
+  10 seconds. A missing `curl`, `nginx`, `ss` or `getent` gives a `NOTE` for
+  that check.
+
+  Behind a front, many users share a few front addresses. Five users with the
+  same browser who open the same `http://` address, or the same path without
+  its last slash (`/dev`), within 10 seconds look like a loop in the access
+  log. The check through the front under `Host names:` tells which it is.
+
+- **On a Windows PC:** [scripts/client-check.ps1](scripts/client-check.ps1)
+  shows, for each host name, the addresses that the PC resolves, the normal
+  path (through the front), the certificate as a browser on the PC checks it,
+  the direct path to the App server (with `-AppServer`), the hand-over mode
+  and a verdict: `OK`, `LOOP`, `FRONT problem`, `SERVER problem`,
+  `UNREACHABLE` or `NOT CHECKED`. The reason of a `LOOP` gives the two
+  remedies. The exit status is 0 when each verdict is `OK`, 4 when one is
+  not, and 2 when the script refuses the options (it then prints `ERROR`
+  lines). See [check 5 of the self-check](docs/RUNBOOK.md#5-your-computer-does-each-name-reach-the-app).
+- **The `http://` addresses in setup B:** `diagnose` and `client-check.ps1`
+  do not check how the front answers them. On a PC, run
+  `curl.exe -sS -o NUL -D - http://HOST/PATH`. The answer must be a redirect
+  to `https://` from the front (the `Server` header of the front), not the
+  page.
 
 ### Behind a TLS front on port 80
 
@@ -1160,7 +1292,8 @@ refuses `api`.
 
 ### Later
 
-Each is `sudo bash https.sh COMMAND` from the `scripts` folder; `--help` lists them all.
+Each is `sudo bash https.sh COMMAND` from the `scripts` folder, except the check
+from a PC; `--help` lists them all.
 
 | To | Run |
 |---|---|
@@ -1171,5 +1304,7 @@ Each is `sudo bash https.sh COMMAND` from the `scripts` folder; `--help` lists t
 | Add a host name | Add it to the table, `csr`, have the request signed, `install-cert FILE [CHAIN]`, then `apply`. With Let's Encrypt: add it to the table, `letsencrypt` (it prints the new record), have the record created, `letsencrypt` again, then `apply`. |
 | Go back from Let's Encrypt to the issuer | `csr`, have the request signed, `install-cert FILE [CHAIN]`. The timer leaves that certificate alone. |
 | Remove HTTPS | `uninstall --confirm yes`, which also removes the Let's Encrypt timer. With `--purge` it also deletes the key, certificate, request and table, and the Let's Encrypt accounts and certificates. |
+| A page says it redirected you too many times | `diagnose`; with a WAF or another front proxy, `diagnose --front ADDRESS[:PORT]` (an address that the PCs resolve for the host name). A `PROBLEM` line about a redirect loop means that the front sends HTTPS requests to port 80, and port 80 redirects them. For a route without `http`, ask the front's owner to send HTTPS to port 443 with the original Host header (setup A), or add `http` to the route and run `apply` (setup B, with its risks). If the route already has `http`, run `apply`, or remove the other nginx file that serves the name (see the HTTP line of the route in `diagnose`). Do not send the front to the App port. See [Behind a WAF or another front proxy](#behind-a-waf-or-another-front-proxy) and the [record of 2026-10-08](docs/WAF-REDIRECT-LOOP-2026-10-08.md). |
+| Check which path each name takes from a PC | On a Windows PC, in PowerShell, in the folder of [scripts/client-check.ps1](scripts/client-check.ps1): `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass`, then `.\client-check.ps1 -AppServer APP_SERVER_IP`. It compares the normal path with the direct path to the App server and gives a verdict for each host name. See [check 5 of the self-check](docs/RUNBOOK.md#5-your-computer-does-each-name-reach-the-app). |
 
 [Self-check](docs/RUNBOOK.md) · [Reference](docs/DEPLOYMENT.md) · [Tests](tests/README.md)

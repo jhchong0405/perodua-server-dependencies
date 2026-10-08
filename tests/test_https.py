@@ -18,6 +18,15 @@ directory and the acme-dns server, the fake dig the CNAME records the test puts
 in each DNS server. The renewal units and the script's copy go to temporary
 directories (--unit-dir, --lib-dir).
 
+For diagnose (its user agent), the fake curl answers HTTPS (port 443) and HTTP
+(port 80) on 127.0.0.1 as a kit nginx without http routes does unless the test
+says otherwise, and a front at
+the address and port the test names, a front that answers each request with a
+redirect to the same URL included; the fake getent gives the addresses the
+test puts in for a host name, and the fake ss the listening sockets. The fake
+nginx -V names the log files the test gives it, and the fake date gives the
+time the test sets for "date +%s" (every other date call is the real one).
+
 The script asks systemd, the fake systemctl here, only where systemd runs
 (/run/systemd/system). In a container without systemd, such as the test image,
 that directory is made for these tests and removed after them. Nothing else
@@ -149,6 +158,9 @@ with open(os.environ["FAKE_STATE"]) as f:
     state = json.load(f)
 if (args == ["-t"] and state["t_status"]) or (args == ["-T"] and state["T_status"]):
     sys.exit("nginx: [emerg] fake failure")
+if args == ["-V"]:
+    paths = "".join(f" --{kind}-log-path={path}" for kind, path in zip(("http", "error"), state["nginx_logs"]))
+    sys.exit(f"nginx version: nginx/1.24.0 (Ubuntu)\nconfigure arguments: --prefix=/usr/share/nginx{paths}")
 if args == ["-T"]:
     print("# configuration file /etc/nginx/nginx.conf:\nhttp { include /etc/nginx/conf.d/*.conf; }\n")
     files = dict(state["others"])
@@ -193,6 +205,35 @@ with open(os.environ["FAKE_LOG"], "a") as log:
     log.write(json.dumps(["curl"] + args) + "\n")
 state = json.load(open(os.environ["FAKE_STATE"]))
 url = args[-1]
+if "perodua-https-diagnose" in args:
+    flag = "--resolve" if "--resolve" in args else "--connect-to"
+    parts = args[args.index(flag) + 1].split(":")
+    target = parts[2] + ":" + (parts[1] if flag == "--resolve" else parts[3])
+    web = {"127.0.0.1:443": {"code": "200", "server": "nginx/1.24.0 (Ubuntu)"},
+           "127.0.0.1:80": {"code": "301", "server": "nginx/1.24.0 (Ubuntu)", "location": "{https}"}}
+    web.update(state["web"])
+    answer = web.get(f"{target} {url}", web.get(target))
+    code, location, hops, status = "000", "", 1, 0
+    if answer:
+        code = answer["code"]
+        location = (answer.get("location", "").replace("{url}", url).replace("{https}", "https" + url[url.index(":"):])
+                    .replace("{path}", "/" + url.split("/", 3)[3]))
+        if code.startswith("3") and "-L" in args and (location == url or answer.get("endless")):
+            hops, status = int(args[args.index("--max-redirs") + 1]) + 1, 47
+    if "-D" in args:
+        block = (f"HTTP/1.1 {code} Fake\r\nServer: {answer['server']}\r\n" + (f"Location: {location}\r\n" if location else "")
+                 + "\r\n") if answer else ""
+        with open(args[args.index("-D") + 1], "w") as f:
+            f.write(block * hops)
+    if "-w" in args:
+        print(args[args.index("-w") + 1].replace("%{http_code}", code)
+              .replace("%{redirect_url}", location if code.startswith("3") else ""), end="")
+    if not answer:
+        print(f"curl: (7) Failed to connect to {parts[2]} port {target.rsplit(':', 1)[1]}: Connection refused", file=sys.stderr)
+        sys.exit(7)
+    if status:
+        print(f"curl: (47) Maximum ({hops - 1}) redirects followed", file=sys.stderr)
+    sys.exit(status)
 if any(url.startswith(prefix) for prefix in state["unreachable"]):
     sys.exit("curl: (28) Connection timed out after 20002 milliseconds")
 out = args[args.index("-o") + 1] if "-o" in args else None
@@ -303,13 +344,31 @@ print(f";; Got answer:\n;; ->>HEADER<<- opcode: QUERY, status: {status}, id: 424
 if status == "NOERROR":
     print(f"{name}.\t\t300\tIN\tCNAME\t{answer}.")
 '''
+FAKE_GETENT = r'''#!/usr/bin/env python3
+import json, os, sys
+args = sys.argv[1:]
+with open(os.environ["FAKE_LOG"], "a") as log:
+    log.write(json.dumps(["getent"] + args) + "\n")
+addresses = json.load(open(os.environ["FAKE_STATE"]))["getent"].get(args[-1], [])
+for address in addresses:
+    print(f"{address}  STREAM {args[-1]}\n{address}  DGRAM  \n{address}  RAW    ")
+sys.exit(0 if addresses else 2)
+'''
+FAKE_DATE = r'''#!/usr/bin/env python3
+import json, os, sys
+now = json.load(open(os.environ["FAKE_STATE"]))["now"]
+if now is not None and sys.argv[1:] == ["+%s"]:
+    print(now)
+    sys.exit(0)
+os.execv("REAL_DATE", ["date"] + sys.argv[1:])
+'''
 DIRECTORY = {"newNonce": "https://acme.example/nonce", "newAccount": "https://acme.example/account",
              "newOrder": "https://acme.example/order", "meta": {"termsOfService": TERMS}}
 DEFAULT_STATE = {"t_status": 0, "T_status": 0, "others": {}, "active": True, "ss": "", "reload_takes": True,
                  "probe_fails": False, "timer": "active", "renewal_result": "success", "unreachable": [],
                  "directory": DIRECTORY, "acme_dns_code": "200", "register_code": "201",
                  "docker": {"running": True, "image": True, "pull": True},
-                 "lego": {"days": 90}, "dns": {"": {}}}
+                 "lego": {"days": 90}, "dns": {"": {}}, "web": {}, "getent": {}, "now": None, "nginx_logs": []}
 FAKE_APT = r'''#!/usr/bin/env python3
 import json, os, sys
 with open(os.environ["FAKE_LOG"], "a") as log:
@@ -442,7 +501,8 @@ class Base(unittest.TestCase):
         bin_dir = self.bin_dir = self.tmp / "bin"
         bin_dir.mkdir()
         fakes = {"nginx": FAKE_NGINX, "systemctl": FAKE_SYSTEMCTL, "ss": FAKE_SS, "curl": FAKE_CURL, "apt-get": FAKE_APT,
-                 "docker": FAKE_DOCKER, "dig": FAKE_DIG,
+                 "docker": FAKE_DOCKER, "dig": FAKE_DIG, "getent": FAKE_GETENT,
+                 "date": FAKE_DATE.replace("REAL_DATE", shutil.which("date")),
                  "openssl": FAKE_OPENSSL.replace("REAL_OPENSSL", shutil.which("openssl"))}
         for name, text in fakes.items():
             (bin_dir / name).write_text(text)
@@ -1853,6 +1913,597 @@ class LetsEncryptTest(Base):
         result = self.ok("uninstall", "--purge", "--confirm", "yes")
         self.assertIn("and the Let's Encrypt accounts and certificates", result.stdout)
         self.assertEqual(self.files(), ["notes.txt"])
+
+
+LISTENING = "".join(f"LISTEN 0 511 {address} 0.0.0.0:*\n" for address in (
+    "0.0.0.0:22", "[::]:22", "0.0.0.0:80", "[::]:80", "0.0.0.0:443", "127.0.0.1:8000", "127.0.0.1:8001", "127.0.0.1:8110",
+    "127.0.0.1:8111", "127.0.0.1:5432", "127.0.1.1:5432", "127.0.0.53%lo:53"))
+UBUNTU_DEFAULT = {"/etc/nginx/sites-enabled/default": "server {\n\tlisten 80 default_server;\n\tlisten [::]:80 default_server;\n"
+                                                      "\t# listen 443 ssl default_server;\n\troot /var/www/html;\n"
+                                                      "\tserver_name _;\n}"}
+EDGE = '"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36 Edg/141.0.0.0"'
+CHROME = '"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"'
+MYT = datetime.timezone(datetime.timedelta(hours=8))
+NOW = int(datetime.datetime(2026, 10, 8, 14, 30, tzinfo=MYT).timestamp())
+NOVEMBER = int(datetime.datetime(2026, 11, 1, 0, 10, tzinfo=MYT).timestamp())
+SBIN = ("/usr/local/sbin", "/usr/sbin", "/sbin")
+BROWSER_LOG = "".join(line + "\n" for line in [
+    f'10.1.2.3 - - [08/Oct/2026:09:00:00 +0800] "GET /dev HTTP/1.1" 301 178 "-" {EDGE}',
+    f'10.1.2.3 - - [08/Oct/2026:09:00:00 +0800] "GET /dev/ HTTP/1.1" 303 0 "-" {EDGE}',
+    f'10.1.2.3 - - [08/Oct/2026:09:00:01 +0800] "GET /dev/web/login HTTP/1.1" 200 5120 "-" {EDGE}',
+    f'10.1.2.3 - - [08/Oct/2026:09:00:20 +0800] "GET /dev HTTP/1.1" 301 178 "-" {EDGE}',
+    f'10.1.2.3 - - [08/Oct/2026:09:00:40 +0800] "GET /dev HTTP/1.1" 301 178 "-" {EDGE}',
+    f'10.1.2.3 - - [08/Oct/2026:09:00:41 +0800] "GET /uat HTTP/1.1" 301 178 "-" {EDGE}',
+    f'10.1.2.3 - - [08/Oct/2026:09:00:41 +0800] "GET /dev/api HTTP/1.1" 301 178 "-" {EDGE}',
+    f'10.4.5.6 - - [08/Oct/2026:09:01:00 +0800] "GET /dev/api HTTP/1.1" 301 178 "-" {EDGE}',
+    f'10.4.5.6 - - [08/Oct/2026:09:01:02 +0800] "GET /dev/api HTTP/1.1" 301 178 "-" {EDGE}',
+    f'10.7.8.9 - - [08/Oct/2026:09:02:00 +0800] "GET /uat HTTP/1.1" 301 178 "-" {EDGE}',
+    f'10.7.8.10 - - [08/Oct/2026:09:02:01 +0800] "GET /uat HTTP/1.1" 301 178 "-" {EDGE}',
+    f'10.7.8.11 - - [08/Oct/2026:09:02:02 +0800] "GET /uat HTTP/1.1" 301 178 "-" {EDGE}',
+    f'10.9.9.9 - - [08/Oct/2026:09:03:00 +0800] "GET /dev HTTP/1.1" 301 178 "-" {EDGE}',
+    f'10.9.9.9 - - [09/Oct/2026:09:03:01 +0800] "GET /dev HTTP/1.1" 301 178 "-" {EDGE}',
+    f'10.9.9.9 - - [09/Oct/2026:09:03:02 +0800] "GET /dev HTTP/1.1" 301 178 "-" {EDGE}',
+    *[f'10.20.30.40 - - [08/Oct/2026:09:05:0{n} +0800] "GET /dev HTTP/1.1" 301 178 "-" {EDGE}' for n in range(4)],
+    *[f'10.20.30.40 - - [08/Oct/2026:09:06:0{n} +0800] "GET /dev/app/ HTTP/1.1" 301 178 "-" {EDGE if n < 3 else CHROME}'
+      for n in range(5)],
+    '127.0.0.1 - - [09/Oct/2026:10:00:00 +0800] "GET /dev/ HTTP/1.1" 301 178 "-" "perodua-https-diagnose"',
+    '127.0.0.1 - - [09/Oct/2026:10:00:00 +0800] "GET /dev/ HTTP/1.1" 301 178 "-" "perodua-https-diagnose"',
+    '127.0.0.1 - - [09/Oct/2026:10:00:01 +0800] "GET /dev/ HTTP/1.1" 301 178 "-" "perodua-https-diagnose"',
+    'a line in another format',
+    '10.1.2.3 - - [99/Foo/2026:09:00:00 +0800] "GET /dev HTTP/1.1" 301 178 "-" "-"',
+    '10.1.2.3 - - [08/Oct/2026:09:00:00 +0800] "GET /dev HTTP/1.1" 3o1 178 "-" "-"'])
+WAF_LOG = "".join(line + "\n" for line in [
+    *[f'202.165.23.137 - - [08/Oct/2026:14:20:{second} +0800] "GET /dev/uiux/api/handover/start?next=%2Fapp%2F HTTP/1.1" '
+      f'301 178 "https://stgissrp.perodua.com.my/" {EDGE}' for second in (33, 33, 34, 34, 36)],
+    *['202.165.23.17 - - [08/Oct/2026:14:24:21 +0800] "GET /dev/app/ HTTP/1.1" 301 178 "-" "curl/8.13.0"'] * 5])
+MONTH_END_LOG = "".join(f'202.165.23.66 - - [{when} +0800] "GET /dev/web/login HTTP/1.1" 301 178 "-" {EDGE}\n'
+                        for when in ("31/Oct/2026:23:59:57", "31/Oct/2026:23:59:58", "31/Oct/2026:23:59:59",
+                                     "01/Nov/2026:00:00:00", "01/Nov/2026:00:00:01"))
+LOOP = ("sends HTTPS requests to port 80 of this server, where this route redirects to https://: a redirect loop. Ask the "
+        "front's owner to forward HTTPS to port 443 with the original Host header, or add http to this route (README: Behind "
+        "a TLS front on port 80)\n")
+REMEDY = (". Ask the front's owner to forward HTTPS to port 443 with the original Host header, or add http to the route of this "
+          "request (README: Behind a TLS front on port 80)")
+NOT_HTTP = ": without http on the route, port 80 must only send browsers to HTTPS (apply)\n"
+FIRST = {HOSTS[0]: "/dev/api/", HOSTS[1]: "/dev/"}
+HTTP_ROUTES = """api.example.perodua.com.my /dev/api/ 8000 strip,http
+api.example.perodua.com.my /uat/api/ 8001 http,strip
+stgissrp.perodua.com.my /dev/ 8110 http
+stgissrp.perodua.com.my /uat/ 8111 http
+"""
+
+
+def answers(sender, request, *times, agent='"curl/8.13.0"'):
+    return "".join(f'{sender} - - [08/Oct/2026:{when}] "{request}" 301 178 "-" {agent}\n' for when in times)
+
+
+def loop_lines(out):
+    return [line for line in out.splitlines() if "redirect loop" in line]
+
+
+def served(host, path, code="200"):
+    return (f"  PROBLEM {host} {path}: HTTP on this server answers {code} as HTTPS does, but the route has no http: another "
+            f"nginx file serves {host} on port 80 (see nginx files), or http was removed after the last apply. If a TLS front "
+            "connects on port 80 for this route, first add http to the route (README: Behind a TLS front on port 80), else "
+            "apply makes port 80 redirect it and the front loops. Then remove the other nginx file, if there is one, and run "
+            "apply\n")
+
+
+def other_file(path, names):
+    return (f"  NOTE {path}, a file that apply did not write, serves host names of the table: {names}. apply refuses a host "
+            "name that another nginx file serves, and for one host name and port nginx uses the file that it reads first. To "
+            "serve them with the routes of the table, first add http to each route that a TLS front reaches on port 80 "
+            f"(README: Behind a TLS front on port 80), then remove {path} and run apply\n")
+
+
+@needs_root
+class DiagnoseTest(Base):
+    def setUp(self):
+        super().setUp()
+        self.now = NOW
+        self.access, self.errors = self.tmp / "access.log", self.tmp / "error.log"
+        self.access.write_text(BROWSER_LOG)
+        self.errors.write_text("2026/10/08 14:00:00 [error] 1234#1234: *1 connect() failed (111: Connection refused) while "
+                               "connecting to upstream, client: 10.1.2.3, server: stgissrp.perodua.com.my\n")
+
+    def set_state(self, **changes):
+        super().set_state(**dict({"now": getattr(self, "now", None)}, **changes))
+
+    def diagnose(self, *args, access=None, errors=None):
+        return self.run_script("diagnose", "--access-log", access or self.access, "--error-log", errors or self.errors, *args)
+
+    def healthy(self, **state):
+        self.installed()
+        self.ok("apply")
+        self.set_state(**dict({"ss": LISTENING, "others": UBUNTU_DEFAULT}, **state))
+
+    def expect(self, result, status):
+        self.assertEqual(result.returncode, status, result.stdout + result.stderr)
+        self.assertEqual(result.stderr, "")
+        return result.stdout
+
+    def test_a_healthy_server_with_browser_redirects_has_no_problem(self):
+        self.healthy()
+        out = self.expect(self.diagnose(), 0)
+        self.assertEqual([line for line in out.splitlines() if not line.startswith("  ")],
+                         ["Ports:", "nginx files:", "Host names:", "Access log:", "nginx workers:", "Result: no problem found"])
+        for line in out.splitlines():
+            if line.startswith("  "):
+                self.assertRegex(line, r"^  (OK|NOTE) \S")
+        self.assertIn("  OK port 22 (SSH): listening on all networks (0.0.0.0:22, [::]:22)\n", out)
+        self.assertIn("  OK port 80 (HTTP): listening on all networks (0.0.0.0:80, [::]:80)\n", out)
+        self.assertIn("  OK port 443 (HTTPS): listening on all networks (0.0.0.0:443)\n", out)
+        self.assertIn("  OK port 8110 (https://stgissrp.perodua.com.my/dev/): on this server only (127.0.0.1:8110)\n", out)
+        self.assertIn("  OK port 8000 (https://api.example.perodua.com.my/dev/api/): on this server only (127.0.0.1:8000)\n", out)
+        self.assertEqual(out[:out.index("nginx files:")].count("  OK port "), 7)
+        self.assertIn(f"  OK port 80: /etc/nginx/sites-enabled/default, {self.conf}\n", out)
+        self.assertIn(f"  OK port 443: {self.conf}\n", out)
+        self.assertIn("  NOTE /etc/nginx/sites-enabled/default is the default server on port 80: it answers every other host "
+                      "name and the bare address (Ubuntu's default site: the \"Welcome to nginx\" page); a front that changes "
+                      "the Host header gets it, not the App\n", out)
+        for host, path in (("api.example.perodua.com.my", "/dev/api/"), ("api.example.perodua.com.my", "/uat/api/"),
+                           ("stgissrp.perodua.com.my", "/dev/"), ("stgissrp.perodua.com.my", "/uat/")):
+            self.assertIn(f"  OK {host} {path}: HTTPS on this server answers 200\n", out)
+            self.assertIn(f"  OK {host} {path}: HTTP on this server answers 301 to https://{host}{path}\n", out)
+        for host in HOSTS:
+            self.assertIn(f"  NOTE {host}: the system resolver gives no IPv4 address: the way through a front was not checked "
+                          "(pass --front ADDRESS)\n", out)
+        self.assertEqual(loop_lines(out), [f"  OK no redirect loop in {self.access} (30 lines, 22 answers 301, 3 lines in "
+                                           "another format skipped, 3 requests of diagnose itself skipped)"])
+        self.assertIn("  NOTE 10.20.30.40: 9 answers 301, the last to GET /dev/app/ HTTP/1.1 at 08/Oct/2026:09:06:04 +0800\n",
+                      out)
+        self.assertIn("  NOTE 10.1.2.3: 5 answers 301, the last to GET /dev/api HTTP/1.1 at 08/Oct/2026:09:00:41 +0800\n", out)
+        self.assertIn("  NOTE 10.9.9.9: 3 answers 301, the last to GET /dev HTTP/1.1 at 09/Oct/2026:09:03:02 +0800\n", out)
+        self.assertEqual(out.count(" answers 301, the last to "), 5)
+        self.assertEqual(out.count(": 1 answers 301"), 1)
+        self.assertNotIn("127.0.0.1:", out[out.index("Access log:"):])
+        self.assertIn(f"  OK no nginx worker exited on a signal ({self.errors})\n", out)
+        signal = "2026/10/07 17:40:02 [alert] 2120#2120: worker process 2125 exited on signal 9"
+        self.errors.write_text(f"2026/10/01 10:00:00 [alert] 2120#2120: worker process 2121 exited on signal 11\n{signal}\n")
+        out = self.expect(self.diagnose(), 0)
+        self.assertIn(f"  NOTE 2 nginx worker exit(s) on a signal in {self.errors} (nginx starts a new worker each time); "
+                      f"the last: {signal}\n", out)
+
+    def test_a_front_that_sends_https_to_port_80_is_a_redirect_loop(self):
+        self.healthy(web={"203.0.113.10:443": {"code": "301", "server": "CloudWAF", "location": "{url}"}})
+        out = self.expect(self.diagnose("--front", "203.0.113.10"), 4)
+        for host in HOSTS:
+            self.assertIn(f"  PROBLEM {host} {FIRST[host]}: the front at 203.0.113.10 (Server: CloudWAF) {LOOP}", out)
+        self.assertTrue(out.endswith("\nResult: 2 problem(s) found\n"), out)
+        curls = [call for call in self.calls() if call[0] == "curl"]
+        self.assertEqual(len(curls), 10)
+        for call in curls:
+            self.assertTrue(given(call, "--max-time", "10"), call)
+        fronts = [call for call in curls if "--connect-to" in call]
+        self.assertEqual([call[call.index("--connect-to") + 1] for call in fronts],
+                         [f"{host}:443:203.0.113.10:443" for host in HOSTS])
+        self.assertEqual([call[-1] for call in fronts], [f"https://{HOSTS[0]}/dev/api/", f"https://{HOSTS[1]}/dev/"])
+        for call in fronts:
+            self.assertTrue(given(call, "-L", "--max-redirs", "5"), call)
+        self.set_state(ss=LISTENING, others=UBUNTU_DEFAULT,
+                       web={"203.0.113.10:8443": {"code": "301", "server": "CloudWAF", "location": "{path}"}})
+        out = self.expect(self.diagnose("--front", "203.0.113.10:8443"), 4)
+        self.assertIn(f"  PROBLEM stgissrp.perodua.com.my /dev/: the front at 203.0.113.10:8443 (Server: CloudWAF) {LOOP}", out)
+        self.assertIn(f"{HOSTS[1]}:443:203.0.113.10:8443", [call[call.index("--connect-to") + 1] for call in self.calls()
+                                                            if "--connect-to" in call])
+        self.set_state(ss=LISTENING, others=UBUNTU_DEFAULT,
+                       web={"203.0.113.10:443": {"code": "302", "server": "CloudWAF", "location": "{url}?again",
+                                                 "endless": True}})
+        out = self.expect(self.diagnose("--front", "203.0.113.10"), 4)
+        for host in HOSTS:
+            self.assertIn(f"  PROBLEM {host} {FIRST[host]}: the front at 203.0.113.10 (Server: CloudWAF) {LOOP}", out)
+        self.assertTrue(out.endswith("\nResult: 2 problem(s) found\n"), out)
+
+    def test_a_front_that_forwards_to_443_is_ok(self):
+        self.healthy(web={"203.0.113.10:443": {"code": "200", "server": "CloudWAF"}},
+                     getent={HOSTS[0]: ["127.0.0.1"], HOSTS[1]: ["203.0.113.10", "203.0.113.11", "203.0.113.12"]})
+        out = self.expect(self.diagnose(), 0)
+        self.assertIn(f"  NOTE {HOSTS[0]}: the system resolver gives 127.0.0.1, an address of this server: no front to check "
+                      "(pass --front ADDRESS to check one)\n", out)
+        self.assertIn(f"  OK {HOSTS[1]} /dev/: through the front at 203.0.113.10 answers 200 (Server: CloudWAF)\n", out)
+        self.assertIn(["getent", "ahostsv4", HOSTS[1]], self.calls())
+        out = self.expect(self.diagnose("--front", "203.0.113.10:443"), 0)
+        self.assertIn(f"  OK {HOSTS[0]} /dev/api/: through the front at 203.0.113.10:443 answers 200 (Server: CloudWAF)\n", out)
+        self.assertNotIn("getent", [call[0] for call in self.calls()])
+        out = self.expect(self.diagnose("--front", "203.0.113.99"), 0)
+        self.assertIn(f"  NOTE {HOSTS[1]}: no answer through the front at 203.0.113.99 (curl: (7) Failed to connect to "
+                      "203.0.113.99 port 443: Connection refused): this way was not checked from this server\n", out)
+        self.set_state(ss=LISTENING, others=UBUNTU_DEFAULT, web={"203.0.113.10:443": {"code": "403", "server": "CloudWAF"}})
+        out = self.expect(self.diagnose("--front", "203.0.113.10"), 4)
+        self.assertIn(f"  PROBLEM {HOSTS[1]}: the front at 203.0.113.10 answers 403 (Server: CloudWAF), this server answers "
+                      f"200 over HTTPS: ask the front's owner to check its entry for {HOSTS[1]}\n", out)
+        self.set_state(ss=LISTENING, others=UBUNTU_DEFAULT, web={"127.0.0.1:443": {"code": "404", "server": "nginx"},
+                                                                 "203.0.113.10:443": {"code": "404", "server": "CloudWAF"}})
+        out = self.expect(self.diagnose("--front", "203.0.113.10"), 0)
+        self.assertIn(f"  OK {HOSTS[1]} /dev/: through the front at 203.0.113.10 answers 404 (Server: CloudWAF), as this "
+                      "server does\n", out)
+        self.set_state(ss=LISTENING, others=UBUNTU_DEFAULT, web={"127.0.0.1:443": {"code": "502", "server": "nginx"},
+                                                                 "203.0.113.10:443": {"code": "502", "server": "CloudWAF"}})
+        out = self.expect(self.diagnose("--front", "203.0.113.10"), 4)
+        self.assertIn(f"  PROBLEM {HOSTS[1]}: the front at 203.0.113.10 answers 502 (Server: CloudWAF), this server answers "
+                      f"502 over HTTPS: ask the front's owner to check its entry for {HOSTS[1]}\n", out)
+
+    def test_the_access_log_finds_the_redirect_loop_of_a_waf(self):
+        self.healthy()
+        self.access.write_text(BROWSER_LOG + WAF_LOG)
+        out = self.expect(self.diagnose(), 4)
+        self.assertEqual(loop_lines(out), [
+            "  PROBLEM redirect loop from 202.165.23.137 (5 answers, last: GET /dev/uiux/api/handover/start?next=%2Fapp%2F "
+            "HTTP/1.1 at 08/Oct/2026:14:20:36 +0800): it forwards HTTPS requests to port 80 of this server" + REMEDY,
+            "  PROBLEM redirect loop from 202.165.23.17 (5 answers, last: GET /dev/app/ HTTP/1.1 at 08/Oct/2026:14:24:21 "
+            "+0800): it forwards HTTPS requests to port 80 of this server" + REMEDY])
+        self.assertIn("  NOTE 202.165.23.17: 5 answers 301, the last to GET /dev/app/ HTTP/1.1 at 08/Oct/2026:14:24:21 +0800\n",
+                      out)
+        self.assertTrue(out.endswith("\nResult: 2 problem(s) found\n"), out)
+        self.now = NOVEMBER
+        self.set_state(ss=LISTENING, others=UBUNTU_DEFAULT)
+        self.access.write_text(WAF_LOG + MONTH_END_LOG)
+        out = self.expect(self.diagnose(), 4)
+        self.assertEqual(loop_lines(out), [
+            "  PROBLEM redirect loop from 202.165.23.66 (5 answers, last: GET /dev/web/login HTTP/1.1 at 01/Nov/2026:00:00:01 "
+            "+0800): it forwards HTTPS requests to port 80 of this server" + REMEDY,
+            "  NOTE earlier redirect loop from 202.165.23.137 (5 answers, last: GET /dev/uiux/api/handover/start?next=%2Fapp%2F "
+            "HTTP/1.1 at 08/Oct/2026:14:20:36 +0800, 33709 minutes before this run): it forwarded HTTPS requests to port 80 "
+            "of this server then",
+            "  NOTE earlier redirect loop from 202.165.23.17 (5 answers, last: GET /dev/app/ HTTP/1.1 at 08/Oct/2026:14:24:21 "
+            "+0800, 33705 minutes before this run): it forwarded HTTPS requests to port 80 of this server then"])
+        self.assertTrue(out.endswith("\nResult: 1 problem(s) found\n"), out)
+        self.now = NOW
+        self.set_state(ss=LISTENING, others=UBUNTU_DEFAULT)
+        browsers = "".join(f'10.{n // 65536 % 256}.{n // 256 % 256}.{n % 256} - - [08/Oct/2026:{n // 3600 % 24:02}:'
+                           f'{n // 60 % 60:02}:{n % 60:02} +0800] "GET /dev{"" if n % 50 else "/web"} HTTP/1.1" '
+                           f'{200 if n % 50 else 301} 178 "-" {EDGE}\n' for n in range(200000))
+        self.access.write_text(browsers + WAF_LOG)
+        out = self.expect(self.diagnose(), 4)
+        self.assertEqual(len([line for line in out.splitlines() if line.startswith("  PROBLEM redirect loop")]), 2)
+        self.assertEqual(out.count("answers 301, the last to"), 5)
+
+    def test_the_redirect_loop_rule_of_the_access_log(self):
+        self.healthy()
+
+        def six_senders(when):
+            return "".join(answers(f"10.0.0.{n}", "GET /dev/app/ HTTP/1.1", *[when] * (11 - n)) for n in range(1, 7))
+
+        self.access.write_text(six_senders("14:25:00 +0800"))
+        out = self.expect(self.diagnose(), 4)
+        self.assertEqual(loop_lines(out), [f"  PROBLEM redirect loop from 10.0.0.{n} ({11 - n} answers, last: GET /dev/app/ "
+                                           "HTTP/1.1 at 08/Oct/2026:14:25:00 +0800): it forwards HTTPS requests to port 80 "
+                                           "of this server" + REMEDY for n in range(1, 6)]
+                         + ["  NOTE 1 more senders with a redirect loop"])
+        self.assertTrue(out.endswith("\nResult: 5 problem(s) found\n"), out)
+        self.access.write_text(six_senders("10:00:00 +0800"))
+        out = self.expect(self.diagnose(), 0)
+        self.assertEqual(loop_lines(out), [f"  OK no redirect loop in the last 30 minutes of {self.access} (45 lines, 45 "
+                                           "answers 301)"]
+                         + [f"  NOTE earlier redirect loop from 10.0.0.{n} ({11 - n} answers, last: GET /dev/app/ HTTP/1.1 "
+                            "at 08/Oct/2026:10:00:00 +0800, 270 minutes before this run): it forwarded HTTPS requests to port "
+                            "80 of this server then" for n in range(1, 6)]
+                         + ["  NOTE 1 more senders with an earlier redirect loop"])
+        self.access.write_text(
+            answers("10.2.2.2", "GET /dev/app/ HTTP/1.1", "14:10:01 +0800", "06:10:02 +0000", "14:10:03 +0800",
+                    "06:10:04 +0000", "06:10:05 +0000")
+            + answers("10.6.6.6", "GET /dev/app/ HTTP/1.1", "01:10:01 -0500", "06:10:02 +0000", "01:10:03 -0500",
+                      "14:10:04 +0800", "06:10:05 +0000")
+            + answers("10.3.3.3", "GET /dev/app/ HTTP/1.1", "14:05:00 +0800", "14:04:00 +0800", "14:03:00 +0800",
+                      "14:02:00 +0800", "14:01:00 +0800")
+            + answers("10.5.5.5", "GET /dev/app/ HTTP/1.1", "14:20:00 +0800", "14:20:05 +0800", "14:20:10 +0800",
+                      "14:20:15 +0800", "14:20:20 +0800"))
+        out = self.expect(self.diagnose(), 4)
+        self.assertEqual(loop_lines(out), [f"  PROBLEM redirect loop from {sender} (5 answers, last: GET /dev/app/ HTTP/1.1 at "
+                                           "08/Oct/2026:06:10:05 +0000): it forwards HTTPS requests to port 80 of this server"
+                                           + REMEDY for sender in ("10.2.2.2", "10.6.6.6")])
+        self.assertTrue(out.endswith("\nResult: 2 problem(s) found\n"), out)
+
+    def test_missing_logs_and_tools_are_notes(self):
+        self.healthy()
+        out = self.expect(self.diagnose(access=self.tmp / "none.log", errors=self.tmp / "none-error.log"), 0)
+        self.assertIn(f"Access log:\n  NOTE {self.tmp}/none.log does not exist: the access log was not checked "
+                      "(--access-log FILE)\nnginx workers:\n", out)
+        self.assertIn(f"nginx workers:\n  NOTE {self.tmp}/none-error.log does not exist: the nginx workers were not checked "
+                      "(--error-log FILE)\nResult: no problem found\n", out)
+        out = self.expect(self.diagnose(access=self.tmp, errors=self.tmp), 0)
+        self.assertIn(f"  NOTE {self.tmp} cannot be read: the access log was not checked\n", out)
+        self.assertIn(f"  NOTE {self.tmp} cannot be read: the nginx workers were not checked\n", out)
+        self.access.write_text('{"time": "2026-10-08T14:24:21+08:00", "status": 301}\nanother line\n')
+        out = self.expect(self.diagnose(), 0)
+        self.assertIn(f"  NOTE none of the 2 lines of {self.access} is in nginx's combined format: the access log was not "
+                      "checked\n", out)
+        made = self.tmp / "nginx-logs" / "access.log"
+        made.parent.mkdir()
+        skipped = (f"nginx files:\n  NOTE the log file {made} does not exist, and nginx -T creates the log files that nginx "
+                   "names: the nginx files were not checked (nginx creates its log files when it starts)\nHost names:\n")
+        self.set_state(ss=LISTENING, others=UBUNTU_DEFAULT, nginx_logs=[str(made), str(self.errors)])
+        out = self.expect(self.diagnose(), 0)
+        self.assertIn(skipped, out)
+        self.assertIn(["nginx", "-V"], self.calls())
+        self.assertNotIn(["nginx", "-T"], self.calls())
+        self.assertFalse(made.exists())
+        self.set_state(ss=LISTENING, others=UBUNTU_DEFAULT)
+        out = self.expect(self.diagnose(access=made), 0)
+        self.assertIn(skipped, out)
+        self.assertIn(f"Access log:\n  NOTE {made} does not exist: the access log was not checked (--access-log FILE)\n", out)
+        self.assertNotIn(["nginx", "-T"], self.calls())
+        self.assertFalse(made.exists())
+        self.set_state(ss=LISTENING, others=UBUNTU_DEFAULT)
+        tools = self.tmp / "tools"
+        tools.mkdir()
+        replaced = ("curl", "getent", "ss", "nginx")
+        for directory in ("/usr/local/bin", "/usr/bin", "/bin"):
+            for name in sorted(os.listdir(directory)) if os.path.isdir(directory) else []:
+                if name not in replaced and not os.path.lexists(tools / name):
+                    (tools / name).symlink_to(Path(directory, name))
+        in_sbin = [name for name in replaced if any(Path(directory, name).exists() for directory in SBIN)]
+        for name in ("getent", "ss", "nginx"):
+            if name not in in_sbin:
+                (self.bin_dir / name).unlink()
+        self.env["PATH"] = f"{self.bin_dir}:{tools}"
+        out = self.expect(self.diagnose(), 0)
+        if "ss" not in in_sbin:
+            self.assertIn("Ports:\n  NOTE ss is not installed (apt-get install iproute2): the ports were not checked\n", out)
+        if "nginx" not in in_sbin:
+            self.assertIn("nginx files:\n  NOTE nginx is not installed (apply installs it): the nginx files were not "
+                          "checked\n", out)
+        if "getent" not in in_sbin:
+            for host in HOSTS:
+                self.assertIn(f"  NOTE {host}: getent is not installed: the way through a front was not checked "
+                              "(pass --front ADDRESS)\n", out)
+        if "curl" not in in_sbin:
+            (self.bin_dir / "curl").unlink()
+            out = self.expect(self.diagnose(), 0)
+            self.assertIn("Host names:\n  NOTE curl is not installed (apt-get install curl): the host names were not "
+                          "checked\nAccess log:\n", out)
+        if in_sbin:
+            self.skipTest(f"the test host has {', '.join(in_sbin)} in an sbin directory, which https.sh puts on its PATH: "
+                          "the check without it did not run")
+
+    def test_what_stops_the_host_names_is_a_problem(self):
+        self.healthy()
+        self.routes.write_text(ROUTES + "wom.example.perodua.com.my /dev/ -\n")
+        ports = LISTENING.replace("0.0.0.0:443", "127.0.0.1:443").replace("127.0.0.1:8110", "0.0.0.0:8110")
+        ports = "".join(line + "\n" for line in ports.splitlines() if ":22 " not in line and ":8111 " not in line)
+        self.set_state(ss=ports, others=UBUNTU_DEFAULT,
+                       web={"127.0.0.1:443 https://stgissrp.perodua.com.my/uat/": {"code": "502", "server": "nginx"},
+                            "127.0.0.1:443 https://api.example.perodua.com.my/dev/api/": {"code": "401", "server": "nginx"},
+                            "127.0.0.1:80": {"code": "200", "server": "nginx"},
+                            "127.0.0.1:80 http://stgissrp.perodua.com.my/uat/": {"code": "301", "server": "nginx",
+                                                                                "location": "{url}"},
+                            "127.0.0.1:80 http://api.example.perodua.com.my/uat/api/": {
+                                "code": "301", "server": "nginx", "location": "https://www.perodua.com.my/"}})
+        out = self.expect(self.diagnose(), 4)
+        self.assertIn("  NOTE port 22 (SSH): not listening\n", out)
+        self.assertIn("  PROBLEM port 443 (HTTPS): on this server only (127.0.0.1:443): browsers and a front on the network "
+                      "cannot reach HTTPS\n", out)
+        self.assertIn("  NOTE port 8110 (https://stgissrp.perodua.com.my/dev/): listening on all networks (0.0.0.0:8110): it "
+                      "answers plain HTTP from the network too; only nginx needs it, on 127.0.0.1\n", out)
+        self.assertIn("  PROBLEM port 8111 (https://stgissrp.perodua.com.my/uat/): not listening: the service does not run, and "
+                      "HTTPS answers 502 for its paths\n", out)
+        self.assertIn("  PROBLEM stgissrp.perodua.com.my /uat/: HTTPS on this server answers 502: nginx gets no good answer "
+                      "from 127.0.0.1:8111\n", out)
+        self.assertIn(served("stgissrp.perodua.com.my", "/dev/"), out)
+        self.assertIn("  PROBLEM api.example.perodua.com.my /dev/api/: HTTP on this server answers 200, not 301 to "
+                      f"https://api.example.perodua.com.my/dev/api/{NOT_HTTP}", out)
+        self.assertIn("  PROBLEM stgissrp.perodua.com.my /uat/: HTTP on this server answers 301 to "
+                      f"http://stgissrp.perodua.com.my/uat/, not 301 to https://stgissrp.perodua.com.my/uat/{NOT_HTTP}", out)
+        self.assertIn("  PROBLEM api.example.perodua.com.my /uat/api/: HTTP on this server answers 301 to "
+                      f"https://www.perodua.com.my/, not 301 to https://api.example.perodua.com.my/uat/api/{NOT_HTTP}", out)
+        self.assertIn("  NOTE wom.example.perodua.com.my /dev/: port - (not known yet): not checked\n", out)
+        self.assertTrue(out.endswith("\nResult: 7 problem(s) found\n"), out)
+        self.conf.unlink()
+        self.set_state(ss=LISTENING, others=UBUNTU_DEFAULT, web={"127.0.0.1:443": None})
+        out = self.expect(self.diagnose(), 4)
+        self.assertIn(f"  PROBLEM port 80: {self.conf} does not listen on it, only /etc/nginx/sites-enabled/default: run "
+                      "apply\n", out)
+        self.assertIn("  PROBLEM port 443: no nginx file listens on it: run apply\n", out)
+        self.assertIn("  PROBLEM stgissrp.perodua.com.my /dev/: no HTTPS answer on this server (curl: (7) Failed to connect "
+                      "to 127.0.0.1 port 443: Connection refused)\n", out)
+        self.set_state(T_status=1)
+        out = self.expect(self.diagnose(), 4)
+        self.assertIn("nginx files:\n  PROBLEM nginx -T fails, so nginx cannot load a change: nginx: [emerg] fake failure\n"
+                      "Host names:\n", out)
+
+    def test_diagnose_changes_nothing(self):
+        self.healthy(web={"203.0.113.10:443": {"code": "301", "server": "CloudWAF", "location": "{url}"}})
+        self.access.write_text(WAF_LOG)
+
+        def snapshot():
+            return {path: (path.stat().st_mtime_ns, path.read_bytes()) for top in (self.tmp / "state", self.conf.parent,
+                                                                                    self.access.parent / "ca")
+                    for path in sorted(top.rglob("*")) if path.is_file()}
+
+        before = snapshot()
+        fd = os.open(LOCK, os.O_RDWR | os.O_CREAT, 0o600)
+        self.addCleanup(os.close, fd)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        self.expect(self.diagnose("--front", "203.0.113.10"), 4)
+        self.assertEqual(snapshot(), before)
+        self.assertEqual([call for call in self.calls() if call[0] in ("nginx", "systemctl")], [["nginx", "-V"], ["nginx", "-T"]])
+        fresh = self.tmp / "fresh"
+        fresh.mkdir()
+        (fresh / "routes.conf").write_text(ROUTES)
+        result = self.run_script("diagnose", "--access-log", self.access, "--error-log", self.errors, directory=fresh)
+        self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
+        self.assertTrue(result.stdout.endswith("problem(s) found\n"), result.stdout)
+        self.assertEqual(self.files(fresh), ["routes.conf"])
+        empty = self.tmp / "empty"
+        self.assertIn(f"No routes file {empty}/routes.conf: diagnose checks the host names in it", self.refused("diagnose",
+                                                                                                                 directory=empty))
+        self.assertFalse(empty.exists())
+
+    def test_the_options_of_diagnose(self):
+        self.assertIn("--front, --access-log and --error-log belong to diagnose", self.refused("status", "--front", "203.0.113.10"))
+        self.assertIn("--front, --access-log and --error-log belong to diagnose", self.refused("apply", "--access-log", "/x"))
+        self.assertIn("--front: 203.0.113.10:70000 has no valid port", self.refused("diagnose", "--front", "203.0.113.10:70000"))
+        self.assertIn("--front must be ADDRESS or ADDRESS:PORT", self.refused("diagnose", "--front", "https://203.0.113.10"))
+        self.assertIn("--front needs ADDRESS or ADDRESS:PORT", self.refused("diagnose", "--front", ""))
+        for value in ("-x", "...", "waf.example.", "a b"):
+            with self.subTest(front=value):
+                self.assertIn("--front must be ADDRESS or ADDRESS:PORT", self.refused("diagnose", "--front", value))
+        self.assertIn("Unknown option: --frontend", self.refused("diagnose", "--frontend", "203.0.113.10"))
+        self.assertIn("Unexpected argument: now", self.refused("diagnose", "now"))
+        self.assertIn("diagnose [--front ADDRESS[:PORT]] [--access-log FILE]", self.ok("--help").stdout)
+        self.assertIn("--front, --access-log and --error-log belong to diagnose", self.refused("csr", "--error-log", "/x"))
+        self.assertEqual(self.files(), ["routes.conf"])
+        for option in ("strip", "http", "api", "strip,http", "http,api", "strip,http,api", "api,http,strip"):
+            with self.subTest(option=option):
+                self.routes.write_text(f"{HOSTS[0]} /dev/api/ 8000 {option}\n{HOSTS[1]} /dev/ 8110 http\n")
+                result = self.diagnose("--front", "203.0.113.10")
+                self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
+                self.assertEqual(result.stderr, "")
+                self.assertTrue(result.stdout.endswith(" problem(s) found\n"), result.stdout)
+        for option in ("strip, api", "api,api", "rewrite"):
+            with self.subTest(option=option):
+                self.routes.write_text(f"{HOSTS[0]} /dev/api/ 8000 {option}\n")
+                self.assertIn(OPTION_MESSAGE, self.refused("diagnose"))
+        self.assertEqual(self.files(), ["routes.conf"])
+
+    def test_an_http_route_answers_on_port_80_as_on_443(self):
+        api, rp = HOSTS
+        self.routes.write_text(HTTP_ROUTES)
+        login = {"code": "303", "server": "nginx", "location": f"https://{rp}/uat/web/login"}
+        self.healthy(web={"127.0.0.1:80": {"code": "200", "server": "nginx/1.24.0 (Ubuntu)"},
+                          f"127.0.0.1:443 https://{rp}/uat/": login, f"127.0.0.1:80 http://{rp}/uat/": login})
+        self.assertIn(f"    listen 80;\n    server_name {api};\n", self.conf.read_text())
+        out = self.expect(self.diagnose(), 0)
+        for host, path in ((api, "/dev/api/"), (api, "/uat/api/"), (rp, "/dev/")):
+            self.assertIn(f"  OK {host} {path}: HTTP on this server answers 200: served on port 80 too, for a TLS front (http)\n", out)
+        self.assertIn(f"  OK {rp} /uat/: HTTPS on this server answers 303\n", out)
+        self.assertIn(f"  OK {rp} /uat/: HTTP on this server answers 303: served on port 80 too, for a TLS front (http)\n", out)
+        self.assertNotIn("answers 301", out[out.index("Host names:"):out.index("Access log:")])
+        self.set_state(ss=LISTENING, others=UBUNTU_DEFAULT,
+                       web={"127.0.0.1:80": {"code": "200", "server": "nginx/1.24.0 (Ubuntu)"},
+                            f"127.0.0.1:80 http://{rp}/dev/": {"code": "404", "server": "nginx"},
+                            f"127.0.0.1:443 https://{rp}/uat/": login,
+                            f"127.0.0.1:80 http://{rp}/uat/": {"code": "301", "server": "nginx", "location": f"https://{rp}/"}})
+        out = self.expect(self.diagnose(), 4)
+        self.assertIn(f"  PROBLEM {rp} /dev/: HTTP on this server answers 404, HTTPS answers 200: with http, port 80 must answer "
+                      "as HTTPS does (apply)\n", out)
+        self.assertIn(f"  PROBLEM {rp} /uat/: HTTP on this server answers 301 to https://{rp}/, HTTPS answers 303: with http, port "
+                      "80 must answer as HTTPS does (apply)\n", out)
+        self.assertTrue(out.endswith("\nResult: 2 problem(s) found\n"), out)
+
+    def test_an_http_route_whose_port_80_still_redirects_is_a_problem(self):
+        self.healthy(web={"203.0.113.10:443": {"code": "301", "server": "CloudWAF", "location": "{url}"}})
+        self.routes.write_text(HTTP_ROUTES)
+        out = self.expect(self.diagnose(), 4)
+        for host, path in ((HOSTS[0], "/dev/api/"), (HOSTS[0], "/uat/api/"), (HOSTS[1], "/dev/"), (HOSTS[1], "/uat/")):
+            self.assertIn(f"  PROBLEM {host} {path}: HTTP on this server answers 301 to https://{host}{path}, but the route has "
+                          "http, so port 80 must serve it for a TLS front: run apply (http was added after the last apply), or "
+                          f"another nginx file serves {host} on port 80 (see nginx files)\n", out)
+        self.assertTrue(out.endswith("\nResult: 4 problem(s) found\n"), out)
+        out = self.expect(self.diagnose("--front", "203.0.113.10"), 4)
+        for host in HOSTS:
+            self.assertIn(f"  PROBLEM {host} {FIRST[host]}: the front at 203.0.113.10 (Server: CloudWAF) gets a redirect to the same "
+                          "address again and again, although the route has http: a redirect loop. Make port 80 serve the route (see "
+                          f"the HTTP line of this route), then ask the front's owner to check its entry for {host}\n", out)
+        self.assertNotIn("or add http to this route", out)
+        self.assertTrue(out.endswith("\nResult: 6 problem(s) found\n"), out)
+
+    def test_a_front_on_port_80_to_http_routes_is_ok(self):
+        api, rp = HOSTS
+        port80 = {"code": "200", "server": "nginx/1.24.0 (Ubuntu)"}
+        self.routes.write_text(HTTP_ROUTES)
+        self.healthy(web={"127.0.0.1:80": port80, "203.0.113.10:443": {"code": "200", "server": "CloudWAF"}})
+        out = self.expect(self.diagnose("--front", "203.0.113.10"), 0)
+        for host in HOSTS:
+            self.assertIn(f"  OK {host} {FIRST[host]}: through the front at 203.0.113.10 answers 200 (Server: CloudWAF)\n", out)
+        self.assertNotIn("PROBLEM", out)
+        self.assertEqual([call[-1] for call in self.calls() if "--connect-to" in call], [f"https://{api}/dev/api/", f"https://{rp}/dev/"])
+        mixed = HTTP_ROUTES.replace("/uat/ 8111 http", "/uat/ 8111").replace("/dev/api/ 8000 strip,http", "/dev/api/ 8000 strip")
+        self.routes.write_text(mixed)
+        self.ok("apply")
+        self.set_state(ss=LISTENING, others=UBUNTU_DEFAULT,
+                       web={"127.0.0.1:80": port80,
+                            f"127.0.0.1:80 http://{rp}/uat/": {"code": "301", "server": "nginx", "location": "{https}"},
+                            f"127.0.0.1:80 http://{api}/dev/api/": {"code": "301", "server": "nginx", "location": "{https}"},
+                            "203.0.113.10:443": {"code": "200", "server": "CloudWAF"},
+                            f"203.0.113.10:443 https://{rp}/uat/": {"code": "301", "server": "CloudWAF", "location": "{url}"}})
+        out = self.expect(self.diagnose("--front", "203.0.113.10"), 4)
+        self.assertIn(f"  OK {rp} /dev/: HTTP on this server answers 200: served on port 80 too, for a TLS front (http)\n", out)
+        self.assertIn(f"  OK {rp} /uat/: HTTP on this server answers 301 to https://{rp}/uat/\n", out)
+        self.assertIn(f"  PROBLEM {rp} /uat/: the front at 203.0.113.10 (Server: CloudWAF) {LOOP}", out)
+        self.assertLess(out.index(f"  OK {rp} /uat/: HTTP on this server"), out.index(f"  PROBLEM {rp} /uat/: the front"))
+        self.assertIn(f"  OK {api} /dev/api/: through the front at 203.0.113.10 answers 200 (Server: CloudWAF)\n", out)
+        self.assertEqual([call[-1] for call in self.calls() if "--connect-to" in call], [f"https://{api}/dev/api/", f"https://{rp}/uat/"])
+        self.assertTrue(out.endswith("\nResult: 1 problem(s) found\n"), out)
+
+    def test_api_routes_and_the_default_server_of_port_443_give_no_false_problem(self):
+        api, rp = HOSTS
+        self.routes.write_text(f"{api} /dev/api/ 8000 strip,api\n{api} /uat/api/ 8001 strip,http,api\n{rp} /dev/ 8110\n"
+                               f"{rp} /uat/ - http\n")
+        unauthorized = {"code": "401", "server": "nginx"}
+        self.healthy(web={f"127.0.0.1:443 https://{api}/dev/api/": unauthorized, f"127.0.0.1:443 https://{api}/uat/api/": unauthorized,
+                          f"127.0.0.1:80 http://{api}/uat/api/": unauthorized})
+        conf = self.conf.read_text()
+        self.assertIn("\n    listen 443 ssl default_server;\n", conf)
+        self.assertIn("limit_req zone=perodua_https_api", conf)
+        out = self.expect(self.diagnose(), 0)
+        self.assertNotIn("PROBLEM", out)
+        self.assertIn(f"  OK port 443: {self.conf}\n", out)
+        self.assertNotIn(f"{self.conf} is the default server", out)
+        self.assertEqual(out.count(" is the default server on port "), 1)
+        self.assertNotIn("apply did not write", out)
+        self.assertIn(f"  OK {api} /dev/api/: HTTPS on this server answers 401\n", out)
+        self.assertIn(f"  OK {api} /dev/api/: HTTP on this server answers 301 to https://{api}/dev/api/\n", out)
+        self.assertIn(f"  OK {api} /uat/api/: HTTP on this server answers 401: served on port 80 too, for a TLS front (http)\n", out)
+        self.assertIn(f"  NOTE {rp} /uat/: port - (not known yet): not checked\n", out)
+
+    def test_another_nginx_file_for_a_name_of_the_table_is_a_note(self):
+        api, rp = HOSTS
+        handmade = "/etc/nginx/conf.d/perodua-front.conf"
+        front = (f"server {{\n    listen 443 ssl;\n    server_name stgiss.perodua.com.my {rp.upper()};\n"
+                 "    location /dev/ {\n        proxy_pass http://127.0.0.1:8110;\n    }\n}\n"
+                 f"server {{\n    listen 80;\n    server_name '{rp}'\n        {api}; # other.example\n"
+                 "    location / { proxy_pass http://127.0.0.1:8110; }\n}\n")
+        others = dict(UBUNTU_DEFAULT, **{
+            handmade: front,
+            "/etc/nginx/conf.d/alt-port.conf": f"server {{ listen 8080; server_name {rp}; }}",
+            "/etc/nginx/conf.d/commented.conf": f"server {{\n    listen 80;\n    # server_name {rp};\n    server_name other.example;\n}}",
+            "/etc/nginx/conf.d/upstream.conf": f"upstream app {{ server 127.0.0.1:8110; }}\nserver {{ server_name {api}; return 404; }}"})
+        self.healthy(others=others)
+        out = self.expect(self.diagnose(), 0)
+        self.assertIn(other_file(handmade, f"{rp} (80, 443), {api} (80)"), out)
+        self.assertIn(other_file("/etc/nginx/conf.d/upstream.conf", f"{api} (80)"), out)
+        self.assertEqual(out.count("a file that apply did not write"), 2)
+        self.assertIn(f"  OK port 80: /etc/nginx/sites-enabled/default, {handmade}, /etc/nginx/conf.d/commented.conf, "
+                      f"/etc/nginx/conf.d/upstream.conf, {self.conf}\n", out)
+        self.assertIn(f"  OK port 443: {handmade}, {self.conf}\n", out)
+        self.assertLess(out.index("nginx files:"), out.index(other_file(handmade, f"{rp} (80, 443), {api} (80)")))
+        self.assertLess(out.index(other_file(handmade, f"{rp} (80, 443), {api} (80)")), out.index("Host names:"))
+        self.set_state(ss=LISTENING, others=dict(others, **{handmade: front.replace(f"'{rp}'", "other.example").replace(
+            rp.upper(), "other.example").replace(api, "other.example")}))
+        out = self.expect(self.diagnose(), 0)
+        self.assertNotIn(f"{handmade}, a file that apply did not write", out)
+        default = "/etc/nginx/sites-enabled/default"
+        self.set_state(ss=LISTENING, others={default: UBUNTU_DEFAULT[default].replace("server_name _;", f"server_name _ {rp};")})
+        out = self.expect(self.diagnose(), 0)
+        self.assertIn(other_file(default, f"{rp} (80)"), out)
+        self.assertIn(f"  NOTE {default} is the default server on port 80: ", out)
+        self.assertEqual(out.count("a file that apply did not write"), 1)
+        self.assertIn(f"Another nginx configuration already serves these host names; remove it first:\n{default}: {rp}\n",
+                      self.refused("apply"))
+
+    def test_a_hand_written_front_file_on_port_80_for_routes_without_http(self):
+        handmade = "/etc/nginx/conf.d/perodua-front.conf"
+        front = "".join(f"server {{\n    listen 443 ssl;\n    listen 80;\n    server_name {host};\n    location / {{\n"
+                        "        proxy_pass http://127.0.0.1:8110;\n    }\n}\n" for host in HOSTS)
+        self.healthy(others=dict(UBUNTU_DEFAULT, **{handmade: front}),
+                     web={"127.0.0.1:80": {"code": "200", "server": "nginx/1.24.0 (Ubuntu)"},
+                          "203.0.113.10:443": {"code": "200", "server": "CloudWAF"}})
+        out = self.expect(self.diagnose("--front", "203.0.113.10"), 4)
+        self.assertIn(other_file(handmade, ", ".join(f"{host} (80, 443)" for host in HOSTS)), out)
+        for host, path in (("api.example.perodua.com.my", "/dev/api/"), ("api.example.perodua.com.my", "/uat/api/"),
+                           ("stgissrp.perodua.com.my", "/dev/"), ("stgissrp.perodua.com.my", "/uat/")):
+            self.assertIn(f"  OK {host} {path}: HTTPS on this server answers 200\n", out)
+            self.assertIn(served(host, path), out)
+        for host in HOSTS:
+            self.assertIn(f"  OK {host} {FIRST[host]}: through the front at 203.0.113.10 answers 200 (Server: CloudWAF)\n", out)
+        self.assertNotIn("must only send browsers to HTTPS", out)
+        self.assertTrue(out.endswith("\nResult: 4 problem(s) found\n"), out)
+        self.routes.write_text(HTTP_ROUTES)
+        out = self.expect(self.diagnose("--front", "203.0.113.10"), 0)
+        for host, path in (("api.example.perodua.com.my", "/dev/api/"), ("stgissrp.perodua.com.my", "/uat/")):
+            self.assertIn(f"  OK {host} {path}: HTTP on this server answers 200: served on port 80 too, for a TLS front (http)\n", out)
+        self.assertIn(other_file(handmade, ", ".join(f"{host} (80, 443)" for host in HOSTS)), out)
 
 
 if __name__ == "__main__":
