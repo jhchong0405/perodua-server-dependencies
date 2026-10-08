@@ -58,7 +58,7 @@ stgissrp.perodua.com.my    /dev/       8110
 stgissrp.perodua.com.my    /uat/       8111   # a comment
 """
 # What apply wrote for this table before the http option, byte for byte: without
-# http the file and its generation stay the same.
+# http and api the file stays the same, but for the catch-all server of port 443.
 BEFORE_HTTP_TABLE = "stgissrp.perodua.com.my /dev/ 8110\nstgissrp.perodua.com.my /dev/api/ 8000 strip\n"
 BEFORE_HTTP = """# Written by https.sh from @ROUTES@. Do not edit: change the routes, then run: sudo bash https.sh apply
 
@@ -127,6 +127,19 @@ server {
     }
 }
 """
+CATCH_ALL = """
+server {
+    listen 443 ssl default_server;
+    server_name _;
+    ssl_certificate @DIR@/fullchain.pem;
+    ssl_certificate_key @DIR@/key.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:perodua_https:10m;
+    ssl_session_timeout 1d;
+    return 444;
+}
+"""
+OPTION_MESSAGE = "OPTION must be strip, http, api or a comma-separated list of them, like strip,http,api"
 FAKE_NGINX = r'''#!/usr/bin/env python3
 import json, os, sys
 args = sys.argv[1:]
@@ -511,7 +524,16 @@ class HttpsTest(Base):
                  ("api.example.perodua.com.my dev/ 8000", "PATH must start and end with /"),
                  ("api.example.perodua.com.my /dev 8000", "PATH must start and end with /"),
                  ("api.example.perodua.com.my /dev/ 70000", "PORT must be 1-65535"),
-                 ("api.example.perodua.com.my /dev/ 8000 rewrite", "OPTION must be strip, http or strip,http"),
+                 ("api.example.perodua.com.my /dev/ 8000 rewrite", OPTION_MESSAGE),
+                 ("api.example.perodua.com.my /dev/ 8000 ,api", OPTION_MESSAGE),
+                 ("api.example.perodua.com.my /dev/ 8000 api,", OPTION_MESSAGE),
+                 ("api.example.perodua.com.my /dev/ 8000 strip,,api", OPTION_MESSAGE),
+                 ("api.example.perodua.com.my /dev/ 8000 api,api", OPTION_MESSAGE),
+                 ("api.example.perodua.com.my /dev/ 8000 api,strip,api", OPTION_MESSAGE),
+                 ("api.example.perodua.com.my /dev/ 8000 API", OPTION_MESSAGE),
+                 ("api.example.perodua.com.my /dev/ 8000 apis", OPTION_MESSAGE),
+                 ("api.example.perodua.com.my /dev/ 8000 strip, api", OPTION_MESSAGE),
+                 ("api.example.perodua.com.my /dev/ 8000 strip ,api", "too many columns"),
                  ("api.example.perodua.com.my /dev/ 8000 strip,rewrite", "OPTION must be"),
                  ("api.example.perodua.com.my /dev/ 8000 http,http", "OPTION must be"),
                  ("api.example.perodua.com.my /dev/ 8000 strip,", "OPTION must be"),
@@ -524,6 +546,15 @@ class HttpsTest(Base):
             with self.subTest(table=table):
                 self.routes.write_text(table + "\n")
                 self.assertIn(message, self.refused("csr"))
+                self.assertEqual(self.files(), ["routes.conf"])
+
+    def test_the_option_is_a_list_of_strip_http_and_api(self):
+        for option in ("", "strip", "http", "api", "strip,http", "http,strip", "strip,api", "http,api", "strip,http,api",
+                       "api,http,strip", "http,api,strip"):
+            with self.subTest(option=option):
+                self.routes.write_text(f"api.example.perodua.com.my /dev/api/ 8000 {option}\n")
+                result = self.ok("status")
+                self.assertIn("https://api.example.perodua.com.my/dev/api/ -> 127.0.0.1:8000", result.stdout)
                 self.assertEqual(self.files(), ["routes.conf"])
 
     def test_the_first_run_creates_the_routes_table_and_stops(self):
@@ -709,7 +740,7 @@ class HttpsTest(Base):
         self.routes.write_text(BEFORE_HTTP_TABLE)
         self.installed()
         self.ok("apply")
-        text = BEFORE_HTTP.rstrip("\n").replace("@ROUTES@", str(self.routes)).replace("@DIR@", str(self.dir))
+        text = (BEFORE_HTTP + CATCH_ALL).rstrip("\n").replace("@ROUTES@", str(self.routes)).replace("@DIR@", str(self.dir))
         generation = hashlib.sha256((text + "\n").encode()).hexdigest()[:16]  # as render makes it
         self.assertEqual(self.conf.read_text(), text.replace("@GENERATION@", generation) + "\n")
 
@@ -784,8 +815,151 @@ class HttpsTest(Base):
         self.routes.write_text(f"{api} /dev/api/ 8000 strip,http\n{rp} /dev/ 8110 http\n")
         self.ok("apply")
         conf = self.conf.read_text()
-        self.assertEqual(sorted(servers(conf)), [("443", api), ("443", rp), ("80", api), ("80", rp)])
+        self.assertEqual(sorted(servers(conf)), [("443", "_"), ("443", api), ("443", rp), ("80", api), ("80", rp)])
         self.assertEqual(conf.count("\n    listen 80;\n"), 2)
+
+    def test_api_routes_close_the_documentation_and_are_rate_limited(self):
+        api, rp, wom = "api.example.perodua.com.my", "stgissrp.perodua.com.my", "wom.example.perodua.com.my"
+        self.routes.write_text(f"{api} /dev/api/ 8000 strip,http,api\n{api} /uat/api/ 8001 strip,api\n{api} /sit/api/ 8002 strip\n"
+                               f"{rp} /dev/ 8110\n{wom} /dev/ - api\n")
+        self.installed()
+        result = self.ok("apply")
+        conf = self.conf.read_text()
+        zone = "limit_req_zone $binary_remote_addr zone=perodua_https_api:10m rate=10r/s;\n"
+        self.assertEqual(conf.count("limit_req_zone"), 1)
+        self.assertIn("    '' close;\n}\n\n" + zone + "\nserver {\n", conf)
+        self.assertLess(conf.index(zone), conf.index("server {"))
+        docs = lambda path: "".join(f"\n    location = {path}{name} {{\n        return 404;\n    }}\n"
+                                    for name in ("docs", "redoc", "openapi.json"))
+        limited = lambda path, port: (f"\n    location {path} {{\n        limit_req zone=perodua_https_api burst=20 nodelay;\n"
+                                      f"        limit_req_status 429;\n        proxy_pass http://127.0.0.1:{port}/;\n    }}\n")
+        blocks = servers(conf)
+        self.assertIn(docs("/dev/api/") + limited("/dev/api/", 8000), blocks["443", api])
+        self.assertIn(docs("/uat/api/") + limited("/uat/api/", 8001), blocks["443", api])
+        self.assertIn("\n    location /sit/api/ {\n        proxy_pass http://127.0.0.1:8002/;\n    }\n", blocks["443", api])
+        self.assertEqual(blocks["443", api].count("limit_req "), 2)
+        self.assertEqual(blocks["443", api].count("return 404;\n    }\n"), 7)
+        port80 = blocks["80", api]
+        self.assertIn(docs("/dev/api/") + limited("/dev/api/", 8000), port80)
+        self.assertEqual(port80.count("limit_req "), 1)
+        self.assertNotIn("/uat/api/docs", port80)
+        self.assertIn("\n    location /uat/api/ {\n        return 301 https://$host$request_uri;\n    }\n", port80)
+        for block in (blocks["443", rp], blocks["443", wom], blocks["80", rp]):
+            self.assertNotIn("limit_req", block)
+            self.assertNotIn("docs", block)
+        marker = " (API: documentation closed, at most 10 requests a second per caller address, bursts of 20)"
+        self.assertIn(f"https://{api}/dev/api/ -> 127.0.0.1:8000 (path removed) (also on port 80 over HTTP, for a TLS front){marker}\n",
+                      result.stdout)
+        self.assertIn(f"https://{api}/uat/api/ -> 127.0.0.1:8001 (path removed){marker}\n", result.stdout)
+        self.assertIn(f"https://{api}/sit/api/ -> 127.0.0.1:8002 (path removed)\n", result.stdout)
+        self.assertIn(f"https://{rp}/dev/ -> 127.0.0.1:8110\n", result.stdout)
+        self.assertEqual(result.stdout.count("(API: "), 2)
+        status = self.ok("status").stdout
+        self.assertNotIn("changed since", status)
+        self.assertIn(f"https://{api}/dev/api/ -> 127.0.0.1:8000  port listening: NO  HTTPS answer: 200  HTTP answer on port 80: 200"
+                      "  API: docs closed, rate limited\n", status)
+        self.assertIn(f"https://{api}/uat/api/ -> 127.0.0.1:8001  port listening: NO  HTTPS answer: 200  API: docs closed, rate limited\n",
+                      status)
+        self.assertEqual(status.count("API: docs closed"), 2)
+        self.routes.write_text(f"{api} /dev/api/ 8000 strip\n{rp} /dev/ 8110\n{wom} /dev/ - api\n")
+        self.ok("apply")
+        conf = self.conf.read_text()
+        self.assertNotIn("limit_req", conf)
+        self.assertNotIn("docs", conf)
+        self.assertNotIn("API: ", self.ok("status").stdout)
+        self.routes.write_text(f"{api} / 8000 api\n")
+        self.ok("apply")
+        blocks = servers(self.conf.read_text())
+        self.assertIn(docs("/") + "\n    location / {\n        limit_req zone=perodua_https_api burst=20 nodelay;\n"
+                      "        limit_req_status 429;\n        proxy_pass http://127.0.0.1:8000;\n    }\n}\n", blocks["443", api])
+
+    def test_an_api_route_on_port_80_keeps_its_404_over_the_redirect_of_a_route_under_it(self):
+        api, rp = "api.example.perodua.com.my", "stgissrp.perodua.com.my"
+        self.routes.write_text(f"{api} /dev/api/ 8000 strip,http,api\n{api} /dev/api/docs/ 8001\n{api} /dev/api/redoc/ 8002\n"
+                               f"{api} /dev/api/openapi.json/ 8003\n{api} /dev/api/x/ 8004\n{rp} / 8110 http,api\n{rp} /docs/ 8111\n"
+                               f"{rp} /uat/api/ 8001 strip,api\n{rp} /uat/api/docs/ 8002\n")
+        self.installed()
+        self.ok("apply")
+        blocks = servers(self.conf.read_text())
+        closed = lambda path: f"\n    location = {path} {{\n        return 404;\n    }}\n"
+        redirect = lambda path: f"\n    location {path} {{\n        return 301 https://$host$request_uri;\n    }}\n"
+        for host, path, under in ((api, "/dev/api/", ("docs", "redoc", "openapi.json")), (rp, "/", ("docs",))):
+            for name in under:
+                for port in ("443", "80"):
+                    self.assertEqual(blocks[port, host].count(f"location = {path}{name} "), 1, (port, host, name))
+                    self.assertIn(closed(path + name), blocks[port, host])
+                self.assertIn(redirect(f"{path}{name}/"), blocks["80", host])
+                self.assertIn(f"\n    location {path}{name}/ {{\n        proxy_pass http://127.0.0.1:", blocks["443", host])
+        self.assertIn(redirect("= /dev/api/x") + redirect("/dev/api/x/"), blocks["80", api])
+        self.assertIn(redirect("= /uat/api") + redirect("/uat/api/") + redirect("= /uat/api/docs") + redirect("/uat/api/docs/"),
+                      blocks["80", rp])
+
+    def test_the_help_and_apply_take_the_numbers_of_api_rate_and_api_burst(self):
+        script = self.tmp / "scripts" / "https.sh"
+        script.parent.mkdir()
+        text = SCRIPT.read_text()
+        self.assertEqual(text.count("\nAPI_RATE=10r/s API_BURST=20\n"), 1)
+        script.write_text(text.replace("\nAPI_RATE=10r/s API_BURST=20\n", "\nAPI_RATE=7r/s API_BURST=9\n"))
+        self.routes.write_text("api.example.perodua.com.my /dev/api/ 8000 strip,api\n")
+        self.installed()
+        help_text = " ".join(self.ok("--help", script=script).stdout.split())
+        self.assertIn("most 7 requests a second from each caller address, for all api routes together, in bursts of 9 (429",
+                      help_text)
+        result = self.ok("apply", script=script)
+        self.assertIn(" (API: documentation closed, at most 7 requests a second per caller address, bursts of 9)\n", result.stdout)
+        conf = self.conf.read_text()
+        self.assertIn("limit_req_zone $binary_remote_addr zone=perodua_https_api:10m rate=7r/s;\n", conf)
+        self.assertIn("        limit_req zone=perodua_https_api burst=9 nodelay;\n", conf)
+        self.assertNotIn("burst=20", conf)
+
+    def test_port_443_closes_other_host_names(self):
+        self.installed()
+        result = self.ok("apply")
+        conf = self.conf.read_text()
+        self.assertTrue(conf.endswith(CATCH_ALL.replace("@DIR@", str(self.dir))), conf)
+        self.assertEqual(conf.count("default_server"), 1)
+        self.assertEqual(servers(conf)["443", "_"], CATCH_ALL.replace("@DIR@", str(self.dir)).split("server {\n", 1)[1])
+        self.assertIn("Other host names on port 443: the connection is closed.\n", result.stdout)
+        status = self.ok("status").stdout
+        self.assertIn("nginx:       " + str(self.conf) + "\n             other host names on port 443: the connection is closed\n",
+                      status)
+        self.ok("uninstall", "--confirm", "yes")
+        self.assertFalse(self.conf.exists())
+        self.assertEqual(self.reloads(), 1)
+
+    def test_apply_refuses_another_default_server_for_port_443(self):
+        self.installed()
+        stock = ("server {\n\tlisten 80 default_server;\n\tlisten [::]:80 default_server;\n\n\t# SSL configuration\n\t#\n"
+                 "\t# listen 443 ssl default_server;\n\t# listen [::]:443 ssl default_server;\n\n\troot /var/www/html;\n"
+                 "\tserver_name _;\n}\n")
+        fine = {"/etc/nginx/sites-enabled/default": stock,
+                "/etc/nginx/conf.d/tls.conf": "server {\n    listen 443 ssl;\n    server_name other.example.com;\n}",
+                "/etc/nginx/conf.d/alt.conf": 'server { listen 8443 ssl default_server; return 200 "listen 443 default_server"; }',
+                "/etc/nginx/conf.d/port.conf": "server { listen 127.0.0.1:4430 default; }"}
+        cases = [("/etc/nginx/conf.d/x.conf", "server { listen 443 ssl default_server; server_name x.example.com; }",
+                  "listen 443 ssl default_server"),
+                 ("/etc/nginx/conf.d/old.conf", "server {\n    listen *:443\n        default ssl;\n}", "listen *:443 default ssl"),
+                 ("/etc/nginx/sites-enabled/v6", "server { listen '[::]:443' ssl default_server; }", "listen [::]:443 ssl default_server"),
+                 ("/etc/nginx/conf.d/any.conf", "server { listen 0.0.0.0:443 default_server ssl; }",
+                  "listen 0.0.0.0:443 default_server ssl")]
+        for path, text, statement in cases:
+            with self.subTest(statement=statement):
+                self.set_state(others=dict(fine, **{path: text}))
+                stderr = self.refused("apply")
+                self.assertIn("Another nginx configuration is already the default server for port 443; remove default_server there "
+                              f"first:\n{path}: {statement}\n", stderr)
+                self.assertEqual(stderr.count("default server for port 443"), 1)
+                self.assertFalse(self.conf.exists())
+                self.assertEqual(self.reloads(), 0)
+        self.set_state(others=fine)
+        self.ok("apply")
+        self.assertEqual(self.calls().count(["nginx", "-T"]), 1)
+        self.ok("apply")
+        before = self.conf.read_text()
+        self.set_state(others=dict(fine, **{cases[0][0]: cases[0][1]}))
+        self.assertIn(f"{cases[0][0]}: {cases[0][2]}", self.refused("apply"))
+        self.assertEqual(self.conf.read_text(), before)
+        self.assertEqual(self.reloads(), 0)
 
     def test_apply_refuses_host_names_that_another_configuration_serves(self):
         self.installed()
@@ -917,7 +1091,7 @@ class HttpsTest(Base):
         self.routes.write_text(ROUTES + "stgissrp.perodua.com.my /sit/ 8112\n")
         result = self.ok("status")
         self.assertIn("issued by CN=Test Intermediate", result.stdout)
-        self.assertIn("the routes changed since: apply", result.stdout)
+        self.assertIn("the routes or https.sh changed since: apply", result.stdout)
         self.assertIn("https://stgissrp.perodua.com.my/sit/ -> 127.0.0.1:8112", result.stdout)
 
     def test_the_nginx_file_of_another_dir_is_left_alone(self):
@@ -1336,7 +1510,7 @@ class LetsEncryptTest(Base):
     def test_apply_updates_the_copy_that_the_timer_runs(self):
         self.le_installed()
         copy = self.lib / "https.sh"
-        older = SCRIPT.read_text().replace("''|strip|http|strip,http|http,strip) ;;", "''|strip) ;;")  # before http
+        older = SCRIPT.read_text().replace("(strip|http|api)", "(strip)")  # before http
         self.assertNotEqual(older, SCRIPT.read_text())
         copy.write_text(older)
         command = re.search(r"^ExecStart=(.*)$", self.unit("service"), re.M).group(1).split()

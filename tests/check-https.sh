@@ -42,6 +42,17 @@ eventually() {   # a check that must pass within 5 seconds: nginx reloads in the
     return 1
 }
 closed() { [[ $(curl -s --cacert /ca/root.pem "${RESOLVE[@]}" -o /dev/null -w '%{http_code}' https://api.example.perodua.com.my/dev/api/x || true) == 000 ]]; }
+no_answer() {
+    local status=0 code
+    code=$(curl -s -o /dev/null -w '%{http_code}' "$@") || status=$?
+    [[ $code == 000 && $status == 52 ]] && pass "curl $* -> exit 52, no answer" || fail "curl $* -> exit $status, code $code (expected exit 52)"
+}
+burst() {
+    local url args=()
+    for url; do args+=(-o /dev/null "$url"); done
+    curl -s --cacert /ca/root.pem "${RESOLVE[@]}" -w '%{http_code}\n' "${args[@]}"
+}
+tls12() { echo | openssl s_client -connect 127.0.0.1:443 -servername api.example.perodua.com.my -tls1_2 "$@" 2> /dev/null; }
 
 python3 - > /dev/null 2>&1 << 'PY' &
 import http.server, threading, time
@@ -117,7 +128,7 @@ expect https://stgissrp.perodua.com.my/uat/web/login '200 port=8111 path=/uat/we
 expect https://api.example.perodua.com.my/somewhere '404'
 # what the caller claims in Host and X-Forwarded-For does not reach the service
 expect https://api.example.perodua.com.my/dev/api/who '200 port=8000 path=/who proto=https host=api.example.perodua.com.my xff=127.0.0.1' \
-    -H 'Host: evil.example' -H 'X-Forwarded-For: 192.0.2.1'
+    -H 'Host: API.Example.perodua.com.my:443' -H 'X-Forwarded-For: 192.0.2.1'
 code=$(curl -s --cacert /ca/root.pem -o /dev/null -w '%{http_code} %{redirect_url}' "${RESOLVE[@]}" 'https://stgissrp.perodua.com.my/dev?a=1')
 [[ $code == '301 https://stgissrp.perodua.com.my/dev/?a=1' ]] && pass "/dev?a=1 -> $code" || fail "/dev?a=1 -> $code"
 code=$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' "${RESOLVE[@]}" http://api.example.perodua.com.my/dev/api/x)
@@ -138,6 +149,21 @@ ip=$(ip -4 -o addr show scope global | awk '{ sub(/\/.*/, "", $4); print $4; exi
 code=$(curl -s --cacert /ca/root.pem -o /dev/null -w '%{http_code}' --resolve "api.example.perodua.com.my:443:$ip" \
     https://api.example.perodua.com.my/.perodua-https)
 [[ $code == 404 ]] && pass "/.perodua-https from $ip -> $code" || fail "/.perodua-https from $ip -> $code"
+
+step 'port 443: other host names and the bare address get the connection closed'
+no_answer -k --resolve evil.example:443:127.0.0.1 https://evil.example/dev/api/x
+no_answer --cacert /ca/root.pem --resolve api.example.perodua.com.my:443:127.0.0.1 -H 'Host: evil.example' https://api.example.perodua.com.my/dev/api/x
+no_answer -k https://127.0.0.1/dev/api/x
+no_answer -k "https://$ip/dev/x"
+expect https://api.example.perodua.com.my/dev/api/x '200 port=8000 path=/x proto=https host=api.example.perodua.com.my'
+expect https://stgissrp.perodua.com.my/dev/x '200 port=8110 path=/dev/x proto=https host=stgissrp.perodua.com.my'
+expect https://127.0.0.1/dev/x '200 port=8110 path=/dev/x proto=https host=stgissrp.perodua.com.my' -k -H 'Host: stgissrp.perodua.com.my'
+expect https://127.0.0.1/dev/api/x '200 port=8000 path=/x proto=https host=api.example.perodua.com.my' -k -H 'Host: api.example.perodua.com.my'
+tls12 -no_ticket -sess_out /tmp/session > /dev/null || true
+got=$(tls12 -no_ticket -sess_in /tmp/session | grep -E '^(New|Reused), ' || true)
+[[ $got == Reused,* ]] && pass "TLS 1.2 without tickets resumes by session ID: $got" || fail "TLS 1.2 session ID: $got"
+got=$(tls12 | grep -o 'lifetime hint: [0-9]*' || true)
+[[ $got == 'lifetime hint: 86400' ]] && pass "TLS 1.2 session ticket $got" || fail "TLS 1.2 session ticket $got (expected 86400)"
 
 step 'status'
 bash https.sh status
@@ -171,6 +197,50 @@ cp /tmp/routes.conf "$STATE/routes.conf"
 bash https.sh apply > /dev/null
 code=$(curl -s -o /dev/null -w '%{http_code}' "${RESOLVE[@]}" http://api.example.perodua.com.my/dev/api/x)
 [[ $code == 301 ]] && pass "without http, port 80 redirects again: $code" || fail "without http: $code"
+
+step 'api: the documentation is closed and every caller address is rate limited'
+cp "$STATE/routes.conf" /tmp/routes.conf
+sed -i -e 's#/dev/api/   8000   strip$#/dev/api/   8000   strip,http,api#' -e 's#/uat/api/   8001   strip$#/uat/api/   8001   strip,api#' \
+    "$STATE/routes.conf"
+bash https.sh apply | grep 'API: '
+for url in https://api.example.perodua.com.my/dev/api/ http://api.example.perodua.com.my/dev/api/ https://api.example.perodua.com.my/uat/api/; do
+    for name in docs redoc openapi.json; do
+        expect "$url$name" '404'
+    done
+done
+expect https://api.example.perodua.com.my/dev/api/ '200 port=8000 path=/ proto=https'
+expect https://api.example.perodua.com.my/dev/api/x '200 port=8000 path=/x proto=https'
+expect http://api.example.perodua.com.my/dev/api/x '200 port=8000 path=/x proto=https'
+expect https://api.example.perodua.com.my/uat/api/x '200 port=8001 path=/x proto=https'
+code=$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' "${RESOLVE[@]}" http://api.example.perodua.com.my/uat/api/docs)
+[[ $code == '301 https://api.example.perodua.com.my/uat/api/docs' ]] && pass "no http on /uat/api/: port 80 redirects -> $code" || fail "/uat/api/docs on port 80 -> $code"
+printf 'api.example.perodua.com.my      /dev/api/docs/   8111\n' >> "$STATE/routes.conf"
+bash https.sh apply > /tmp/apply 2>&1 && pass 'nginx takes /dev/api/docs/ (no http) under /dev/api/ (strip,http,api)' \
+    || fail "/dev/api/docs/ under /dev/api/: $(cat /tmp/apply)"
+expect http://api.example.perodua.com.my/dev/api/docs '404'
+expect https://api.example.perodua.com.my/dev/api/docs '404'
+expect https://api.example.perodua.com.my/dev/api/docs/x '200 port=8111 path=/dev/api/docs/x proto=https'
+code=$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' "${RESOLVE[@]}" http://api.example.perodua.com.my/dev/api/docs/x)
+[[ $code == '301 https://api.example.perodua.com.my/dev/api/docs/x' ]] && pass "/dev/api/docs/x on port 80 -> $code" || fail "/dev/api/docs/x on port 80 -> $code"
+sleep 3
+start=${EPOCHREALTIME/[.,]/}
+codes=$(burst https://api.example.perodua.com.my/dev/api/b{1..100})
+took=$(((${EPOCHREALTIME/[.,]/} - start) / 1000))
+first=$(grep -nx 429 <<< "$codes" | head -n 1 | cut -d: -f1 || true)
+[[ -n $first && $first -gt 20 && $(head -n $((first - 1)) <<< "$codes" | grep -cvx 200) == 0 && $(grep -cvx '200\|429' <<< "$codes") == 0 ]] \
+    && pass "100 fast requests to /dev/api/ in $took ms: $((first - 1)) answers 200, then 429 ($(grep -cx 429 <<< "$codes") of 100)" \
+    || fail "100 fast requests to /dev/api/ in $took ms: $(tr '\n' ' ' <<< "$codes")"
+codes=$(burst https://stgissrp.perodua.com.my/dev/b{1..60})
+[[ $(grep -cx 200 <<< "$codes") == 60 ]] && pass '60 fast requests to /dev/ (no api) right after: all 200' \
+    || fail "60 fast requests to /dev/: $(tr '\n' ' ' <<< "$codes")"
+codes=$(burst http://api.example.perodua.com.my/dev/api/c{1..30})
+[[ $(grep -cx 429 <<< "$codes") -gt 0 ]] && pass "port 80 shares the limit: $(grep -cx 429 <<< "$codes") of 30 answers 429" \
+    || fail "30 fast requests to /dev/api/ on port 80: $(tr '\n' ' ' <<< "$codes")"
+bash https.sh status | grep 'API: docs closed, rate limited' && pass 'status marks the api routes' || fail 'status: no api mark'
+cp /tmp/routes.conf "$STATE/routes.conf"
+bash https.sh apply > /dev/null
+! grep -q limit_req /etc/nginx/conf.d/perodua-https.conf && pass 'without api, no limit_req' || fail 'limit_req left without api'
+expect https://api.example.perodua.com.my/dev/api/docs '200 port=8000 path=/docs proto=https'
 
 step 'renewal: a new request with the same key, installed while nginx runs'
 bash https.sh csr > /dev/null
@@ -217,6 +287,12 @@ step 'uninstall'
 bash https.sh uninstall --confirm yes
 eventually closed && pass 'nothing answers HTTPS any more' || fail 'HTTPS still answers'
 [[ -f $STATE/key.pem ]] && pass 'the key stays without --purge' || fail 'the key was removed'
+printf 'server {\n    listen 443 ssl default_server;\n    ssl_certificate %s/fullchain.pem;\n    ssl_certificate_key %s/key.pem;\n    return 444;\n}\n' \
+    "$STATE" "$STATE" > /etc/nginx/conf.d/other-default.conf
+if bash https.sh apply 2> /tmp/err; then fail 'apply ignored another default server for port 443'; fi
+grep -qx '/etc/nginx/conf.d/other-default.conf: listen 443 ssl default_server' /tmp/err && [[ ! -e /etc/nginx/conf.d/perodua-https.conf ]] \
+    && pass "$(tr '\n' ' ' < /tmp/err)" || fail "another default server: $(cat /tmp/err)"
+rm /etc/nginx/conf.d/other-default.conf
 bash https.sh uninstall --purge --confirm yes > /dev/null
 [[ ! -e $STATE ]] && pass "--purge removed $STATE" || fail "$STATE is still there"
 

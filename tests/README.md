@@ -356,9 +356,11 @@ what nginx "runs", unless the test says the reload does not take, and
 `openssl s_client` answers from that copy. It checks:
 - every malformed line of the routes table (a short host name, a path without its
   slashes, a port over 65535, an unknown option or option word, an option word
-  twice, an empty or upper-case one, `strip http` with a space, an extra column, a
-  host and path listed twice, no host at all) stops the script before any key is
-  made, and the first run creates the table from the example and stops, making a
+  twice (`api,api`, `api,strip,api`), an empty or upper-case one (`,api`,
+  `api,`, `strip,,api`, `API`), `strip http` or `strip, api` with a space, an
+  extra column, a host and path listed twice, no host at all) stops the script
+  before any key is made, every list of `strip`, `http` and `api` in any order is
+  taken, and the first run creates the table from the example and stops, making a
   new `--dir` 0700 and leaving the mode of an existing one;
 - `csr` makes a 0600 key and a request whose CN is the first host and whose
   subject alternative names are all hosts, keeps the key on later runs, takes the
@@ -394,8 +396,9 @@ what nginx "runs", unless the test says the reload does not take, and
   (reloading again), and a broken configuration stops it before anything is
   written. When apt-get cannot install nginx, `apply` shows apt's output and says
   that a server without internet access needs an apt proxy or a local mirror;
-- without the `http` option, `apply` writes byte for byte the file (and so the
-  generation) of the script before that option. With `http` on a route, its host
+- without the `http` and `api` options, `apply` writes byte for byte the file of
+  the script before the `http` option, with only the default server of port 443
+  added at its end. With `http` on a route, its host
   name leaves the shared port 80 redirect for a port 80 server of its own: the
   `http` routes with the settings of its 443 server (headers, cookie flags,
   limits, strip), 404 for every other path as on 443 (none with a `/` route),
@@ -407,10 +410,32 @@ what nginx "runs", unless the test says the reload does not take, and
   shared redirect is left out. `strip,http` and `http,strip` are the same. `apply`
   marks these routes, and `status` shows their answer on port 80 (curl to port 80)
   and nothing for the other routes;
+- with `api` on a route, PATH `docs`, `redoc` and `openapi.json` answer 404
+  (exact locations) and the route's own location has `limit_req` (burst 20,
+  status 429) before `proxy_pass`, on 443 and, for `strip,http,api`, on port 80;
+  the same route without `http` keeps only its redirect on port 80, a route with
+  port `-` and a route without `api` get nothing, and an `api` route on `/`
+  works too. The `limit_req_zone` line (10r/s) comes once, right after the
+  `map`, only while an `api` route is served. `apply` and `status` mark the `api`
+  routes. On port 80, PATH `docs`, `redoc` and `openapi.json` of a
+  `strip,http,api` route keep their 404 over the redirect of a route without
+  `http` under it (such as PATH`docs/`), so that nginx gets each location once.
+  A copy of the script with other `API_RATE` and `API_BURST` values shows them
+  in `--help`, in the output of `apply` and in the configuration;
+- the configuration always ends with the default server of port 443, which
+  closes the connection (`return 444`) with the installed certificate and the
+  session cache of the other 443 servers; `apply`
+  and `status` say so, and `uninstall` still works. `apply` refuses, before
+  anything is written and also with its own file in place, another nginx file that
+  is the default server for port 443 (`default_server` or `default`, with `443`,
+  `*:443`, `0.0.0.0:443` or a quoted `[::]:443`, also over several lines), and
+  names the file and the statement; not the commented 443 lines and the port 80
+  `default_server` of Ubuntu's stock site, a plain `listen 443 ssl`, port 8443,
+  port 4430, or the words in a quoted string. It runs `nginx -T` once;
 - a renewed certificate is served at once after `apply`; a certificate `nginx -t`
   refuses or nginx does not take is taken back with the key and the waiting key,
   and so is a new chain for the same certificate; `status` reports the
-  certificate and routes changed since `apply`, and nothing right after it; before
+  certificate and the routes or `https.sh` changed since `apply`, and nothing right after it; before
   nginx is installed it says that `apply` installs it, and it lists what on port 80
   or 443 would stop `apply`;
   `apply` and `uninstall` leave alone an nginx file written for another `--dir`;
@@ -526,23 +551,38 @@ as a DER PKCS #7 bundle, checks that `apply` refuses to start while another
 program listens on port 443, then lets `apply` install and start nginx, and
 checks with curl, trusting only the throwaway root, that each host and path
 reaches its port with the path kept or removed and `X-Forwarded-Proto: https`,
-that a forged `Host` and `X-Forwarded-For` do not reach the service, that other
+that a `Host` in other letters and with a port, and a forged `X-Forwarded-For`,
+do not reach the service, that other
 paths answer 404, that `/dev?a=1` redirects to `/dev/?a=1` and `http://` to
 `https://`, that the `session_id` cookie of a service comes back with `Secure;
 SameSite=Lax` and another cookie unchanged, that HTTPS answers carry no
 `Strict-Transport-Security`, and that the generation probe answers 127.0.0.1 but not the
-container's own address. `status` finds nginx without the sbin directories on the
-PATH. With `strip,http` on one route, that route answers on port 80 as on 443
+container's own address. On 443, an unknown host name (in TLS or only in
+`Host`), `127.0.0.1` and the container's address get the connection closed
+(curl exit 52), while the host names of the table answer, also without SNI with
+their name in `Host`. A TLS 1.2 client without session tickets resumes its
+session by session ID, and the session tickets last one day. `status` finds nginx
+without the sbin directories on the PATH. With `strip,http` on one route, that route answers on port 80 as on 443
 (`X-Forwarded-Proto: https`, the path removed, `Secure` on `session_id`), the
 redirect of nginx for the path without its last `/` stays relative, the other
 routes and host names, and a route without `http` under that route (with and
 without its last `/`), still redirect to `https://`, and `status` shows the port
-80 answer; without it again, port 80 redirects again. It renews the certificate
+80 answer; without it again, port 80 redirects again. With `strip,http,api` on
+that route and `strip,api` on another, PATH `docs`, `redoc` and `openapi.json`
+answer 404 on 443 and on port 80 while PATH and PATH`x` reach the echo server;
+with a route `/dev/api/docs/` without `http` added, nginx takes the
+configuration, `/dev/api/docs` answers 404 on both ports, and `/dev/api/docs/x`
+reaches its port on 443 and redirects on port 80;
+100 fast requests to the `api` route get 200 for the first 20 or more, then 429
+(the check prints how long they took);
+60 fast requests to a `/dev/` route right after all get 200; port 80 shares the
+limit; `status` marks the routes, and without `api` again the limit is gone. It renews the certificate
 and changes the key while nginx runs, comparing the exact certificate nginx
 presents, and refuses a second nginx file for one of the host names. With
 another nginx file holding a port that a program already has, nginx cannot
 reload: `apply` must fail and put the previous configuration back, and
-`uninstall` must fail and change nothing. Then it uninstalls. It refuses to run outside a container.
+`uninstall` must fail and change nothing. Then it uninstalls, and `apply` then
+refuses another nginx file that is the default server for port 443. It refuses to run outside a container.
 
 `check-upgrade-backup.sh` runs the backup of `deploy-app.sh --upgrade` and the
 restore steps of its `restore.txt` against real PostgreSQL 16 (a `postgres:16`

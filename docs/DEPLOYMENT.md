@@ -994,7 +994,9 @@ than 443. `deploy-app.sh` writes it from `PUBLIC_BASE_URL`, so:
   absolute `Location` headers, and must not cache the redirects (303). A TLS
   front that connects to this server on port 80, such as a WAF, needs the `http`
   option on these lines (see "Behind a TLS front on port 80" in the
-  [README](../README.md#behind-a-tls-front-on-port-80)).
+  [README](../README.md#behind-a-tls-front-on-port-80)). The ISS-Oracle API on
+  stgiss has a line of its own, `stgiss.perodua.com.my /api/ 8000 strip,http,api`
+  (see "Publish it with HTTPS" in the [README](../README.md#publish-it-with-https)).
 
 **What users and support see:**
 
@@ -1025,7 +1027,8 @@ on port 80" in the [README](../README.md#behind-a-tls-front-on-port-80)).
 `https.sh` sends no `Strict-Transport-Security`;
 add it only when the customer decides that these names are HTTPS-only. The SSH
 tunnel (`localhost`) and the server's IP address are other host names with
-their own cookies: they keep working over HTTP.
+their own cookies: they keep working over HTTP. On port 443, `https.sh` closes
+the connection for them, and for every other name that is not in its table.
 
 ## HTTPS certificate from Let's Encrypt
 
