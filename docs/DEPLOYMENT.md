@@ -991,7 +991,10 @@ than 443. `deploy-app.sh` writes it from `PUBLIC_BASE_URL`, so:
   `/dev/` lines of [https-routes.conf.example](../scripts/https-routes.conf.example)
   do. A UAT environment needs one `/uat/` line for each of the four names. A
   front proxy or F5 in between must keep the `Host` header, the query string and
-  absolute `Location` headers, and must not cache the redirects (303).
+  absolute `Location` headers, and must not cache the redirects (303). A TLS
+  front that connects to this server on port 80, such as a WAF, needs the `http`
+  option on these lines (see "Behind a TLS front on port 80" in the
+  [README](../README.md#behind-a-tls-front-on-port-80)).
 
 **What users and support see:**
 
@@ -1015,7 +1018,11 @@ addresses, where the session cookies travel unencrypted. Prefer
 front. The stgiss session cookie now also signs in every module host name, so it
 must never travel over plain HTTP. `https.sh` marks it `Secure` (and
 `SameSite=Lax`), so that a browser does not send it to `http://` on port 80 or
-on port 8110 of these names. `https.sh` sends no `Strict-Transport-Security`;
+on port 8110 of these names. With the `http` option for a TLS front, the cookie
+and the passwords still cross the connection from the front to port 80
+unencrypted: use it only on a network that you trust (see "Behind a TLS front
+on port 80" in the [README](../README.md#behind-a-tls-front-on-port-80)).
+`https.sh` sends no `Strict-Transport-Security`;
 add it only when the customer decides that these names are HTTPS-only. The SSH
 tunnel (`localhost`) and the server's IP address are other host names with
 their own cookies: they keep working over HTTP.

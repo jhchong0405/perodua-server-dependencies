@@ -355,10 +355,11 @@ reload through the fake `systemctl` copies the script's configuration and chain 
 what nginx "runs", unless the test says the reload does not take, and
 `openssl s_client` answers from that copy. It checks:
 - every malformed line of the routes table (a short host name, a path without its
-  slashes, a port over 65535, an unknown option, an extra column, a host and path
-  listed twice, no host at all) stops the script before any key is made, and the
-  first run creates the table from the example and stops, making a new `--dir`
-  0700 and leaving the mode of an existing one;
+  slashes, a port over 65535, an unknown option or option word, an option word
+  twice, an empty or upper-case one, `strip http` with a space, an extra column, a
+  host and path listed twice, no host at all) stops the script before any key is
+  made, and the first run creates the table from the example and stops, making a
+  new `--dir` 0700 and leaving the mode of an existing one;
 - `csr` makes a 0600 key and a request whose CN is the first host and whose
   subject alternative names are all hosts, keeps the key on later runs, takes the
   organisation from `--subject` but refuses a CN there, and with `--new-key` or
@@ -393,6 +394,19 @@ what nginx "runs", unless the test says the reload does not take, and
   (reloading again), and a broken configuration stops it before anything is
   written. When apt-get cannot install nginx, `apply` shows apt's output and says
   that a server without internet access needs an apt proxy or a local mirror;
+- without the `http` option, `apply` writes byte for byte the file (and so the
+  generation) of the script before that option. With `http` on a route, its host
+  name leaves the shared port 80 redirect for a port 80 server of its own: the
+  `http` routes with the settings of its 443 server (headers, cookie flags,
+  limits, strip), 404 for every other path as on 443 (none with a `/` route),
+  a redirect to HTTPS for each route without `http`, with and without its last `/` (also
+  one under an `http` route, such as `/dev/api/` under `/dev/` or `/`), and no
+  TLS or generation probe. Without a renewal timer, `apply` makes no copy of the
+  script. The 443 servers stay the same, a route
+  with port `-` is served on neither port, and with `http` on every host name the
+  shared redirect is left out. `strip,http` and `http,strip` are the same. `apply`
+  marks these routes, and `status` shows their answer on port 80 (curl to port 80)
+  and nothing for the other routes;
 - a renewed certificate is served at once after `apply`; a certificate `nginx -t`
   refuses or nginx does not take is taken back with the key and the waiting key,
   and so is a new chain for the same certificate; `status` reports the
@@ -471,7 +485,8 @@ directories (`--unit-dir`, `--lib-dir`). It checks:
 - the first certificate writes the service (`ExecStart` runs the copy in
   `--lib-dir` with this `--dir`) and the daily timer and enables it; the copy runs
   after the downloaded folder is deleted and rewrites nothing; a run from a newer
-  folder updates the copy;
+  folder updates the copy; an older copy that refuses the `http` option fails the
+  renewal, and `apply` updates it, so that the renewal works again;
 - wrong options (`--server`, `--acme-dns`, `--dns-resolvers`, `--email`,
   `--extra-root`, `--acme-ca`), `--renew` before any certificate, the staging
   server without `--extra-root`, terms of service not accepted, a missing or
@@ -517,12 +532,17 @@ paths answer 404, that `/dev?a=1` redirects to `/dev/?a=1` and `http://` to
 SameSite=Lax` and another cookie unchanged, that HTTPS answers carry no
 `Strict-Transport-Security`, and that the generation probe answers 127.0.0.1 but not the
 container's own address. `status` finds nginx without the sbin directories on the
-PATH. It renews the certificate and changes the key while
-nginx runs, comparing the exact certificate nginx presents, and refuses a second
-nginx file for one of the host names. With another nginx file holding a port
-that a program already has, nginx cannot reload: `apply` must fail and put the
-previous configuration back, and `uninstall` must fail and change nothing. Then
-it uninstalls. It refuses to run outside a container.
+PATH. With `strip,http` on one route, that route answers on port 80 as on 443
+(`X-Forwarded-Proto: https`, the path removed, `Secure` on `session_id`), the
+redirect of nginx for the path without its last `/` stays relative, the other
+routes and host names, and a route without `http` under that route (with and
+without its last `/`), still redirect to `https://`, and `status` shows the port
+80 answer; without it again, port 80 redirects again. It renews the certificate
+and changes the key while nginx runs, comparing the exact certificate nginx
+presents, and refuses a second nginx file for one of the host names. With
+another nginx file holding a port that a program already has, nginx cannot
+reload: `apply` must fail and put the previous configuration back, and
+`uninstall` must fail and change nothing. Then it uninstalls. It refuses to run outside a container.
 
 `check-upgrade-backup.sh` runs the backup of `deploy-app.sh --upgrade` and the
 restore steps of its `restore.txt` against real PostgreSQL 16 (a `postgres:16`

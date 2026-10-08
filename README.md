@@ -912,8 +912,11 @@ nginx configuration all come from it. Run the commands from the `scripts` folder
    that expects `/`, such as the ISS-Oracle API published under `/dev/api/`. A port
    that is not known yet can be `-`: the host name is in the certificate, and nginx
    answers 404 for it until the port is set and `apply` runs again (the template
-   has WOM and TMS like that). Put every host name that needs HTTPS in the table
-   now: the certificate is requested for exactly these names.
+   has WOM and TMS like that). `http` also serves the route on port 80, for a TLS
+   front that connects to port 80: see
+   [Behind a TLS front on port 80](#behind-a-tls-front-on-port-80). Put every host
+   name that needs HTTPS in the table now: the certificate is requested for
+   exactly these names.
 2. **The certificate request (CSR).**
 
    ```bash
@@ -994,10 +997,11 @@ nginx configuration all come from it. Run the commands from the `scripts` folder
 
    `apply` installs nginx if needed, with apt-get: the server needs the Ubuntu
    package mirrors, or an apt proxy. It then writes `/etc/nginx/conf.d/perodua-https.conf`:
-   port 80 redirects to HTTPS, and on 443 each host forwards its paths to
-   `127.0.0.1:PORT` and answers 404 for any other path. The services get the host
-   name, `X-Forwarded-Proto: https` and the caller's address in `X-Forwarded-For`
-   and `X-Real-IP`, replacing whatever the caller sent. The Odoo session cookie
+   port 80 redirects to HTTPS (except the routes with `http`), and on 443 each
+   host forwards its paths to `127.0.0.1:PORT` and answers 404 for any other
+   path. The services get the host name, `X-Forwarded-Proto: https` and the
+   caller's address in `X-Forwarded-For` and `X-Real-IP`, replacing whatever the
+   caller sent. The Odoo session cookie
    (`session_id`) gets `Secure` and `SameSite=Lax`, so browsers send it over HTTPS
    only, on every port. `apply` sends no `Strict-Transport-Security`: making these
    host names HTTPS-only in browsers for a long time is the customer's decision,
@@ -1011,13 +1015,62 @@ nginx configuration all come from it. Run the commands from the `scripts` folder
    configuration comes back. If ufw is active, allow ports 80 and 443 (`apply`
    prints the command). `status` shows the certificate, its expiry, whether nginx
    is installed (if not, `apply` installs it), whatever would stop `apply` on ports
-   80 and 443, and every route.
+   80 and 443, and every route (a route with `http` also with its answer on port
+   80).
 
 Behind HTTPS, the App's `PUBLIC_BASE_URL` starts with `https://` (in the grey
 environment `https://stgiss.perodua.com.my/dev`, see
 [Sign in once](#sign-in-once-v105)), and every service listens on `127.0.0.1`
 only (`BIND_IP=127.0.0.1`), so that browsers reach it through nginx
 ([DEPLOYMENT.md](docs/DEPLOYMENT.md)).
+
+### Behind a TLS front on port 80
+
+Some fronts take the browsers' HTTPS themselves and connect to this server over
+plain HTTP on port 80, such as a WAF (web application firewall) or F5. Port 80
+normally redirects to HTTPS, so the front gets the redirect again and again, and
+the browser shows `ERR_TOO_MANY_REDIRECTS`. For such a front, add the option
+`http` to the routes it uses (with `strip`: `strip,http`), then run `apply`:
+
+```
+# HOST                          PATH        PORT   OPTION
+stgiss.perodua.com.my           /dev/       8110   http
+api.example.perodua.com.my      /dev/api/   8000   strip,http
+```
+
+A host name with an `http` route gets its own server block on port 80. There,
+nginx forwards each `http` route as on 443: with the same headers (also
+`X-Forwarded-Proto: https`, because the browser used HTTPS to the front), the
+same `Secure` session cookie and the same limits. A route of that host name
+without `http` still redirects to HTTPS, also one under a route with it (such as
+`/dev/api/` under `/dev/`). Behind the front, such a route loops, so give `http`
+to every route that the front sends to port 80. Every other path answers 404, as
+on 443. Host names without an `http` route and port 443 do not change. `apply` marks these routes,
+and `status` shows their answer on port 80. If the Let's Encrypt renewal timer
+is installed, `apply` also updates the copy of `https.sh` that the timer runs:
+an older copy refuses `http`, and then the renewal fails.
+
+Know these risks before you use `http`:
+
+- Port 80 serves these routes, without encryption, to anybody who can reach it.
+  `https.sh` does not check the address of the caller. If only the front must
+  connect, let only the front's addresses reach port 80 (a firewall or a cloud
+  security group; if ufw is active, `apply` prints the command).
+- The connection from the front to this server is not encrypted. Use `http`
+  only on a network that you trust.
+- A user who types `http://` and reaches this server directly is not
+  redirected to HTTPS on these paths.
+- The front must redirect `http://` to `https://` itself, or take HTTPS only.
+  If it forwards the browsers' plain HTTP to port 80, this server cannot tell
+  those requests from HTTPS ones and serves them without a redirect. The
+  browser then keeps no `Secure` cookie, and the sign-in fails without an error
+  message.
+- The front must send the browser's host name (the `Host` header). The services
+  see the front's address as the caller (`X-Forwarded-For`, `X-Real-IP`), not
+  the browser's.
+
+Do not use `http` when browsers connect to this server directly: then port 80
+must redirect them to HTTPS.
 
 ### Later
 
@@ -1026,7 +1079,7 @@ Each is `sudo bash https.sh COMMAND` from the `scripts` folder; `--help` lists t
 | To | Run |
 |---|---|
 | Renew the certificate before it expires | `csr` (it keeps the key), have the request signed, `install-cert FILE [CHAIN]`. nginx is reloaded and must serve the new certificate, or the previous one comes back. |
-| Renew a certificate from Let's Encrypt | Nothing: `perodua-https-renew.timer` renews it when fewer than 30 days are left. After downloading a newer `scripts` folder, run `letsencrypt --renew` from it, which updates the copy of the script that the timer runs. |
+| Renew a certificate from Let's Encrypt | Nothing: `perodua-https-renew.timer` renews it when fewer than 30 days are left. After downloading a newer `scripts` folder, run `letsencrypt --renew` from it, which updates the copy of the script that the timer runs (`apply` from it also updates that copy). |
 | Change to a new key | `csr --new-key`, have the request signed, `install-cert FILE [CHAIN]` (or `letsencrypt`). nginx keeps the old key until then. |
 | Change a path or port | Edit the table, then `apply`. |
 | Add a host name | Add it to the table, `csr`, have the request signed, `install-cert FILE [CHAIN]`, then `apply`. With Let's Encrypt: add it to the table, `letsencrypt` (it prints the new record), have the record created, `letsencrypt` again, then `apply`. |
