@@ -13,12 +13,13 @@ PATH=$PATH:/usr/local/sbin:/usr/sbin:/sbin   # cron, su and some sudo setups lea
 STATE_DIR=/etc/perodua-https
 NGINX_CONF=/etc/nginx/conf.d/perodua-https.conf
 DEFAULT_NGINX_CONF=$NGINX_CONF
+API_RATE=10r/s API_BURST=20
 SCRIPT_PATH=$(realpath -- "${BASH_SOURCE[0]}")
 SCRIPT_DIR=${SCRIPT_PATH%/*}
 # The subject GICT asks for in its certificate requests; the CN is the first host of the table.
 DEFAULT_SUBJECT='/C=MY/ST=Selangor/L=Rawang/O=Perusahaan Otomobil Kedua Sdn Bhd/OU=GICT'
 COMMAND='' ROUTES='' ROUTES_FILE='' SUBJECT=$DEFAULT_SUBJECT NEW_KEY=0 KEY_FILE='' CONFIRM='' PURGE=0 TEMP_DIR='' RELOADED=0
-ARGS=() HOSTS=() R_HOST=() R_PATH=() R_PORT=() R_STRIP=() SAVED=()
+ARGS=() HOSTS=() R_HOST=() R_PATH=() R_PORT=() R_STRIP=() R_HTTP=() R_API=() SAVED=()
 # In STATE_DIR: routes.conf (the table), key.pem (the private key nginx uses),
 # key.new.pem (a new key waiting for its certificate), request.csr, fullchain.pem,
 # and letsencrypt/ (see LE_DIR).
@@ -61,7 +62,7 @@ ACCOUNT_HOSTS=()
 declare -A GIVEN=() SETTINGS=() CNAME_STATE=() ACCOUNT=()
 
 usage() {
-    cat <<'HELP'
+    cat <<HELP
 Usage: sudo bash https.sh csr [--new-key | --key FILE] [--subject /C=MY/O=NAME]
        sudo bash https.sh install-cert CERT [CHAIN]
        sudo bash https.sh letsencrypt --manual [--accept-tos] [--dns-resolvers HOST[:PORT],...]
@@ -76,9 +77,10 @@ Usage: sudo bash https.sh csr [--new-key | --key FILE] [--subject /C=MY/O=NAME]
 Every command also takes --routes FILE (default /etc/perodua-https/routes.conf)
 and --dir DIR (default /etc/perodua-https).
 
-The routes table has one line per host name and path: HOST PATH PORT [strip].
-The first run creates it from https-routes.conf.example and stops, so that it
-can be filled in.
+The routes table has one line per host name and path: HOST PATH PORT [OPTION],
+with OPTION strip, http, api or a comma-separated list of them, like
+strip,http,api. The first run creates it from https-routes.conf.example and
+stops, so that it can be filled in.
 
 csr           Makes the private key (RSA 2048, kept in --dir, never sent) and a
               certificate request for every host name of the table: the first
@@ -134,10 +136,20 @@ letsencrypt   Gets the certificate for the request of csr (made first if there
 apply         Writes the nginx configuration: port 80 redirects to HTTPS, and on
               443 every host forwards its paths to 127.0.0.1:PORT, the path
               unchanged or, with strip, removed. Every other path answers 404.
+              A route with http is also served on port 80, without the
+              redirect and without encryption, for a TLS front (such as a
+              WAF) that forwards the browsers' HTTPS to port 80. A route with
+              api closes PATH docs, redoc and openapi.json (404), and takes at
+              most ${API_RATE%r/s} requests a second from each caller address, for all api
+              routes together, in bursts of $API_BURST (429 above that). On 443, other
+              host names and the bare address get the connection closed.
               nginx is installed with apt-get if needed; nothing else, not even
-              an nginx of another installation, may listen on port 80 or 443.
+              an nginx of another installation, may listen on port 80 or 443,
+              and no other nginx file may be the default server of port 443.
               The change is kept only if nginx -t accepts it and nginx then runs
               it. Every PORT must be known and the certificate installed.
+              Also updates the Let's Encrypt timer's copy of this script, if
+              there is one, so that it reads the same table.
 status        The certificate, Let's Encrypt, nginx and every route.
 uninstall     Removes the nginx configuration of this script and reloads nginx,
               and the Let's Encrypt renewal timer. --purge also deletes the key,
@@ -185,9 +197,10 @@ lock() {   # one for every command, outside --dir, so --purge cannot race with i
 }
 
 # ---------------------------------------------------------------- routes
-load_routes() {   # HOST PATH PORT [strip] per line; '#' starts a comment
-    local line host path port option extra n=0 i
+load_routes() {   # HOST PATH PORT [OPTION] per line; '#' starts a comment
+    local line host path port option extra n=0 i token seen tokens=()
     local fqdn='^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$' prefix='^/([A-Za-z0-9._~-]+/)*$' number='^[1-9][0-9]{0,4}$'
+    local options='^(strip|http|api)(,(strip|http|api))*$'
     ROUTES_FILE=${ROUTES:-$STATE_DIR/routes.conf}
     if [[ ! -f $ROUTES_FILE ]]; then
         [[ -z $ROUTES ]] || die "No routes file $ROUTES_FILE"
@@ -207,12 +220,21 @@ load_routes() {   # HOST PATH PORT [strip] per line; '#' starts a comment
         [[ $path =~ $prefix ]] || die "$ROUTES_FILE:$n: PATH must start and end with /, like /dev/"
         [[ $port == - ]] || { [[ $port =~ $number ]] && ((10#$port <= 65535)); } \
             || die "$ROUTES_FILE:$n: PORT must be 1-65535, or - while it is not known"
-        [[ -z $option || $option == strip ]] || die "$ROUTES_FILE:$n: the only option is strip"
+        IFS=, read -ra tokens <<< "$option"
+        seen=' '
+        for token in "${tokens[@]}"; do
+            [[ $option =~ $options && $seen != *" $token "* ]] \
+                || die "$ROUTES_FILE:$n: OPTION must be strip, http, api or a comma-separated list of them, like strip,http,api"
+            seen+="$token "
+        done
         [[ -z $extra ]] || die "$ROUTES_FILE:$n: too many columns"
         for ((i = 0; i < ${#R_HOST[@]}; i++)); do
             [[ ${R_HOST[i]} != "$host" || ${R_PATH[i]} != "$path" ]] || die "$ROUTES_FILE:$n: $host $path is listed twice"
         done
-        R_HOST+=("$host") R_PATH+=("$path") R_PORT+=("$port") R_STRIP+=("$option")
+        R_HOST+=("$host") R_PATH+=("$path") R_PORT+=("$port")
+        if [[ ,$option, == *,strip,* ]]; then R_STRIP+=(strip); else R_STRIP+=(''); fi
+        if [[ ,$option, == *,http,* ]]; then R_HTTP+=(http); else R_HTTP+=(''); fi
+        if [[ ,$option, == *,api,* ]]; then R_API+=(api); else R_API+=(''); fi
         [[ " ${HOSTS[*]} " == *" $host "* ]] || HOSTS+=("$host")
     done < "$ROUTES_FILE"
     ((${#HOSTS[@]})) || die "$ROUTES_FILE lists no host name"
@@ -426,19 +448,19 @@ port_takers() {   # what else listens on port 80 or 443, as PORT: PROGRAM (ITS F
     done
 }
 
-foreign_names() {   # the table's host names that another nginx file serves, as FILE: NAME
-    local dump
-    dump=$(nginx -T 2> "$TEMP_DIR/nginx-T.log") || { cat "$TEMP_DIR/nginx-T.log" >&2; die 'The current nginx configuration fails nginx -t: fix it first'; }
+nginx_dump() {
+    nginx -T > "$TEMP_DIR/nginx-T.conf" 2> "$TEMP_DIR/nginx-T.log" \
+        || { cat "$TEMP_DIR/nginx-T.log" >&2; die 'The current nginx configuration fails nginx -t: fix it first'; }
+}
+
+nginx_statements() {
     # Words as nginx reads them: quoted or not, a # outside quotes at the start of
     # a word begins a comment, and ; { } end a statement, so every server_name
     # statement is found, whether it shares its line or spans lines.
-    awk -v ours="$NGINX_CONF" -v hosts=" ${HOSTS[*]} " '
-        function take(w) {
-            if (w == "") return
-            if (names) { w = tolower(w); if (file != ours && index(hosts, " " w " ")) print file ": " w }
-            else if (w == "server_name") names = 1
-        }
-        /^# configuration file / { file = substr($0, 22); sub(/:$/, "", file); names = 0; quote = ""; next }
+    awk '
+        function take(w) { if (w != "") words = words "\t" w }
+        function finish() { if (words != "") print file words; words = "" }
+        /^# configuration file / { file = substr($0, 22); sub(/:$/, "", file); words = ""; quote = ""; next }
         {
             if (quote == "") word = ""
             for (i = 1; i <= length($0); i++) {
@@ -449,11 +471,30 @@ foreign_names() {   # the table's host names that another nginx file serves, as 
                     else word = word c
                 } else if (c == "\"" || c == "\047") quote = c
                 else if (c == "#" && word == "") break
-                else if (c ~ /[ \t;{}]/) { take(word); word = ""; if (c ~ /[;{}]/) names = 0 }
+                else if (c ~ /[ \t;{}]/) { take(word); word = ""; if (c ~ /[;{}]/) finish() }
                 else word = word c
             }
             if (quote == "") take(word)
-        }' <<< "$dump"
+        }' "$TEMP_DIR/nginx-T.conf"
+}
+
+foreign_names() {   # the table's host names that another nginx file serves, as FILE: NAME
+    nginx_statements | awk -F '\t' -v ours="$NGINX_CONF" -v hosts=" ${HOSTS[*]} " '
+        $1 != ours && $2 == "server_name" {
+            for (i = 3; i <= NF; i++) if (index(hosts, " " tolower($i) " ")) print $1 ": " tolower($i)
+        }'
+}
+
+foreign_defaults() {
+    nginx_statements | awk -F '\t' -v ours="$NGINX_CONF" '
+        $1 != ours && $2 == "listen" && $3 ~ /(^|:)443$/ {
+            for (i = 4; i <= NF; i++) if ($i == "default_server" || $i == "default") {
+                statement = $2
+                for (j = 3; j <= NF; j++) statement = statement " " $j
+                print $1 ": " statement
+                next
+            }
+        }'
 }
 
 render() {   # the nginx configuration for the table; its generation is a hash of the rest
@@ -463,27 +504,34 @@ render() {   # the nginx configuration for the table; its generation is a hash o
     printf '%s\n' "${text//@GENERATION@/$generation}"
 }
 
-# The $ names in single quotes below are nginx variables, not shell ones; in the
-# here-document the shell fills in $name and $STATE_DIR and leaves \$ to nginx.
-# shellcheck disable=SC2016
-nginx_conf() {   # the configuration, with @GENERATION@ where its generation goes
-    local name i path root
-    printf '# Written by https.sh from %s. Do not edit: change the routes, then run: sudo bash https.sh apply\n\n' "$ROUTES_FILE"
-    printf 'map $http_upgrade $perodua_https_connection {\n    default upgrade;\n    %s close;\n}\n\n' "''"
-    printf 'server {\n    listen 80;\n    server_name %s;\n    return 301 https://$host$request_uri;\n}\n' "${HOSTS[*]}"
-    for name in "${HOSTS[@]}"; do
-        root=0
-        cat <<NGINX
+http_host() {   # $1 host name: whether a route of it with a known port has http
+    local i
+    for ((i = 0; i < ${#R_HOST[@]}; i++)); do
+        [[ ${R_HOST[i]} != "$1" || ${R_PORT[i]} == - || ${R_HTTP[i]} != http ]] || return 0
+    done
+    return 1
+}
 
-server {
-    listen 443 ssl;
-    server_name $name;
-    ssl_certificate $STATE_DIR/fullchain.pem;
-    ssl_certificate_key $STATE_DIR/key.pem;
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_session_cache shared:perodua_https:10m;
-    ssl_session_timeout 1d;
+api_served() {
+    local i
+    for ((i = 0; i < ${#R_HOST[@]}; i++)); do
+        [[ ${R_PORT[i]} == - || ${R_API[i]} != api ]] || return 0
+    done
+    return 1
+}
 
+api_closed() {
+    local i
+    for ((i = 0; i < ${#R_HOST[@]}; i++)); do
+        [[ ${R_HOST[i]} != "$1" || ${R_PORT[i]} == - || ${R_HTTP[i]} != http || ${R_API[i]} != api ]] \
+            || [[ " ${R_PATH[i]}docs ${R_PATH[i]}redoc ${R_PATH[i]}openapi.json " != *" $2 "* ]] || return 0
+    done
+    return 1
+}
+
+proxy_settings() {   # $1 host name: how its server blocks forward to the services
+    local name=$1
+    cat <<NGINX
     # Redirects keep the host name and scheme the browser used. Uploads up to
     # 128 MB and requests up to 12 minutes, as in the App's web container.
     absolute_redirect off;
@@ -506,6 +554,86 @@ server {
     # browser sends the cookie over HTTPS only, on every port. On stgiss the
     # cookie also signs in every module host name.
     proxy_cookie_flags session_id secure samesite=lax;
+NGINX
+}
+
+# $1 host name, $2 all (its routes) or http (its routes with http; the others
+# redirect), $3 and $4 the comment and the statement for every other path, left
+# out when a route is /. $host below is nginx's.
+# shellcheck disable=SC2016
+locations() {
+    local i limit root=0
+    for ((i = 0; i < ${#R_HOST[@]}; i++)); do
+        [[ ${R_HOST[i]} == "$1" && ${R_PORT[i]} != - ]] || continue   # port -: in the certificate, not served yet
+        [[ ${R_PATH[i]} != / ]] || root=1
+        if [[ $2 == http && ${R_HTTP[i]} != http ]]; then
+            # Also under a route with http (/dev/api/ under /dev/): the redirect, and
+            # for the path without its last /, which on 443 nginx itself redirects.
+            [[ ${R_PATH[i]} == / ]] || api_closed "$1" "${R_PATH[i]%/}" \
+                || printf '\n    location = %s {\n        return 301 https://$host$request_uri;\n    }\n' "${R_PATH[i]%/}"
+            printf '\n    location %s {\n        return 301 https://$host$request_uri;\n    }\n' "${R_PATH[i]}"
+            continue
+        fi
+        limit=''
+        if [[ ${R_API[i]} == api ]]; then
+            printf '\n    location = %s%s {\n        return 404;\n    }\n' \
+                "${R_PATH[i]}" docs "${R_PATH[i]}" redoc "${R_PATH[i]}" openapi.json
+            printf -v limit '        limit_req zone=perodua_https_api burst=%s nodelay;\n        limit_req_status 429;\n' "$API_BURST"
+        fi
+        # With a URI part (the trailing /) nginx replaces the matched path: strip.
+        # nginx itself redirects the path without its last / (301, query kept).
+        printf '\n    location %s {\n%s        proxy_pass http://127.0.0.1:%s%s;\n    }\n' \
+            "${R_PATH[i]}" "$limit" "${R_PORT[i]}" "$([[ ${R_STRIP[i]} == strip ]] && printf /)"
+    done
+    ((root)) || printf '\n    # %s\n    location / {\n        %s;\n    }\n' "$3" "$4"
+}
+
+# The $ names in single quotes below are nginx variables, not shell ones; in the
+# here-documents the shell fills in $name and $STATE_DIR and leaves \$ to nginx.
+# shellcheck disable=SC2016
+nginx_conf() {   # the configuration, with @GENERATION@ where its generation goes
+    local name redirect=() front=()
+    for name in "${HOSTS[@]}"; do   # a host with routes for a TLS front gets a port 80 block of its own
+        if http_host "$name"; then front+=("$name"); else redirect+=("$name"); fi
+    done
+    printf '# Written by https.sh from %s. Do not edit: change the routes, then run: sudo bash https.sh apply\n\n' "$ROUTES_FILE"
+    printf 'map $http_upgrade $perodua_https_connection {\n    default upgrade;\n    %s close;\n}\n' "''"
+    if api_served; then
+        printf '\nlimit_req_zone $binary_remote_addr zone=perodua_https_api:10m rate=%s;\n' "$API_RATE"
+    fi
+    ((${#redirect[@]} == 0)) \
+        || printf '\nserver {\n    listen 80;\n    server_name %s;\n    return 301 https://$host$request_uri;\n}\n' "${redirect[*]}"
+    for name in "${front[@]}"; do
+        cat <<NGINX
+
+server {
+    listen 80;
+    server_name $name;
+
+    # A TLS front, such as a WAF, forwards the browsers' HTTPS to this port: the
+    # routes with the http option are served here as on 443, to any caller and
+    # unencrypted.
+
+NGINX
+        proxy_settings "$name"
+        locations "$name" http 'Every other path is closed, as on 443.' 'return 404'
+        printf '}\n'
+    done
+    for name in "${HOSTS[@]}"; do
+        cat <<NGINX
+
+server {
+    listen 443 ssl;
+    server_name $name;
+    ssl_certificate $STATE_DIR/fullchain.pem;
+    ssl_certificate_key $STATE_DIR/key.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:perodua_https:10m;
+    ssl_session_timeout 1d;
+
+NGINX
+        proxy_settings "$name"
+        cat <<NGINX
 
     # Which configuration nginx runs, for https.sh on this server only.
     location = /.perodua-https {
@@ -515,18 +643,22 @@ server {
         return 200 "generation @GENERATION@";
     }
 NGINX
-        for ((i = 0; i < ${#R_HOST[@]}; i++)); do
-            [[ ${R_HOST[i]} == "$name" && ${R_PORT[i]} != - ]] || continue   # port -: in the certificate, not served yet
-            path=${R_PATH[i]}
-            [[ $path != / ]] || root=1
-            # With a URI part (the trailing /) nginx replaces the matched path: strip.
-            # nginx itself redirects the path without its last / (301, query kept).
-            printf '\n    location %s {\n        proxy_pass http://127.0.0.1:%s%s;\n    }\n' \
-                "$path" "${R_PORT[i]}" "$([[ ${R_STRIP[i]} == strip ]] && printf /)"
-        done
-        ((root)) || printf '\n    # Every other path is closed.\n    location / {\n        return 404;\n    }\n'
+        locations "$name" all 'Every other path is closed.' 'return 404'
         printf '}\n'
     done
+    cat <<NGINX
+
+server {
+    listen 443 ssl default_server;
+    server_name _;
+    ssl_certificate $STATE_DIR/fullchain.pem;
+    ssl_certificate_key $STATE_DIR/key.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:perodua_https:10m;
+    ssl_session_timeout 1d;
+    return 444;
+}
+NGINX
 }
 
 # ---------------------------------------------------------------- commands
@@ -1066,21 +1198,27 @@ UNIT
 }
 
 # The timer runs a copy of this script in LIB_DIR, which stays when the downloaded
-# scripts folder is moved or deleted. A run from another folder (a newer release)
-# updates the copy; the timer's own run changes nothing of it.
+# scripts folder is moved or deleted. A run of letsencrypt or apply from another
+# folder (a newer release) updates the copy; the timer's own run changes nothing
+# of it. apply does, so that the copy reads the table apply took (an older copy
+# refuses the http option, and the renewal would fail every day).
+update_copy() {   # $1: 1 when the timer is new (then nothing is printed)
+    if ! cmp -s -- "$SCRIPT_PATH" "$LIB_DIR/https.sh"; then
+        install -m 0755 -- "$SCRIPT_PATH" "$LIB_DIR/https.sh.tmp"
+        mv -f -- "$LIB_DIR/https.sh.tmp" "$LIB_DIR/https.sh"
+        (($1)) || printf 'Updated the copy of this script that the renewal timer runs: %s\n' "$LIB_DIR/https.sh"
+    fi
+    if [[ -f $SCRIPT_DIR/https-routes.conf.example ]] && ! cmp -s -- "$SCRIPT_DIR/https-routes.conf.example" "$LIB_DIR/https-routes.conf.example"; then
+        install -m 0644 -- "$SCRIPT_DIR/https-routes.conf.example" "$LIB_DIR/https-routes.conf.example"
+    fi
+}
+
 setup_renewal() {
     local name changed=0 new=0
     [[ $SCRIPT_PATH != "$LIB_DIR/https.sh" ]] || return 0
     [[ -f $UNIT_DIR/$UNIT.timer ]] || new=1
     install -d -m 0755 -- "$LIB_DIR"
-    if ! cmp -s -- "$SCRIPT_PATH" "$LIB_DIR/https.sh"; then
-        install -m 0755 -- "$SCRIPT_PATH" "$LIB_DIR/https.sh.tmp"
-        mv -f -- "$LIB_DIR/https.sh.tmp" "$LIB_DIR/https.sh"
-        ((new)) || printf 'Updated the copy of this script that the renewal timer runs: %s\n' "$LIB_DIR/https.sh"
-    fi
-    if [[ -f $SCRIPT_DIR/https-routes.conf.example ]] && ! cmp -s -- "$SCRIPT_DIR/https-routes.conf.example" "$LIB_DIR/https-routes.conf.example"; then
-        install -m 0644 -- "$SCRIPT_DIR/https-routes.conf.example" "$LIB_DIR/https-routes.conf.example"
-    fi
+    update_copy "$new"
     unit_files
     mkdir -p -- "$UNIT_DIR"
     for name in "$UNIT.service" "$UNIT.timer"; do
@@ -1370,10 +1508,13 @@ cmd_letsencrypt() {
 }
 
 cmd_apply() {
-    local i unknown='' missing takers conflicts
+    local i unknown='' port80='' missing takers conflicts
     lock
     load_routes
     [[ ! -e $NGINX_CONF ]] || applied || die "$NGINX_CONF was not written by apply for $STATE_DIR: it is left alone"
+    if [[ $(renewal_dir) == "$STATE_DIR" && -f $LIB_DIR/https.sh && $SCRIPT_PATH != "$LIB_DIR/https.sh" ]]; then
+        update_copy 0   # the renewal timer's copy reads this table too
+    fi
     for ((i = 0; i < ${#R_HOST[@]}; i++)); do
         [[ ${R_PORT[i]} != - ]] || unknown+="https://${R_HOST[i]}${R_PATH[i]} "
     done
@@ -1386,8 +1527,12 @@ cmd_apply() {
     takers=$(port_takers)
     [[ -z $takers ]] || die "nginx needs ports 80 and 443, but something else listens there; stop or move it first (an nginx listed here is another installation than the one apply installs with apt):"$'\n'"$takers"
     ensure_nginx
+    nginx_dump
     conflicts=$(foreign_names)
     [[ -z $conflicts ]] || die "Another nginx configuration already serves these host names; remove it first:"$'\n'"$conflicts"
+    conflicts=$(foreign_defaults)
+    [[ -z $conflicts ]] \
+        || die "Another nginx configuration is already the default server for port 443; remove default_server there first:"$'\n'"$conflicts"
     render > "$TEMP_DIR/perodua-https.conf"
     mkdir -p -- "${NGINX_CONF%/*}"
     save "$NGINX_CONF"
@@ -1398,19 +1543,29 @@ cmd_apply() {
     printf 'nginx serves HTTPS for:\n'
     for ((i = 0; i < ${#R_HOST[@]}; i++)); do
         [[ ${R_PORT[i]} != - ]] || continue
-        printf '  https://%s%s -> 127.0.0.1:%s%s\n' "${R_HOST[i]}" "${R_PATH[i]}" "${R_PORT[i]}" \
-            "$([[ ${R_STRIP[i]} == strip ]] && printf ' (path removed)')"
+        [[ ${R_HTTP[i]} != http ]] || port80=1
+        printf '  https://%s%s -> 127.0.0.1:%s%s%s%s\n' "${R_HOST[i]}" "${R_PATH[i]}" "${R_PORT[i]}" \
+            "$([[ ${R_STRIP[i]} == strip ]] && printf ' (path removed)')" \
+            "$([[ ${R_HTTP[i]} == http ]] && printf ' (also on port 80 over HTTP, for a TLS front)')" \
+            "$([[ ${R_API[i]} == api ]] && printf ' (API: documentation closed, at most %s requests a second per caller address, bursts of %s)' \
+                "${API_RATE%r/s}" "$API_BURST")"
     done
     [[ -z $unknown ]] || printf 'In the certificate, not served yet (port -, they answer 404 until the port is set in %s):\n  %s\n' \
         "$ROUTES_FILE" "${unknown% }"
-    printf 'http:// redirects to https://. Check it with: sudo bash https.sh status\n'
+    printf 'Other host names on port 443: the connection is closed.\n'
+    printf 'http:// redirects to https://%s. Check it with: sudo bash https.sh status\n' \
+        "${port80:+, except on the routes also on port 80}"
     if command -v ufw > /dev/null && ufw status 2> /dev/null | grep -q 'Status: active'; then
-        printf 'ufw is active: allow HTTP and HTTPS with: sudo ufw allow 80,443/tcp\n'
+        if [[ -z $port80 ]]; then
+            printf 'ufw is active: allow HTTP and HTTPS with: sudo ufw allow 80,443/tcp\n'
+        else   # port 80 serves those routes unencrypted to every caller it lets in
+            printf 'ufw is active: allow HTTPS with: sudo ufw allow 443/tcp, and port 80 for the TLS front only: sudo ufw allow from FRONT_ADDRESS to any port 80 proto tcp\n'
+        fi
     fi
 }
 
 cmd_status() {
-    local i f code listens takers pending=''
+    local i f code plain listens takers pending=''
     load_routes
     printf 'Routes:      %s\n' "$ROUTES_FILE"
     f=$STATE_DIR/fullchain.pem
@@ -1436,24 +1591,32 @@ cmd_status() {
         printf 'nginx:       %s was not written by apply for %s\n' "$NGINX_CONF" "$STATE_DIR"
     else
         render > "$TEMP_DIR/now.conf"
-        printf 'nginx:       %s%s\n' "$NGINX_CONF" "$(cmp -s "$TEMP_DIR/now.conf" "$NGINX_CONF" || printf ' (the routes changed since: apply)')"
+        printf 'nginx:       %s%s\n' "$NGINX_CONF" "$(cmp -s "$TEMP_DIR/now.conf" "$NGINX_CONF" || printf ' (the routes or https.sh changed since: apply)')"
+        if grep -qxF '    listen 443 ssl default_server;' "$NGINX_CONF"; then
+            printf '             other host names on port 443: the connection is closed\n'
+        fi
     fi
     takers=$(port_takers)   # what would stop apply
     [[ -z $takers ]] || printf 'Ports 80/443: in use by what apply cannot work next to; stop or move it first:\n             %s\n' \
         "${takers//$'\n'/$'\n'             }"
     printf 'Routes:\n'
     for ((i = 0; i < ${#R_HOST[@]}; i++)); do
-        listens='-' code='-'
+        listens='-' code='-' plain='-'
         if [[ ${R_PORT[i]} != - ]]; then
             listens=NO
             if [[ -n $(ss -ltnH "sport = :${R_PORT[i]}" 2> /dev/null) ]]; then listens=yes; fi
             if [[ -f $NGINX_CONF ]] && command -v curl > /dev/null; then
                 code=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 10 --resolve "${R_HOST[i]}:443:127.0.0.1" \
                     "https://${R_HOST[i]}${R_PATH[i]}" || true)
+                [[ ${R_HTTP[i]} != http ]] \
+                    || plain=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 --resolve "${R_HOST[i]}:80:127.0.0.1" \
+                        "http://${R_HOST[i]}${R_PATH[i]}" || true)
             fi
         fi
-        printf '  https://%s%s -> 127.0.0.1:%s  port listening: %s  HTTPS answer: %s\n' \
-            "${R_HOST[i]}" "${R_PATH[i]}" "${R_PORT[i]}" "$listens" "$code"
+        printf '  https://%s%s -> 127.0.0.1:%s  port listening: %s  HTTPS answer: %s%s%s\n' \
+            "${R_HOST[i]}" "${R_PATH[i]}" "${R_PORT[i]}" "$listens" "$code" \
+            "$([[ ${R_HTTP[i]} == http ]] && printf '  HTTP answer on port 80: %s' "$plain")" \
+            "$([[ ${R_API[i]} == api && ${R_PORT[i]} != - ]] && printf '  API: docs closed, rate limited')"
     done
 }
 
