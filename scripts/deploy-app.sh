@@ -5,12 +5,13 @@ set -Eeuo pipefail
 export LC_ALL=C
 umask 077
 
-RELEASE=client-stable-uiux-v1.0.8
-REVISION=0a36b810bee09cbbc8613a0035933124bb53cf01
-# Published to the private registry only (not GHCR). The Odoo image loads no
-# sample data; both images name REVISION.
-ODOO_IMAGE=perodua-deploy.novutal.com/perodua-odoo:client-stable-uiux-v1.0.8@sha256:3841bd59cff2cc0de0e472d52f37f35246fd845c5978cb3e2265fed8d91af366
-WEB_IMAGE=perodua-deploy.novutal.com/perodua-odoo:client-stable-uiux-web-v1.0.8@sha256:b3174984bf77949f618415d138cdd7e8a77dfa4f7d96d64898298c54d1f706bd
+RELEASE=client-stable-uiux-v1.2.0
+REVISION=09d8c712f27c29facaad53c0a34de7df78e0b3f2
+# Built by CI from REVISION and published to GHCR, then copied to the private
+# registry, registry to registry, with no new build: the digests are the ones
+# CI built. The Odoo image loads no sample data; both images name REVISION.
+ODOO_IMAGE=perodua-deploy.novutal.com/perodua-odoo:client-stable-uiux-v1.2.0@sha256:e1d08ad8d8f5bf04131d361965380eadd3242fc1c7c08df49703bba3783a2e23
+WEB_IMAGE=perodua-deploy.novutal.com/perodua-odoo:client-stable-uiux-web-v1.2.0@sha256:89c1a0f941c148b5f7cf50b871dcaed51a4e92fb6761a4d81b8b0e97a17f1518
 REGISTRY=${ODOO_IMAGE%%/*}
 # Whether the pinned web image serves the page under PUBLIC_ROOT and shows
 # ENVIRONMENT_LABEL: yes from v1.0.4. The scripts folder of v1.0.3 has 0 here.
@@ -68,7 +69,7 @@ Usage: bash deploy-app.sh [--config PATH] [--dir PATH] [--non-interactive] [--in
        bash deploy-app.sh --upgrade [--dir PATH] [--backup-dir PATH] [--non-interactive]
                           [--confirm DATABASE] [--drop-retired-data]
        bash deploy-app.sh --release-queued-mail [--dir PATH]
-Deploy the pinned Client Stable UIUX v1.0.8 Odoo + Web images using Docker Compose.
+Deploy the pinned Client Stable UIUX v1.2.0 Odoo + Web images using Docker Compose.
 Requires a reachable external PostgreSQL 16 server; does not install or configure it.
 Default: use an already initialized, matching Client Stable UIUX database.
 --init-db initializes a NEW or EMPTY database as a fresh UAT system without

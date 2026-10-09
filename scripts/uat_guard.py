@@ -66,36 +66,24 @@ REVIEWED_REFERENCES = (
     {
         'file': 'perodua_demo/hooks.pyc',
         'finding': "constant 'perodua_demo_client.loaded'",
-        'sha256': 'db90973ddb2b77efd08746d109a5ce22c6043ee3be20effe2143537af53f7269',
+        'sha256': '2c6904080d91b0a72be46d5b8a6d4bca5893c6c30d9e1f757fec4c4884d78978',
         'reason': (
-            'A system-parameter key, not an XML ID: it is read with a default that '
-            'treats a missing value as "not loaded", only to word a log message, and '
-            'the surrounding code handles the dataset being absent. Optional '
-            'detection, not reliance. Reviewed against the pinned '
-            'client-stable-uiux-v1.0.0 image '
-            '(sha256:c16053940627c1c939a742327c2426b83355bf388a5fd2796894cb21770870da) '
-            'and again for client-stable-uiux-v1.0.1 '
-            '(sha256:8a55a0688ef42b9c67f088e74e0f815498e9371a554994b35729140925bb83d4) '
-            'and client-stable-uiux-v1.0.2 '
-            '(sha256:a80014632a3263a752a4571ceed900986c0cb811dfd8fe15357d674f1d420fb8) '
-            'and client-stable-uiux-v1.0.3 '
-            '(sha256:45e80bc5a9020aedee15a40dfc5e3c635beb06174664038672556ccfc4430026) '
-            'and client-stable-uiux-v1.0.4 '
-            '(sha256:0febf36e6c4150548f1b70b3bcf6195621c665368525f5de825d8fdfd951384c, '
-            'the same file) '
-            'and client-stable-uiux-v1.0.5 '
-            '(sha256:3608d20492bc645f0f6f7818dffd6f7bc8f7e0203c4eebeecf67de00f58864b2, '
-            'the same file) '
-            'and client-stable-uiux-v1.0.6 '
-            '(sha256:e50cdfc880b51467d5b002812db239034c1137bb5e45fc00df0fd24196139ec1, '
-            'the same file) '
-            'and client-stable-uiux-v1.0.7 '
-            '(sha256:24fd9ffc00d08a949c4bf9b823a74f637d57c3c17c0316f31288ad0240289e1a, '
-            'the same file) '
-            'and client-stable-uiux-v1.0.8 '
-            '(sha256:3841bd59cff2cc0de0e472d52f37f35246fd845c5978cb3e2265fed8d91af366, '
-            'the same file), '
-            'whose perodua_demo changes do not touch this key.'),
+            'A system-parameter key, not an XML ID: one function reads it with SQL, '
+            'a missing row means "not loaded", and the value only words a log line '
+            'and an error text; no branch tests it. The surrounding code detects '
+            'the client_data column and handles the dataset being absent. '
+            'post_init_hook calls that function only when perodua_demo.seeded is '
+            'set, and the function returns before the read without it, so a fresh '
+            'UAT initialization (no sample data: the hook only configures the '
+            'company) never reads the key. Optional detection, not reliance. '
+            'Reviewed against the pinned client-stable-uiux-v1.2.0 image '
+            '(sha256:e1d08ad8d8f5bf04131d361965380eadd3242fc1c7c08df49703bba3783a2e23), '
+            'whose hooks.pyc is the compiled perodua_demo/hooks.py of revision '
+            '09d8c712f27c29facaad53c0a34de7df78e0b3f2. The file is new (the in-app '
+            'demo reset left perodua_demo), but the code that uses this key is the '
+            'same as in the file reviewed for client-stable-uiux-v1.0.0 to v1.0.8 '
+            '(sha256 db90973ddb2b77efd08746d109a5ce22c6043ee3be20effe2143537af53f7269), '
+            'except one error text.'),
     },
 )
 

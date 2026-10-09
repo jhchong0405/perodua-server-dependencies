@@ -444,7 +444,9 @@ campaigns, routes, calendars, forecasts, IDDIs, orders or invoices; the EBS and
 PROMISE registers (Master Integration, Customer Rank, Supplier Classification,
 freight agents) are empty; and so are Holiday Types, Order Cycles, Order Types,
 Customer Type, Payment Method and Retail Price List, which administrators fill
-in on those pages with **+ New**. Currencies lists only MYR: from v1.0.3 the
+in on those pages with **+ New**. From v1.2.0, Order Types starts with two
+rows, Export Order and IHC / Engineering Order, which pages of the workspaces
+use. Currencies lists only MYR: from v1.0.3 the
 other currencies Odoo ships are removed, so any currency can be added there with
 **+ New** (enter its ISO code, symbol and rounding). What is set up:
 
@@ -460,7 +462,8 @@ Two things to know when filling in the lists:
 - Sale orders take their processing method (Part-to-Part, Campaign,
   Special-Monthly) and channel (Stockist, Export) from the order types the
   release used to ship. Order types created in the workbench are not
-  recognized: their orders count as Normal, with no channel.
+  recognized: their orders count as Normal, with no channel. From v1.2.0 the
+  release ships Export Order and IHC / Engineering Order again.
 - Campaigns target customers by customer type code. Give the service-centre
   type the code `CAT-SERVICE` and the body-and-paint type `CAT-BP`.
 
@@ -473,23 +476,27 @@ screens that pick from them (for example an EBS supplier to activate, or an OEM
 material) have nothing to offer.
 
 The integrations run in mock mode (`perodua_integration.mode`). The mock
-PROMISE, PSS and PSOS feeds start empty, and the two scheduled pulls that turn
-the mock PROMISE part feed and the mock PSS order feed into records are switched
-off: *PROMISE: consume Part Master feed* and the PSS order pull. Switch them on
-again under Settings > Technical > Scheduled Actions once real systems are
-connected. Demo Control's Reset & Reseed is refused on such a database, because
-it would load the sample data.
+PROMISE, PSS and PSOS feeds start empty, and the scheduled pulls that turn a
+mock feed into records are switched off: *PROMISE: consume Part Master feed*
+and the PSS order pull, and from v1.2.0 also the PSOS and P-Circle order
+pulls. Switch them on again under Settings > Technical > Scheduled Actions
+once real systems are connected. Up to v1.0.8, Demo Control's Reset & Reseed
+is refused on such a database, because it would load the sample data; v1.2.0
+has no Demo Control.
 
-A database initialized with v1.0.0 to v1.0.2 cannot be used with v1.0.8: its
+A database initialized with v1.0.0 to v1.0.2 cannot be used with v1.2.0: its
 module fingerprint differs and the App refuses it. Run
-`sudo bash service.sh --role app reset` from the v1.0.8 `scripts` folder on the
+`sudo bash service.sh --role app reset` from the v1.2.0 `scripts` folder on the
 App Server (see [Stop, start and reset](#stop-start-and-reset-servicesh); it
-deletes the data), or uninstall both servers and initialize again. v1.0.8 has
-the same Odoo modules as v1.0.7, v1.0.6, v1.0.5, v1.0.4 and v1.0.3, so a directory deployed with
-one of them keeps its data with `sudo bash deploy-app.sh --upgrade` from the
-v1.0.8 `scripts` folder (see [Upgrade to a new release](#upgrade-to-a-new-release-keeping-the-data-deploy-appsh---upgrade),
+deletes the data), or uninstall both servers and initialize again. v1.2.0 has
+other Odoo modules than v1.0.3 to v1.0.8, which have the same modules among
+themselves. A directory deployed with v1.0.5, v1.0.6, v1.0.7 or v1.0.8 keeps
+its data with `sudo bash deploy-app.sh --upgrade` from the v1.2.0 `scripts`
+folder, which runs a module upgrade (see [Module upgrade (-u)](#module-upgrade--u),
 and the steps in the README:
-[Upgrade an App server to v1.0.8](../README.md#upgrade-an-app-server-to-v108)).
+[Upgrade an App server to v1.2.0](../README.md#upgrade-an-app-server-to-v120)).
+A directory of v1.0.3 or v1.0.4 must first move to v1.0.8, with the `scripts`
+folder of kit commit `8867545`, which pins v1.0.8.
 Without `--upgrade` such a directory is refused, because it records its release.
 
 If the initialization stops after the modules are installed, for example on a
@@ -588,9 +595,9 @@ deployment directory (default `/opt/perodua-app`) to that release. The
 database, the attachments volume and the settings in `app.env` stay. A plain
 `deploy-app.sh` refuses a directory that another release deployed and points to
 `--upgrade`. `--upgrade` does not combine with `--init-db` or `--check-config`.
-For the move to v1.0.8 (from v1.0.4 to v1.0.7), the README gives the steps in
-order, HTTPS and the acceptance checks included:
-[Upgrade an App server to v1.0.8](../README.md#upgrade-an-app-server-to-v108).
+For the move to v1.2.0 (from v1.0.5 to v1.0.8, with a module upgrade), the
+README gives the steps in order, HTTPS and the acceptance checks included:
+[Upgrade an App server to v1.2.0](../README.md#upgrade-an-app-server-to-v120).
 
 **What it requires.** Each check below stops the upgrade before anything
 changes:
@@ -685,7 +692,9 @@ The failure message after the switch and step 5 of `restore.txt` print these
 commands with the real paths. This works because both releases have the same
 modules. A `scripts` folder of the old release that has `--upgrade` can also
 run `sudo bash deploy-app.sh --upgrade --dir DIR`, which takes a new backup
-first.
+first. It does not work after a module upgrade, such as the move to v1.2.0:
+from its mark on, the old release refuses the database, and `restore.txt` is
+the only way back (see [Module upgrade (-u)](#module-upgrade--u)).
 
 To also put the data back as it was before the upgrade, follow `restore.txt`
 instead. In short, on the App Server: stop the App
@@ -722,6 +731,10 @@ upgrade goes on as in the chapter above. `deploy-app.sh` pins this:
 | --- | --- |
 | `MODULE_UPGRADE_FROM` | `3b62a97697d2974ef37328de7f3d034d`: the module fingerprint of v1.0.3 to v1.0.8. The only fingerprint a module upgrade starts from. |
 | `OLD_RELEASES_ACCEPTED` | `client-stable-uiux-v1.0.5` to `client-stable-uiux-v1.0.8`: the releases the directory may run. |
+
+The pinned release, v1.2.0, has the fingerprint
+`c4b1b3383aa17134cdd42b3cee9dbf55` (33 `perodua_*` modules in its image). After
+the upgrade, `perodua.image_modhash` holds this value.
 
 **Point of no return.** After the backup, the upgrade marks the database and
 removes the containers of the old release. From then on the old release cannot
@@ -1029,7 +1042,7 @@ server's private address when F5 connects to the web ports directly.
    `DB_USER` with the same password, or a user each. Each database is recorded
    separately.
 2. On the App server, keep one `scripts` folder per release, for example
-   `/root/perodua-v1.0.8/scripts`. Write one configuration file per environment
+   `/root/perodua-v1.2.0/scripts`. Write one configuration file per environment
    (see `app.env.example`), for example `/root/perodua-dev.env`:
 
    ```
@@ -1135,12 +1148,15 @@ changes the host names without a new release.
 | Host name | Role | Shows |
 | --- | --- | --- |
 | `stgiss.perodua.com.my` | sign-in host (hub) | no module; after the sign-in, links to the modules the user may open |
-| `stgissrp.perodua.com.my` | module host | Perodua SPD |
+| `stgissrp.perodua.com.my` | module host | Perodua SPD; from v1.2.0 the workspaces RESOURCES PLANNING (MASTER) and RESOURCES PLANNING (OPERATION) |
 | `stgisssp.perodua.com.my` | module host | Supplier Portal |
 | `stgisscp.perodua.com.my` | module host | Customer Portal |
-| any other name: `localhost` (SSH tunnel), `127.0.0.1`, the self-check of `deploy-app.sh` | local | all three, with password sign-in as in v1.0.4 |
+| any other name: `localhost` (SSH tunnel), `127.0.0.1`, the self-check of `deploy-app.sh` | local | all of them (three; from v1.2.0 the four workspaces), with password sign-in as in v1.0.4 |
 
 Each name shows only its own module, whether the hand-over below is on or not.
+From v1.2.0 the code `rp` of the host table names two workspaces, so stgiss
+shows four cards, and `stgissrp` opens on a "Workspaces" page with its two
+cards. `stgisssp` and `stgisscp` open their one workspace directly.
 
 **The hand-over.** A user signs in one time, on stgiss. A module host without
 a sign-in sends the browser to stgiss. stgiss asks for the password if needed
@@ -1183,7 +1199,7 @@ than 443. `deploy-app.sh` writes it from `PUBLIC_BASE_URL`, so:
 - **Support** signs in at stgiss, or through the SSH tunnel
   (`ssh -N -L 8110:127.0.0.1:8110 USER@APP_SERVER`, then
   `http://localhost:8110/dev/app/`). The tunnel is a local name: it keeps the
-  password sign-in and shows all three modules.
+  password sign-in and shows all modules (from v1.2.0 the four workspaces).
 
 With `BIND_IP=0.0.0.0`, port 8110 also answers plain HTTP on the server's own
 addresses, where the session cookies travel unencrypted. Prefer

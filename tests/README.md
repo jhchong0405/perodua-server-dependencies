@@ -196,7 +196,7 @@ only `from`. It checks:
 - the cron and mail lines of `verify-upgrade` come before `up`, and the final
   message names the held mail and `--release-queued-mail`; `restore.txt` names
   the module upgrade and the point of no return;
-- each accepted old release (v1.0.5 to v1.0.7, v1.0.8 being this one) goes
+- each accepted old release (v1.0.5 to v1.0.8) goes
   through; v1.0.4, another fingerprint, every refusal of `upgrade-check`, retired
   data without `--drop-retired-data`, a refusal of the guard and a missing or
   wrong confirmation stop before the App stops, and nothing changes;
