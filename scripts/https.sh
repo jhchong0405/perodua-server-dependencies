@@ -60,6 +60,8 @@ LOOKUP='' RECORDS_BY='' PICK_FAILURE=''
 SERVER='' ACME_DNS='' DNS_RESOLVERS='' EMAIL='' EXTRA_ROOT='' ACME_CA=''
 ACCOUNT_HOSTS=()
 declare -A GIVEN=() SETTINGS=() CNAME_STATE=() ACCOUNT=()
+FRONT='' FRONT_HOST='' FRONT_PORT=443 ACCESS_LOG=/var/log/nginx/access.log ERROR_LOG=/var/log/nginx/error.log DIAG_GIVEN=0 PROBLEMS=0
+DIAG_AGENT=perodua-https-diagnose SEP=$'\x1f' DIAG_RECENT=1800 ACCESS_STATE='' ERROR_STATE=''
 
 usage() {
     cat <<HELP
@@ -73,6 +75,8 @@ Usage: sudo bash https.sh csr [--new-key | --key FILE] [--subject /C=MY/O=NAME]
                           [--acme-ca FILE]
        sudo bash https.sh apply
        sudo bash https.sh status
+       sudo bash https.sh diagnose [--front ADDRESS[:PORT]] [--access-log FILE]
+                          [--error-log FILE]
        sudo bash https.sh uninstall [--purge] [--confirm yes]
 Every command also takes --routes FILE (default /etc/perodua-https/routes.conf)
 and --dir DIR (default /etc/perodua-https).
@@ -151,6 +155,33 @@ apply         Writes the nginx configuration: port 80 redirects to HTTPS, and on
               Also updates the Let's Encrypt timer's copy of this script, if
               there is one, so that it reads the same table.
 status        The certificate, Let's Encrypt, nginx and every route.
+diagnose      Finds why browsers cannot open the host names, and changes
+              nothing: no file, no nginx reload, no lock; it needs no
+              certificate. It prints OK, PROBLEM and NOTE lines for: ports
+              22, 80, 443 and each route PORT (ss); the nginx files that
+              listen on 80 and 443, and other files that serve a host name
+              of the table there (nginx -T, which is not run while the
+              access or error log, or a log file that nginx -V names, is
+              missing: nginx -T creates it); each host and path over HTTPS
+              and HTTP on this server (port 80 redirects to https://, or
+              with http serves the route as HTTPS does), and each host once
+              through the front (a WAF or a load balancer) at the address
+              the system resolver gives, or at --front, with its first route
+              without http if it has one; the 301 answers in the access log,
+              with redirect loops (5 or more answers within 10 seconds for
+              one sender, request and user agent: a PROBLEM in the last 30
+              minutes, a NOTE before); nginx workers that exited on a signal
+              (error log). A front that sends HTTPS requests to port 80 gets
+              the redirect to https:// back each time on a route without
+              http: a redirect loop, which browsers show as
+              ERR_TOO_MANY_REDIRECTS. Then the front must forward HTTPS to
+              port 443, or the route needs http. Exit status 4 when it finds
+              a problem.
+  --front ADDRESS[:PORT]  checks every host name through the front at this
+                  address, port 443 by default.
+  --access-log FILE  nginx's access log, combined format, default
+                  /var/log/nginx/access.log.
+  --error-log FILE   nginx's error log, default /var/log/nginx/error.log.
 uninstall     Removes the nginx configuration of this script and reloads nginx,
               and the Let's Encrypt renewal timer. --purge also deletes the key,
               certificate, request and routes, and the Let's Encrypt accounts
@@ -204,6 +235,7 @@ load_routes() {   # HOST PATH PORT [OPTION] per line; '#' starts a comment
     ROUTES_FILE=${ROUTES:-$STATE_DIR/routes.conf}
     if [[ ! -f $ROUTES_FILE ]]; then
         [[ -z $ROUTES ]] || die "No routes file $ROUTES_FILE"
+        [[ $COMMAND != diagnose ]] || die "No routes file $ROUTES_FILE: diagnose checks the host names in it (pass --routes FILE)"
         mkdir -p -- "$STATE_DIR"   # 0700 when new; an existing directory keeps its mode
         install -m 0600 -- "$SCRIPT_DIR/https-routes.conf.example" "$ROUTES_FILE"
         die "Created $ROUTES_FILE: put this server's host names, paths and ports in it, then run the command again"
@@ -457,7 +489,7 @@ nginx_statements() {
     # Words as nginx reads them: quoted or not, a # outside quotes at the start of
     # a word begins a comment, and ; { } end a statement, so every server_name
     # statement is found, whether it shares its line or spans lines.
-    awk '
+    awk -v blocks="${1:-0}" '
         function take(w) { if (w != "") words = words "\t" w }
         function finish() { if (words != "") print file words; words = "" }
         /^# configuration file / { file = substr($0, 22); sub(/:$/, "", file); words = ""; quote = ""; next }
@@ -471,7 +503,7 @@ nginx_statements() {
                     else word = word c
                 } else if (c == "\"" || c == "\047") quote = c
                 else if (c == "#" && word == "") break
-                else if (c ~ /[ \t;{}]/) { take(word); word = ""; if (c ~ /[;{}]/) finish() }
+                else if (c ~ /[ \t;{}]/) { take(word); word = ""; if (c ~ /[;{}]/) finish(); if (blocks && c ~ /[{}]/) print file "\t" c }
                 else word = word c
             }
             if (quote == "") take(word)
@@ -1669,6 +1701,472 @@ le_status() {   # the Let's Encrypt lines of status
     done
 }
 
+diag_ok() { printf '  OK %s\n' "$*"; }
+diag_note() { printf '  NOTE %s\n' "$*"; }
+diag_problem() { printf '  PROBLEM %s\n' "$*"; PROBLEMS=$((PROBLEMS + 1)); }
+diag_curl() { curl -sS --noproxy '*' --max-time 10 -A "$DIAG_AGENT" "$@"; }
+diag_curl_error() { tail -n 1 -- "$TEMP_DIR/curl.log" 2> /dev/null || true; }
+
+diag_listeners() {
+    awk -v port="$1" -v sep="$SEP" '
+        {
+            address = $4
+            p = address
+            sub(/.*:/, "", p)
+            if (p != port) next
+            host = address
+            sub(/:[^:]*$/, "", host)
+            sub(/%.*/, "", host)
+            list = list (list == "" ? "" : ", ") address
+            if (host == "0.0.0.0" || host == "*" || host == "[::]" || host == "::") everywhere = 1
+            else if (host ~ /^127\./ || host == "[::1]" || host == "::1" || host ~ /^\[::ffff:127\./) here = 1
+            else network = 1
+        }
+        END { print (everywhere ? "all" : network ? "network" : here ? "local" : "none") sep list }'
+}
+
+diag_port_role() {
+    local i urls=''
+    case $1 in
+        22) printf 'SSH'; return 0 ;;
+        80) printf 'HTTP'; return 0 ;;
+        443) printf 'HTTPS'; return 0 ;;
+    esac
+    for ((i = 0; i < ${#R_HOST[@]}; i++)); do
+        [[ ${R_PORT[i]} != "$1" ]] || urls+="${urls:+, }https://${R_HOST[i]}${R_PATH[i]}"
+    done
+    printf '%s' "$urls"
+}
+
+diag_ports() {
+    local i port kind list role where listening ports=(22 80 443)
+    printf 'Ports:\n'
+    for ((i = 0; i < ${#R_PORT[@]}; i++)); do
+        [[ ${R_PORT[i]} == - || " ${ports[*]} " == *" ${R_PORT[i]} "* ]] || ports+=("${R_PORT[i]}")
+    done
+    if ! command -v ss > /dev/null; then
+        diag_note 'ss is not installed (apt-get install iproute2): the ports were not checked'
+        return 0
+    fi
+    if ! listening=$(ss -ltnH 2> /dev/null); then
+        diag_note 'ss -ltnH failed: the ports were not checked'
+        return 0
+    fi
+    for port in "${ports[@]}"; do
+        kind=none list=''
+        IFS=$SEP read -r kind list < <(diag_listeners "$port" <<< "$listening") || true
+        role=$(diag_port_role "$port")
+        case $kind in
+            all) where="listening on all networks ($list)" ;;
+            local) where="on this server only ($list)" ;;
+            network) where="listening on $list" ;;
+            *) where='not listening' ;;
+        esac
+        case $port:$kind in
+            22:all|22:network) diag_ok "port 22 ($role): $where" ;;
+            22:*) diag_note "port 22 ($role): $where" ;;
+            80:all|80:network|443:all|443:network) diag_ok "port $port ($role): $where" ;;
+            80:local) diag_note "port 80 ($role): $where: http:// addresses do not reach the redirect to https:// from the network" ;;
+            443:local) diag_problem "port 443 ($role): $where: browsers and a front on the network cannot reach HTTPS" ;;
+            80:none|443:none) diag_problem "port $port ($role): not listening: nginx does not run (sudo systemctl status nginx)" ;;
+            *:local) diag_ok "port $port ($role): $where" ;;
+            *:none) diag_problem "port $port ($role): not listening: the service does not run, and HTTPS answers 502 for its paths" ;;
+            *) diag_note "port $port ($role): $where: it answers plain HTTP from the network too; only nginx needs it, on 127.0.0.1" ;;
+        esac
+    done
+}
+
+diag_servers() {
+    nginx_statements 1 | awk -F '\t' -v sep="$SEP" -v ours="$NGINX_CONF" -v hosts=" ${HOSTS[*]} " '
+        function port_of(address) {
+            if (address ~ /^[0-9]+$/) return address
+            if (address ~ /:[0-9]+$/) { sub(/.*:/, "", address); return address }
+            return 80
+        }
+        function close_server(   list, count, n, k) {
+            if (!listens) { print "L" sep 80 sep file sep 0; on80 = 1 }
+            if (file != ours && (on80 || on443)) {
+                count = split(names, list, " ")
+                for (n = 1; n <= count; n++) {
+                    k = file SUBSEP list[n]
+                    if (!(file in served)) { served[file] = ""; order[++files] = file }
+                    if (!(k in seen)) { seen[k] = 1; served[file] = served[file] " " list[n] }
+                    if (on80) port80[k] = 1
+                    if (on443) port443[k] = 1
+                }
+            }
+            server = 0; listens = 0; on80 = 0; on443 = 0; names = ""
+        }
+        $1 != file { if (server) close_server(); file = $1; depth = 0; pending = 0 }
+        $2 == "{" { depth++; if (pending) server = depth; pending = 0; next }
+        $2 == "}" { if (server && depth == server) close_server(); if (depth) depth--; next }
+        { pending = (NF == 2 && $2 == "server") }
+        $2 == "listen" && $3 !~ /^unix:/ {
+            port = port_of($3)
+            chosen = 0
+            for (i = 4; i <= NF; i++) if ($i == "default_server" || $i == "default") chosen = 1
+            print "L" sep port sep $1 sep chosen
+            if (server) { listens = 1; if (port == 80) on80 = 1; if (port == 443) on443 = 1 }
+        }
+        $2 == "server_name" && server {
+            for (i = 3; i <= NF; i++) {
+                name = tolower($i)
+                if (index(hosts, " " name " ") && !index(" " names " ", " " name " ")) names = names " " name
+            }
+        }
+        END {
+            if (server) close_server()
+            for (f = 1; f <= files; f++) {
+                out = ""
+                count = split(served[order[f]], list, " ")
+                for (n = 1; n <= count; n++) {
+                    k = order[f] SUBSEP list[n]
+                    ports = ((k in port80) ? "80" : "") ((k in port80) && (k in port443) ? ", " : "") ((k in port443) ? "443" : "")
+                    out = out (out == "" ? "" : ", ") list[n] " (" ports ")"
+                }
+                print "N" sep order[f] sep out
+            }
+        }'
+}
+
+diag_nginx_logs() {
+    printf '%s\n' "$ACCESS_LOG" "$ERROR_LOG"
+    { nginx -V 2>&1 || true; } | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^--(error|http)-log-path=\//) { sub(/^[^=]*=/, "", $i); print $i } }'
+}
+
+diag_file_state() {
+    if [[ ! -e $1 ]]; then
+        printf 'missing'
+    elif [[ -d $1 || ! -r $1 ]]; then
+        printf 'unreadable'
+    else
+        printf 'readable'
+    fi
+}
+
+diag_nginx_files() {
+    local port file files extra kind names missing=''
+    printf 'nginx files:\n'
+    if ! command -v nginx > /dev/null; then
+        diag_note 'nginx is not installed (apply installs it): the nginx files were not checked'
+        return 0
+    fi
+    while IFS= read -r file; do
+        [[ -e $file || ", $missing, " == *", $file, "* ]] || missing+="${missing:+, }$file"
+    done < <(diag_nginx_logs)
+    if [[ -n $missing ]]; then
+        diag_note "the log file $missing does not exist, and nginx -T creates the log files that nginx names: the nginx files were not checked (nginx creates its log files when it starts)"
+        return 0
+    fi
+    if ! nginx -T > "$TEMP_DIR/nginx-T.conf" 2> "$TEMP_DIR/nginx-T.log"; then
+        diag_problem "nginx -T fails, so nginx cannot load a change: $(grep -m 1 'emerg' "$TEMP_DIR/nginx-T.log" || tail -n 1 "$TEMP_DIR/nginx-T.log")"
+        return 0
+    fi
+    diag_servers > "$TEMP_DIR/servers"
+    for port in 80 443; do
+        files=$(awk -F "$SEP" -v port="$port" '$1 == "L" && $2 == port && !seen[$3]++ { out = out (out == "" ? "" : ", ") $3 } END { print out }' "$TEMP_DIR/servers")
+        if awk -F "$SEP" -v port="$port" -v ours="$NGINX_CONF" '$1 == "L" && $2 == port && $3 == ours { found = 1 } END { exit !found }' "$TEMP_DIR/servers"; then
+            diag_ok "port $port: $files"
+        elif [[ -n $files ]]; then
+            diag_problem "port $port: $NGINX_CONF does not listen on it, only $files: run apply"
+        else
+            diag_problem "port $port: no nginx file listens on it: run apply"
+        fi
+    done
+    while IFS=$SEP read -r port file; do
+        extra=''
+        [[ $file != */sites-enabled/default ]] || extra=" (Ubuntu's default site: the \"Welcome to nginx\" page)"
+        diag_note "$file is the default server on port $port: it answers every other host name and the bare address$extra; a front that changes the Host header gets it, not the App"
+    done < <(awk -F "$SEP" -v sep="$SEP" -v ours="$NGINX_CONF" '$1 == "L" && $4 == 1 && $3 != ours && !seen[$2 sep $3]++ { print $2 sep $3 }' "$TEMP_DIR/servers")
+    while IFS=$SEP read -r kind file names; do
+        diag_note "$file, a file that apply did not write, serves host names of the table: $names. apply refuses a host name that another nginx file serves, and for one host name and port nginx uses the file that it reads first. To serve them with the routes of the table, first add http to each route that a TLS front reaches on port 80 (README: Behind a TLS front on port 80), then remove $file and run apply"
+    done < <(grep "^N$SEP" "$TEMP_DIR/servers" || true)
+}
+
+diag_own_address() {
+    local words
+    [[ $1 != 127.* ]] && [[ $1 != 0.0.0.0 ]] || return 0
+    words=" $(hostname -I 2> /dev/null || true) "
+    if command -v ip > /dev/null; then
+        words+=" $(ip -o addr show 2> /dev/null | awk '{ sub(/\/.*/, "", $4); printf "%s ", $4 }' || true) "
+    fi
+    [[ $words == *" $1 "* ]]
+}
+
+diag_headers() {
+    awk -v sep="$SEP" '
+        { sub(/\r$/, "") }
+        /^HTTP\// { n++; split($0, words, " "); code[n] = words[2]; next }
+        n && index($0, ":") {
+            name = tolower(substr($0, 1, index($0, ":") - 1))
+            value = substr($0, index($0, ":") + 1)
+            sub(/^[ \t]+/, "", value)
+            sub(/[ \t]+$/, "", value)
+            if (name == "server") server[n] = value
+            else if (name == "location") location[n] = value
+        }
+        END { if (n) print code[1] sep server[1] sep location[1] sep server[n] }' "$1"
+}
+
+diag_front() {
+    local host=$1 path=$2 here=$3 http=$4 url=https://$1$2 address port label code status=0 first='' server='' location='' last=''
+    if [[ -n $FRONT_HOST ]]; then
+        address=$FRONT_HOST port=$FRONT_PORT label=$FRONT
+    else
+        if ! command -v getent > /dev/null; then
+            diag_note "$host: getent is not installed: the way through a front was not checked (pass --front ADDRESS)"
+            return 0
+        fi
+        address=$(getent ahostsv4 "$host" 2> /dev/null | awk 'NR == 1 { print $1 }' || true)
+        if [[ -z $address ]]; then
+            diag_note "$host: the system resolver gives no IPv4 address: the way through a front was not checked (pass --front ADDRESS)"
+            return 0
+        fi
+        if diag_own_address "$address"; then
+            diag_note "$host: the system resolver gives $address, an address of this server: no front to check (pass --front ADDRESS to check one)"
+            return 0
+        fi
+        port=443 label=$address
+    fi
+    : > "$TEMP_DIR/front.headers"
+    code=$(diag_curl -k -L --max-redirs 5 -D "$TEMP_DIR/front.headers" -o /dev/null -w '%{http_code}' \
+        --connect-to "$host:443:$address:$port" "$url" 2> "$TEMP_DIR/curl.log") || status=$?
+    IFS=$SEP read -r first server location last < <(diag_headers "$TEMP_DIR/front.headers") || true
+    [[ $location != /* ]] || location=https://$host$location
+    if ((status == 47)) || [[ $first == 3?? && $location == "$url" ]]; then
+        if [[ $http == http ]]; then
+            diag_problem "$host $path: the front at $label (Server: ${server:-none}) gets a redirect to the same address again and again, although the route has http: a redirect loop. Make port 80 serve the route (see the HTTP line of this route), then ask the front's owner to check its entry for $host"
+        else
+            diag_problem "$host $path: the front at $label (Server: ${server:-none}) sends HTTPS requests to port 80 of this server, where this route redirects to https://: a redirect loop. Ask the front's owner to forward HTTPS to port 443 with the original Host header, or add http to this route (README: Behind a TLS front on port 80)"
+        fi
+    elif ((status)) || [[ $code == 000 ]]; then
+        diag_note "$host: no answer through the front at $label ($(diag_curl_error)): this way was not checked from this server"
+    elif [[ $code == 2?? ]]; then
+        diag_ok "$host $path: through the front at $label answers $code (Server: ${last:-none})"
+    elif [[ $code == "$here" && $code != 5?? ]]; then
+        diag_ok "$host $path: through the front at $label answers $code (Server: ${last:-none}), as this server does"
+    else
+        diag_problem "$host: the front at $label answers $code (Server: ${last:-none}), this server answers $here over HTTPS: ask the front's owner to check its entry for $host"
+    fi
+}
+
+diag_hosts() {
+    local i host path url code answer plain location
+    local -A picked=()
+    printf 'Host names:\n'
+    if ! command -v curl > /dev/null; then
+        diag_note 'curl is not installed (apt-get install curl): the host names were not checked'
+        return 0
+    fi
+    for ((i = 0; i < ${#R_HOST[@]}; i++)); do
+        [[ ${R_PORT[i]} != - ]] || continue
+        host=${R_HOST[i]}
+        if [[ -z ${picked[$host]:-} ]] || [[ ${R_HTTP[${picked[$host]}]} == http && ${R_HTTP[i]} != http ]]; then
+            picked[$host]=$i
+        fi
+    done
+    for ((i = 0; i < ${#R_HOST[@]}; i++)); do
+        host=${R_HOST[i]} path=${R_PATH[i]}
+        url=https://$host$path
+        if [[ ${R_PORT[i]} == - ]]; then
+            diag_note "$host $path: port - (not known yet): not checked"
+            continue
+        fi
+        code=$(diag_curl -k -o /dev/null -w '%{http_code}' --resolve "$host:443:127.0.0.1" "$url" 2> "$TEMP_DIR/curl.log" || true)
+        case $code in
+            000|'') diag_problem "$host $path: no HTTPS answer on this server ($(diag_curl_error))" ;;
+            5??) diag_problem "$host $path: HTTPS on this server answers $code: nginx gets no good answer from 127.0.0.1:${R_PORT[i]}" ;;
+            *) diag_ok "$host $path: HTTPS on this server answers $code" ;;
+        esac
+        answer=$(diag_curl -o /dev/null -w '%{http_code} %{redirect_url}' --resolve "$host:80:127.0.0.1" "http://$host$path" \
+            2> "$TEMP_DIR/curl.log" || true)
+        plain=${answer%% *} location=${answer#* }
+        [[ $answer == *' '* ]] || location=''
+        if [[ $plain == 000 || -z $answer ]]; then
+            diag_problem "$host $path: no HTTP answer on this server ($(diag_curl_error))"
+        elif [[ ${R_HTTP[i]} == http && $plain == 301 && $location == "$url" ]]; then
+            diag_problem "$host $path: HTTP on this server answers 301 to $url, but the route has http, so port 80 must serve it for a TLS front: run apply (http was added after the last apply), or another nginx file serves $host on port 80 (see nginx files)"
+        elif [[ ${R_HTTP[i]} == http && $plain == "$code" ]]; then
+            diag_ok "$host $path: HTTP on this server answers $plain: served on port 80 too, for a TLS front (http)"
+        elif [[ ${R_HTTP[i]} == http ]]; then
+            diag_problem "$host $path: HTTP on this server answers $plain${location:+ to $location}, HTTPS answers ${code:-000}: with http, port 80 must answer as HTTPS does (apply)"
+        elif [[ $plain == 301 && $location == "$url" ]]; then
+            diag_ok "$host $path: HTTP on this server answers 301 to $url"
+        elif [[ $plain == "$code" ]]; then
+            diag_problem "$host $path: HTTP on this server answers $plain as HTTPS does, but the route has no http: another nginx file serves $host on port 80 (see nginx files), or http was removed after the last apply. If a TLS front connects on port 80 for this route, first add http to the route (README: Behind a TLS front on port 80), else apply makes port 80 redirect it and the front loops. Then remove the other nginx file, if there is one, and run apply"
+        else
+            diag_problem "$host $path: HTTP on this server answers $plain${location:+ to $location}, not 301 to $url: without http on the route, port 80 must only send browsers to HTTPS (apply)"
+        fi
+        [[ ${picked[$host]:-} != "$i" ]] || diag_front "$host" "$path" "$code" "${R_HTTP[i]}"
+    done
+}
+
+diag_access_summary() {
+    awk -v sep="$SEP" -v agent="\"$DIAG_AGENT\"" -v now="$1" -v recent="$DIAG_RECENT" '
+        function day_number(y, m, d) {
+            if (m <= 2) { y--; m += 12 }
+            return 365 * y + int(y / 4) - int(y / 100) + int(y / 400) + int((153 * (m - 3) + 2) / 5) + d
+        }
+        function seconds(t,   m, zone) {
+            if (t !~ /^[0-9][0-9]\/[A-Z][a-z][a-z]\/[0-9][0-9][0-9][0-9]:[0-9][0-9]:[0-9][0-9]:[0-9][0-9] [+-][0-9][0-9][0-9][0-9]$/) return -1
+            m = index("JanFebMarAprMayJunJulAugSepOctNovDec", substr(t, 4, 3))
+            if (m == 0 || (m - 1) % 3) return -1
+            zone = substr(t, 23, 2) * 3600 + substr(t, 25, 2) * 60
+            if (substr(t, 22, 1) == "-") zone = -zone
+            return (day_number(substr(t, 8, 4) + 0, (m + 2) / 3, substr(t, 1, 2) + 0) - epoch) * 86400 \
+                + substr(t, 13, 2) * 3600 + substr(t, 16, 2) * 60 + substr(t, 19, 2) - zone
+        }
+        BEGIN { epoch = day_number(1970, 1, 1) }
+        {
+            lines++
+            if (index($0, agent)) { own++; next }
+            a = index($0, " [")
+            if (a == 0) { bad++; next }
+            rest = substr($0, a + 2)
+            b = index(rest, "] \"")
+            if (b == 0) { bad++; next }
+            time = substr(rest, 1, b - 1)
+            rest = substr(rest, b + 3)
+            c = index(rest, "\" ")
+            if (c == 0) { bad++; next }
+            request = substr(rest, 1, c - 1)
+            status = substr(rest, c + 2, 4)
+            t = seconds(time)
+            if (status !~ /^[0-9][0-9][0-9] $/ || t < 0) { bad++; next }
+            if (status != "301 ") next
+            browser = substr(rest, c + 6)
+            if (index(browser, "\" \"")) { sub(/.*" "/, "", browser); sub(/"[ \t]*$/, "", browser) } else browser = ""
+            sender = $1
+            moved++
+            answers[sender]++
+            last[sender] = request sep time
+            key = sender sep request sep browser
+            count[key]++
+            if (count[key] >= 5 && t - fourth[key] <= 10 && fourth[key] - t <= 10) {
+                looped[key] = 1
+                at[key] = t
+                line[key] = NR
+                when[key] = time
+            }
+            fourth[key] = third[key]
+            third[key] = second[key]
+            second[key] = first[key]
+            first[key] = t
+        }
+        END {
+            printf "S%s%d%s%d%s%d%s%d\n", sep, lines, sep, bad, sep, moved, sep, own
+            for (s in answers) printf "T%s%d%s%s%s%s\n", sep, answers[s], sep, s, sep, last[s]
+            for (key in looped) {
+                split(key, k, sep)
+                group = (now - at[key] <= recent ? "L" : "O") sep k[1]
+                total[group] += count[key]
+                if (line[key] > top[group]) {
+                    top[group] = line[key]
+                    latest[group] = k[2] sep when[key] sep int((now - at[key]) / 60)
+                }
+            }
+            for (group in total) {
+                split(group, g, sep)
+                printf "%s%s%d%s%s%s%s\n", g[1], sep, total[group], sep, g[2], sep, latest[group]
+            }
+        }'
+}
+
+diag_access_log() {
+    local f=$ACCESS_LOG kind n sender request time minutes lines=0 bad=0 moved=0 own=0 shown=0 more=0 earlier=0 older=0 skipped=''
+    printf 'Access log:\n'
+    case $ACCESS_STATE in
+        missing)
+            diag_note "$f does not exist: the access log was not checked (--access-log FILE)"
+            return 0 ;;
+        unreadable)
+            diag_note "$f cannot be read: the access log was not checked"
+            return 0 ;;
+    esac
+    if ! diag_access_summary "$(date +%s)" < "$f" > "$TEMP_DIR/access" 2> /dev/null; then
+        diag_note "$f cannot be read: the access log was not checked"
+        return 0
+    fi
+    IFS=$SEP read -r kind lines bad moved own < <(grep "^S$SEP" "$TEMP_DIR/access") || true
+    if ((lines > own && bad == lines - own)); then
+        diag_note "none of the $((lines - own)) lines of $f is in nginx's combined format: the access log was not checked"
+        return 0
+    fi
+    while IFS=$SEP read -r kind n sender request time minutes; do
+        if ((shown < 5)); then
+            diag_problem "redirect loop from $sender ($n answers, last: $request at $time): it forwards HTTPS requests to port 80 of this server. Ask the front's owner to forward HTTPS to port 443 with the original Host header, or add http to the route of this request (README: Behind a TLS front on port 80)"
+            shown=$((shown + 1))
+        else
+            more=$((more + 1))
+        fi
+    done < <(grep "^L$SEP" "$TEMP_DIR/access" | sort -t "$SEP" -k2,2nr -k3,3)
+    ((more == 0)) || diag_note "$more more senders with a redirect loop"
+    if ((shown == 0)); then
+        ((bad == 0)) || skipped+=", $bad lines in another format skipped"
+        ((own == 0)) || skipped+=", $own requests of diagnose itself skipped"
+        if grep -q "^O$SEP" "$TEMP_DIR/access"; then
+            diag_ok "no redirect loop in the last $((DIAG_RECENT / 60)) minutes of $f ($lines lines, $moved answers 301$skipped)"
+        else
+            diag_ok "no redirect loop in $f ($lines lines, $moved answers 301$skipped)"
+        fi
+    fi
+    while IFS=$SEP read -r kind n sender request time minutes; do
+        if ((earlier < 5)); then
+            diag_note "earlier redirect loop from $sender ($n answers, last: $request at $time, $minutes minutes before this run): it forwarded HTTPS requests to port 80 of this server then"
+            earlier=$((earlier + 1))
+        else
+            older=$((older + 1))
+        fi
+    done < <(grep "^O$SEP" "$TEMP_DIR/access" | sort -t "$SEP" -k2,2nr -k3,3)
+    ((older == 0)) || diag_note "$older more senders with an earlier redirect loop"
+    while IFS=$SEP read -r kind n sender request time; do
+        diag_note "$sender: $n answers 301, the last to $request at $time"
+    done < <(grep "^T$SEP" "$TEMP_DIR/access" | sort -t "$SEP" -k2,2nr -k3,3 | head -n 5)
+}
+
+diag_workers() {
+    local f=$ERROR_LOG count last
+    printf 'nginx workers:\n'
+    case $ERROR_STATE in
+        missing)
+            diag_note "$f does not exist: the nginx workers were not checked (--error-log FILE)"
+            return 0 ;;
+        unreadable)
+            diag_note "$f cannot be read: the nginx workers were not checked"
+            return 0 ;;
+    esac
+    count=$(grep -c -- 'exited on signal' "$f" 2> /dev/null || true)
+    if [[ ${count:-0} == 0 ]]; then
+        diag_ok "no nginx worker exited on a signal ($f)"
+        return 0
+    fi
+    last=$(grep -- 'exited on signal' "$f" | tail -n 1)
+    diag_note "$count nginx worker exit(s) on a signal in $f (nginx starts a new worker each time); the last: $last"
+}
+
+cmd_diagnose() {
+    local pattern='^(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?)(:([0-9]{1,5}))?$'
+    if [[ -n $FRONT ]]; then
+        [[ $FRONT =~ $pattern ]] \
+            || die "--front must be ADDRESS or ADDRESS:PORT (an IPv6 address in brackets, like [2001:db8::1]:443), not $FRONT"
+        FRONT_HOST=${BASH_REMATCH[1]} FRONT_PORT=${BASH_REMATCH[4]:-443}
+        ((10#$FRONT_PORT >= 1 && 10#$FRONT_PORT <= 65535)) || die "--front: $FRONT has no valid port"
+        FRONT_PORT=$((10#$FRONT_PORT))
+    fi
+    load_routes
+    ACCESS_STATE=$(diag_file_state "$ACCESS_LOG") ERROR_STATE=$(diag_file_state "$ERROR_LOG")
+    diag_ports
+    diag_nginx_files
+    diag_hosts
+    diag_access_log
+    diag_workers
+    if ((PROBLEMS)); then
+        printf 'Result: %s problem(s) found\n' "$PROBLEMS"
+        exit 4
+    fi
+    printf 'Result: no problem found\n'
+}
+
 cmd_uninstall() {
     local f host generation owner timer=''
     lock
@@ -1719,7 +2217,7 @@ shift
 case $COMMAND in -h|--help|help) usage; exit 0 ;; esac
 while (($#)); do
     case $1 in
-        --routes|--dir|--nginx-conf|--subject|--key|--confirm|--server|--acme-dns|--dns-resolvers|--email|--extra-root|--acme-ca|--unit-dir|--lib-dir)
+        --routes|--dir|--nginx-conf|--subject|--key|--confirm|--server|--acme-dns|--dns-resolvers|--email|--extra-root|--acme-ca|--unit-dir|--lib-dir|--front|--access-log|--error-log)
             (($# >= 2)) || die "Missing value for $1"
             case $1 in
                 --routes) ROUTES=$2 ;;
@@ -1736,6 +2234,9 @@ while (($#)); do
                 --acme-ca) GIVEN[acmeca]=$2 ;;
                 --unit-dir) UNIT_DIR=$2 ;;   # --unit-dir and --lib-dir: for the tests
                 --lib-dir) LIB_DIR=$2 ;;
+                --front) [[ -n $2 ]] || die '--front needs ADDRESS or ADDRESS:PORT'; FRONT=$2 DIAG_GIVEN=1 ;;
+                --access-log) ACCESS_LOG=$2 DIAG_GIVEN=1 ;;
+                --error-log) ERROR_LOG=$2 DIAG_GIVEN=1 ;;
             esac
             shift 2 ;;
         --new-key) NEW_KEY=1; shift ;;
@@ -1755,6 +2256,7 @@ done
     || die '--renew, --manual, --no-dns-check, --accept-tos, --email, --server, --acme-dns, --dns-resolvers, --extra-root and --acme-ca belong to letsencrypt'
 ((RENEW == 0 || MANUAL == 0)) || die '--manual has no --renew: to renew, run letsencrypt --manual again, and it prints new records'
 ((NO_DNS_CHECK == 0 || MANUAL == 1)) || die '--no-dns-check belongs to --manual'
+((DIAG_GIVEN == 0)) || [[ $COMMAND == diagnose ]] || die '--front, --access-log and --error-log belong to diagnose'
 [[ $COMMAND == install-cert ]] || ((${#ARGS[@]} == 0)) || die "Unexpected argument: ${ARGS[0]}"
 ((${#ARGS[@]} <= 2)) || die 'install-cert takes a certificate file and, optionally, a chain file'
 [[ $STATE_DIR == /* ]] || die '--dir must be an absolute path'
@@ -1774,6 +2276,7 @@ case $COMMAND in
     letsencrypt) cmd_letsencrypt ;;
     apply) cmd_apply ;;
     status) cmd_status ;;
+    diagnose) cmd_diagnose ;;
     uninstall) cmd_uninstall ;;
     *) usage >&2; exit 2 ;;
 esac
