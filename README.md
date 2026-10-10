@@ -54,8 +54,10 @@ after a backup of the database and the attachments. The steps are in
 - **The Odoo modules change.** Every `perodua_*` module of the release has a
   new version. Three modules are retired, and the upgrade uninstalls them:
   `perodua_hw_sim`, `perodua_supplier_transport_ext` and
-  `perodua_warehouse_ext`. The upgrade deletes the data of the retired modules
-  and pages only with `--drop-retired-data`, after the owner agreed. After the
+  `perodua_warehouse_ext`, with their pages, in every module upgrade. When the
+  upgrade check finds data of these modules (a retired-data count that is not
+  0), the upgrade runs only with `--drop-retired-data`, after the owner agreed,
+  because the uninstall deletes that data. After the
   upgrade, v1.0.8 and earlier cannot run on the database: the only way back is
   the backup, before users write data with v1.2.0.
 - **Only from v1.0.5 to v1.0.8.** A server on v1.0.3 or v1.0.4 must first move
@@ -66,7 +68,7 @@ after a backup of the database and the attachments. The steps are in
     ECC purchase order already received its goods, the upgrade cancels the
     open moves of the second receipt that the order raised. A validated
     receipt stays as it is. When the database has ECC purchase orders,
-    `module-upgrade.log` has a line that starts with `perodua_rp 1.21:`.
+    `module-upgrade.log` has a line that contains `perodua_rp 1.21:`.
   - **Personas (decision D8 = A).** `planner` gets the group Non-OEM BOM
     Maintainer. `sop` gets the groups Geographical Zone Maintainer and RPPC
     DIO Publisher. No persona is archived or deleted.

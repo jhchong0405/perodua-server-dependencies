@@ -455,20 +455,25 @@ class ModuleUpgradeTests(ModuleUpgradeFixture, unittest.TestCase):
                 shutil.rmtree(self.deploy_dir / 'backups', ignore_errors=True)
                 marker = self.base / f'upgrading-{to_group}'
                 env = dict(self.env, FAKE_U_HANG=str(marker), FAKE_U_SECONDS='30')
-                process = subprocess.Popen(['bash', str(SCRIPT), '--upgrade', '--dir', str(self.deploy_dir), '--non-interactive',
-                                            '--confirm', 'perodua'],
-                                           env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
-                for _ in range(300):
-                    if marker.exists() or process.poll() is not None:
-                        break
-                    time.sleep(0.1)
-                self.assertTrue(marker.exists(), 'the module upgrade never started')
-                started = time.monotonic()
-                if to_group:
-                    os.killpg(process.pid, signal.SIGHUP)
-                else:
-                    os.kill(process.pid, signal.SIGHUP)
-                output = process.communicate(timeout=60)[0].decode()
+                # The output goes to a file, not a pipe: nobody reads a pipe while the test
+                # waits for the -u marker, and a small pipe would block the script before -u.
+                out_path = self.base / f'upgrade-output-{to_group}.log'
+                with open(out_path, 'wb') as out:
+                    process = subprocess.Popen(['bash', str(SCRIPT), '--upgrade', '--dir', str(self.deploy_dir),
+                                                '--non-interactive', '--confirm', 'perodua'],
+                                               env=env, stdout=out, stderr=subprocess.STDOUT, start_new_session=True)
+                    for _ in range(300):
+                        if marker.exists() or process.poll() is not None:
+                            break
+                        time.sleep(0.1)
+                    self.assertTrue(marker.exists(), 'the module upgrade never started:\n' + out_path.read_text())
+                    started = time.monotonic()
+                    if to_group:
+                        os.killpg(process.pid, signal.SIGHUP)
+                    else:
+                        os.kill(process.pid, signal.SIGHUP)
+                    process.wait(timeout=60)
+                output = out_path.read_text()
                 self.assertLess(time.monotonic() - started, 20, 'the script waited for the -u run')
                 self.assertEqual(process.returncode, 129, output)
                 result = subprocess.CompletedProcess(process.args, process.returncode, output)
