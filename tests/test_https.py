@@ -48,7 +48,7 @@ ACME_DNS = "https://acmedns.novutal.com"
 TERMS = "https://letsencrypt.example/terms.pdf"
 UNIT = "perodua-https-renew"
 HOSTS = ["api.example.perodua.com.my", "stgissrp.perodua.com.my"]
-LEAF = "subject=CN=api.example.perodua.com.my,O=Perodua,C=MY"
+LEAF = "subject=CN=api.example.perodua.com.my,O=Perusahaan Otomobil Kedua Sdn Bhd,C=MY"
 INTERMEDIATE = "subject=CN=Test Intermediate"
 ROOT = "subject=CN=Test Root"
 ROUTES = """# the Oracle API under a path, and an App with two environments
@@ -276,7 +276,8 @@ if lego.get("error"):
     print(f'time=2026-09-30T00:00:00Z level=ERROR msg=Error error="{lego["error"]}"')
     sys.exit(1)
 ca, now = os.environ["FAKE_CA"], datetime.datetime.now(datetime.timezone.utc)
-start, end = [(now + datetime.timedelta(days=n)).strftime("%Y%m%d%H%M%SZ") for n in (-1, lego["days"])]
+start = (now - datetime.timedelta(days=1)).strftime("%Y%m%d%H%M%SZ")
+end = (now + datetime.timedelta(days=lego["days"], seconds=-1)).strftime("%Y%m%d%H%M%SZ")
 certificates = host_path("/data/lego/certificates")  # under --path /data/lego
 os.makedirs(certificates, exist_ok=True)
 leaf = os.path.join(certificates, "leaf.tmp")
