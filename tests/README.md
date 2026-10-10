@@ -193,8 +193,17 @@ only `from`. It checks:
   demo flag as `-e` values, `--max-cron-threads=0`, `--stop-after-init`, the
   migration log handler, no `-i`, the new compose file, and its log in the
   backup folder; no argument holds the password;
-- the cron and mail lines of `verify-upgrade` come before `up`, and the final
-  message names the held mail and `--release-queued-mail`; `restore.txt` names
+- the cron and mail lines of `verify-upgrade` come before `up`. Between the
+  stop of the App and `verify-upgrade` there are only one-off runs, the
+  removal of the old containers and the one `-u` run (no cron thread, stops
+  after the upgrade), so no mail queue runs before the hold. The final message
+  gives the held mail as two numbers (the mail that the upgrade queued, and
+  the mail that waited in the queue before it), names `--release-queued-mail`
+  and names the README step that lists the held mail with `psql`: the test
+  reads `README.md` and checks that this section and step exist, that its
+  list selects by the state and the reason of the hold, and that the lines it
+  quotes are those of the script. An answer of `verify-upgrade` or
+  `release-mail` without the two numbers is refused. `restore.txt` names
   the module upgrade and the point of no return;
 - each accepted old release (v1.0.5 to v1.0.8) goes
   through; v1.0.4, another fingerprint, every refusal of `upgrade-check`, retired
@@ -226,7 +235,7 @@ only `from`. It checks:
   between the check and the switch) switches with no backup and no `-u`;
 - `--release-queued-mail` runs only `preflight.py release-mail` with the
   directory's compose file, and only from the folder of the release the
-  directory runs;
+  directory runs; it prints the two numbers of the released mail;
 - as root on Linux: `service.sh` (byte for byte that of v1.0.5 to v1.0.8, pinned
   by its sha256) refuses `start` and `restart` on a marked database, before and
   after the switch, without `up` and without its advice to reset.
@@ -245,10 +254,19 @@ writes nothing while its other failures exit 1, that from `mark-upgrading`
 on no release accepts the
 database (the old preflight included), the cron rule (flags back as before,
 new crons as the upgrade set them, the four mock intake pulls kept off while
-their system resolves to mock, a live one restored), the mail hold of the rows
-`-u` created and their release after `stamp-upgrade` only, the refusals of
-`verify-upgrade` (which still writes the cron flags and the hold), and the CSV
-files of `retired-export`.
+their system resolves to mock, a live one restored), the mail hold (every row
+in state `outgoing` is held: the rows `-u` created, an older row that waited
+in the queue, and an older row that `-u` gave an address; rows in the states
+`sent`, `cancel` and `exception` with another reason stay as they are, also
+those `-u` created; the output and the record give the two counts), the
+release after `stamp-upgrade` only (exactly the held rows that are still
+held: not a held row that was cancelled or deleted since, and not a row with
+the same reason that this upgrade did not hold), a second `verify-upgrade` on
+the same database (after a first one that held the mail and refused the
+result: the held rows and the counts stay the same, and a row that entered
+the queue in between is counted once), the refusals of `verify-upgrade`
+(which still writes the cron flags and the hold), and the CSV files of
+`retired-export`.
 
 `test_uninstall_app.py` runs `uninstall.sh --role app` against a fake Docker CLI.
 The fake keeps containers, volumes and networks in a file, including those of

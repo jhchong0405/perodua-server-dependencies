@@ -78,9 +78,11 @@ after a backup of the database and the attachments. The steps are in
   mock feed (PROMISE, PSS, PSOS and P-Circle). On a system without sample data
   they are off while their system is in mock mode, after `--init-db` and after
   the upgrade.
-- **The upgrade holds its mail.** Mail that the module upgrade queues is not
-  sent until you run `deploy-app.sh --release-queued-mail`, after the owner's
-  review.
+- **The upgrade holds the mail queue.** After the module upgrade, every mail
+  that waits in the mail queue (state Outgoing) is held: the mail that the
+  upgrade queued, and the mail that waited in the queue before the upgrade.
+  Odoo sends none of it until you run `deploy-app.sh --release-queued-mail`,
+  after the owner's review.
 
 A fresh UAT system is set up as before, with `deploy-app.sh --init-db`.
 
@@ -518,9 +520,11 @@ after the mark, it does not start the old App again: the only way back is
 with the new release. All data written after the backup is lost by the
 restore. After that point, fix forward.
 
-The mail that the module upgrade queues is held. Review it (Settings >
-Technical > Emails, state Exception; step 13 below lists it without the web
-page), then send it:
+After the module upgrade, every mail that waits in the mail queue (state
+Outgoing) is held: the mail that the upgrade queued, and the mail that waited
+in the queue before it. Mail in another state stays as it is. Review the held
+mail (step 13 below lists it without the web page; in Odoo it is in Settings >
+Technical > Emails, with the status Delivery Failed), then send it:
 
 ```bash
 sudo bash deploy-app.sh --release-queued-mail
@@ -563,18 +567,21 @@ name `perodua`: if yours are others, use them in their place.
   upgrade loads every installed `perodua_*` module again; the script stops it
   after `INIT_TIMEOUT` seconds (3600, one hour, unless `app.env` has another
   value). Tell the users before you start.
-- **The mail queue.** The upgrade holds the mail that it queues (step 13). It
-  does not hold a mail that waits in the queue before the upgrade (state
-  Outgoing): Odoo sends that one after the start, as before. v1.2.0 also gives
-  a waiting IDDI release mail that has no address the address of its
-  supplier. This counts the mail that waits, on the DB server (with one
-  server, on that server):
+- **The mail queue.** After the module upgrade, every mail that waits in the
+  mail queue (state Outgoing) is held until the owner's review (step 13): the
+  mail that the upgrade queues, and the mail that waits in the queue before
+  the upgrade. v1.2.0 gives a waiting IDDI release mail that has no address
+  the address of its supplier: this mail is held too. This counts the mail
+  that waits now, on the DB server (with one server, on that server):
 
   ```bash
   sudo -u postgres psql -X -At -d perodua -c "SELECT count(*) FROM mail_mail WHERE state = 'outgoing'"
   ```
 
-  When it is not 0, tell the owner before the upgrade.
+  When it is not 0, tell the owner before the upgrade: after the upgrade,
+  Odoo does not send this mail until the owner releases it. The count can
+  change until the App stops in step 12, because the old release works on
+  its mail queue while it runs.
 - **The way back is the backup.** After the upgrade, the release that ran
   before cannot run on the database. See "The way back" at the end.
 
@@ -745,9 +752,11 @@ of v1.0.5 to v1.0.8. These steps make sure that they are still correct.
       the upgrade (`Cron jobs: N flags put back as before the upgrade.`), keeps
       the pulls that read a mock feed off
       (`Cron jobs: ... stays off: it reads the mock feed while its system resolves to mock.`),
-      names the scheduled actions that are new, and holds the mail that the
-      upgrade queued
-      (`Mail: N messages the upgrade queued are held (state exception), until deploy-app.sh --release-queued-mail.`);
+      names the scheduled actions that are new, and holds every mail that
+      waits in the mail queue
+      (`Mail held (state exception) until deploy-app.sh --release-queued-mail: N that the upgrade queued, M that waited in the queue before it.`).
+      Between the stop of the App and this hold, Odoo's mail queue does not
+      run: the module upgrade runs no scheduled action;
     - writes the files of v1.2.0 into the directory, starts v1.2.0 and does
       the usual self-check.
 
@@ -758,8 +767,8 @@ of v1.0.5 to v1.0.8. These steps make sure that they are still correct.
     Deployment verified: client-stable-uiux-v1.2.0 (09d8c712f27c29facaad53c0a34de7df78e0b3f2)
     Upgraded from client-stable-uiux-v1.0.8. The data as it was before: /opt/perodua-app/backups/TIME-client-stable-uiux-v1.0.8 (restore.txt explains how to put it back).
     The Odoo modules were upgraded (-u). client-stable-uiux-v1.0.8 cannot run on this database any more: the backup is the only way back, and only until users write data (the point of no return).
-    Held mail: N messages that the module upgrade queued.
-    Review the held mail (Settings > Technical > Emails, state Exception), then send it with: sudo bash deploy-app.sh --release-queued-mail --dir /opt/perodua-app
+    Held mail: N that the module upgrade queued, M that waited in the queue before the upgrade.
+    Review the held mail: README.md, "Upgrade an App server to v1.2.0", step 13 lists it with psql on the DB server (in Odoo: Settings > Technical > Emails, status Delivery Failed). Then send it with: sudo bash deploy-app.sh --release-queued-mail --dir /opt/perodua-app
     ```
 
     The second and third lines name the release that ran before. Write down
@@ -771,14 +780,26 @@ of v1.0.5 to v1.0.8. These steps make sure that they are still correct.
     `--confirm`, a `--non-interactive` run does the first part and stops
     before the App stops (`A module upgrade needs a confirmation`).
 
-13. The held mail. `Held mail: 0 messages` needs no step. With another number,
-    the upgrade queued mail, such as the release email to the supplier of an
-    IDDI that was released without one. The mail is held: Odoo does not send
-    it. This lists it, on the DB server (with one server, on that server):
+13. The held mail. The line `Held mail:` has two numbers:
+
+    - the mail that the module upgrade queued, such as the release email to
+      the supplier of an IDDI that was released without one;
+    - the mail that waited in the mail queue before the upgrade (state
+      Outgoing), such as an IDDI release mail that had no address: the
+      upgrade gives it the address of its supplier.
+
+    When the two numbers are 0, this step is done. If not, the mail is held:
+    Odoo does not send it. This lists it, on the DB server (with one server,
+    on that server). The column `queued` shows `upgrade` for a mail that the
+    upgrade queued, and `before` for a mail that waited before the upgrade:
 
     ```bash
-    sudo -u postgres psql -X -P pager=off -d perodua -c "SELECT m.id, g.subject, m.email_to FROM mail_mail m JOIN mail_message g ON g.id = m.mail_message_id WHERE m.failure_reason LIKE 'Held by deploy-app.sh%' ORDER BY m.id"
+    sudo -u postgres psql -X -P pager=off -d perodua -c "SELECT m.id, CASE WHEN m.id > (SELECT (value::json->>'mail_max_id')::bigint FROM ir_config_parameter WHERE key = 'perodua.kit_upgrade') THEN 'upgrade' ELSE 'before' END AS queued, g.subject, m.email_to FROM mail_mail m JOIN mail_message g ON g.id = m.mail_message_id WHERE m.state = 'exception' AND m.failure_reason LIKE 'Held by deploy-app.sh%' ORDER BY m.id"
     ```
+
+    In Odoo, the same mail is in Settings > Technical > Emails, with the
+    status Delivery Failed (the filter Failed). With `PUBLIC_ROOT` set, the
+    public host names do not open Odoo's own pages: use the list above.
 
     Review the list with the owner. To send the mail, run this on the App
     server, from the new folder:
@@ -787,9 +808,16 @@ of v1.0.5 to v1.0.8. These steps make sure that they are still correct.
     sudo bash deploy-app.sh --release-queued-mail --dir /opt/perodua-app
     ```
 
-    It shows `N held mail(s) are queued again (outgoing): Odoo sends them with its mail queue.`
-    If the owner does not want the mail, do not run the command: the mail
-    stays held.
+    It shows `N held mail(s) are queued again (outgoing): A that the module upgrade queued, B that waited in the queue before the upgrade. Odoo sends them with its mail queue.`
+    The command queues every held mail again, and no other mail. If the owner
+    does not want the mail, do not run the command: the mail stays held.
+
+    While the release mail of an IDDI is held, v1.2.0 shows the Release Email
+    of that IDDI as Failed, with the text `Held by deploy-app.sh --upgrade ...`
+    as its error (v1.2.0 reads the state of the mail every 15 minutes). Do
+    not use **Retry Supplier Email** on such an IDDI before the release: it
+    queues a new mail, which is not held, and the supplier then gets the mail
+    again after the release.
 
 **When the upgrade stops.** The last lines of the output tell the state of
 the server:

@@ -836,10 +836,18 @@ the App stopped, and the rows are saved as CSV in
      resolves to mock (`perodua_integration.mode.PROMISE`, `.PSS`, `.PSOS`,
      `.PCircle`, else `perodua_integration.mode`, else mock): such a pull
      stays off. A pull whose system is `live` gets its flag back;
-   - **mail hold:** every `mail_mail` row that the upgrade created in state
-     `outgoing` goes to state `exception` with the reason "Held by
-     deploy-app.sh --upgrade (module upgrade) ...". Odoo's mail queue does not
-     send it;
+   - **mail hold:** every `mail_mail` row in state `outgoing` goes to state
+     `exception` with the reason "Held by deploy-app.sh --upgrade (module
+     upgrade) ...". Odoo's mail queue does not send it. This holds the mail
+     that the upgrade queued (an id above the one that step 6 saved) and the
+     mail that waited in the queue before the upgrade, which the upgrade can
+     change: v1.2.0 gives a waiting IDDI release mail without an address the
+     address of its supplier. A row in another state (`sent`, `cancel`,
+     `exception` with another reason) is not changed. The output gives the
+     two counts, and `perodua.kit_upgrade` keeps the ids of the held rows
+     (`held_mail`) next to the saved id (`mail_max_id`). A second run of
+     `verify-upgrade` on the same database finds no row in state `outgoing`:
+     it changes no held row and prints the same counts;
    - **checks:** no module is in a `to ...` state; the retired modules and
      `perodua_demo_client`, `perodua_reporting` and `perodua_e2e` are not
      installed; every installed `perodua_*` module has the version of the new
@@ -871,8 +879,22 @@ If a run stops between the end of step 9 and the switch, a rerun of
 with no new backup and no module upgrade. The backup of the first run holds
 the data from before.
 
-**The held mail.** After the review (Settings > Technical > Emails, state
-Exception), send it:
+**The held mail.** Step 9 holds every mail that waits in the mail queue: the
+mail that the upgrade queued, and the mail that waited before it. Between the
+stop of the App (step 4) and the hold, Odoo's mail queue does not run on the
+database: the containers of the old release are stopped and then removed
+(step 7), the run of `-u` has no cron thread (`--max-cron-threads=0`) and
+stops after the upgrade, and the new release starts only in step 10. When the
+upgrade stops after the mark (step 6) and before the end of step 9, the
+database keeps the mark, and neither `deploy-app.sh` nor `service.sh` starts
+a release on it.
+
+Step 13 of [Upgrade an App server to v1.2.0](../README.md#upgrade-an-app-server-to-v120)
+lists the held mail with `psql`, and tells which mail the upgrade queued and
+which mail waited before it. In Odoo the mail is in Settings > Technical >
+Emails, with the status Delivery Failed (state `exception`); with
+`PUBLIC_ROOT` set, the public host names do not open that page. After the
+review, send it:
 
 ```bash
 sudo bash deploy-app.sh --release-queued-mail --dir DIR    # from the new scripts folder
@@ -880,8 +902,13 @@ sudo bash deploy-app.sh --release-queued-mail --dir DIR    # from the new script
 
 It sets the held rows back to `outgoing`, only those that the upgrade held and
 that are still held (a row deleted or changed since stays as it is), and only
-after the deployment finished (`READY`). It prints the count. It does not pull,
-stop or start anything.
+after the deployment finished (`READY`). It prints the two counts. It does not
+pull, stop or start anything.
+
+The hold is a state of the mail, not a lock. After the start, a user can
+queue a held mail again in Odoo (Retry on the mail). v1.2.0 also shows the
+Release Email of an IDDI as Failed while its mail is held, and Retry Supplier
+Email on that IDDI queues a new mail, which is not held.
 
 **Not done by the kit.** Odoo modules other than `perodua_*` are not part of
 the fingerprint and are not upgraded. A release whose `uat_guard.py` has no

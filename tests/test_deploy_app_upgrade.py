@@ -126,13 +126,14 @@ def module_db(cmd):
         db['modhash'] = 'upgraded'; save()
         reply('Cron jobs: 5 flags put back as before the upgrade.\n'
               'Cron jobs: perodua_orders_ext.cron_pull_pss_orders stays off: it reads the mock feed while its system resolves to mock.\n'
-              'Mail: 2 messages the upgrade queued are held (state exception), until deploy-app.sh --release-queued-mail.\n'
-              'UPGRADE_VERIFIED 2')
+              'Mail held (state exception) until deploy-app.sh --release-queued-mail: 2 that the upgrade queued,'
+              ' 1 that waited in the queue before it.\n'
+              + os.environ.get('FAKE_VERIFIED', 'UPGRADE_VERIFIED 2 1'))
     if mode == 'stamp-upgrade':
         if state != 'upgraded': reply(code=1, err='Database preflight: stamp-upgrade does not apply')
         db['modhash'] = 'new'; save(); reply('READY 3')
     if mode == 'release-mail':
-        reply('RELEASED 2') if state == 'new' else reply(code=1, err='Database preflight: fixture')
+        reply(os.environ.get('FAKE_RELEASED', 'RELEASED 2 1')) if state == 'new' else reply(code=1, err='Database preflight: fixture')
     if mode == 'retired-export':
         buffer = io.BytesIO()
         with tarfile.open(fileobj=buffer, mode='w:gz') as archive:

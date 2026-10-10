@@ -112,7 +112,7 @@ CREATE TABLE ir_model_data (id {pk}, module varchar, name varchar, model varchar
 CREATE TABLE ir_attachment (id {pk}, name varchar, res_model varchar, res_field varchar, res_id integer,
                             store_fname varchar, checksum varchar, mimetype varchar, file_size integer);
 CREATE TABLE ir_cron (id {pk}, cron_name varchar, active boolean);
-CREATE TABLE mail_mail (id {pk}, state varchar, failure_reason text);
+CREATE TABLE mail_mail (id {pk}, state varchar, failure_reason text, email_to text);
 CREATE TABLE res_users (id {pk}, login varchar);
 CREATE TABLE perodua_holiday_type (id {pk}, code varchar UNIQUE, name varchar);
 CREATE TABLE perodua_order_cycle (id {pk}, code varchar UNIQUE, name varchar);
@@ -232,6 +232,11 @@ class PreflightModuleUpgradeTests(unittest.TestCase):
             return result.stdout if args[0] == 'retired-export' else result.stdout.decode().strip()
         self.assertNotEqual(result.returncode, 0, result.stdout.decode())
         return result.stderr.decode().strip()
+
+    def process(self, *args, script='new'):
+        """The finished run itself: its exit code, standard output and error."""
+        return subprocess.run([sys.executable, str(self.scripts[script]), *args], env=self.env,
+                              capture_output=True, text=True, timeout=60)
 
     def check(self, *args, **kwargs):
         return self.run_preflight('upgrade-check', self.from_fp, *args, **kwargs)
@@ -425,7 +430,7 @@ class PreflightModuleUpgradeTests(unittest.TestCase):
         self.assertNotIn('cron_pull_pss_orders stays off', output)  # its system is live
         self.assertIn('Cron jobs new with this release: perodua_rp.cron_perodua_spdio_release_email_sync (on), '
                       'perodua_orders_ext.cron_pull_pcircle_orders (off).', output)
-        self.assertTrue(output.endswith('UPGRADE_VERIFIED 0'), output)
+        self.assertTrue(output.endswith('UPGRADE_VERIFIED 0 0'), output)
 
     def test_without_a_mode_every_system_is_mock(self):
         for cron_id, xmlid in enumerate(('perodua_integration.cron_consume_promise_feed', 'perodua_orders_ext.cron_pull_pss_orders',
@@ -436,19 +441,42 @@ class PreflightModuleUpgradeTests(unittest.TestCase):
         self.run_preflight('verify-upgrade')
         self.assertEqual(self.actives(), {1: False, 2: False, 3: False, 4: False})
 
+    def mail(self):
+        return {mail: (state, reason, to) for mail, state, reason, to in
+                self.sql('SELECT id, state, failure_reason, email_to FROM mail_mail ORDER BY id')}
+
     def test_the_mail_hold_and_its_release(self):
-        self.sql("INSERT INTO mail_mail (id, state) VALUES (1, 'outgoing'), (2, 'sent')")
+        # The queue before the upgrade: mail 1 and 2 wait (state outgoing),
+        # mail 2 is a release mail without an address. The others are done.
+        self.sql("INSERT INTO mail_mail (id, state, failure_reason, email_to) VALUES "
+                 "(1, 'outgoing', NULL, 'buyer@example.com'), (2, 'outgoing', NULL, NULL), "
+                 "(3, 'sent', NULL, 'a@example.com'), (4, 'exception', 'SMTP: connection refused', 'b@example.com'), "
+                 "(5, 'cancel', NULL, 'c@example.com')")
         self.mark()
-        self.sql("INSERT INTO mail_mail (id, state) VALUES (3, 'outgoing'), (4, 'outgoing'), (5, 'exception')")
+        self.assertEqual(self.kit()['mail_max_id'], 5)
+        # What -u did: a migration gave the waiting release mail the address
+        # of its supplier, and the run made mail in every state.
+        self.sql("UPDATE mail_mail SET email_to = 'supplier@example.com' WHERE id = 2")
+        self.sql("INSERT INTO mail_mail (id, state, failure_reason, email_to) VALUES "
+                 "(6, 'outgoing', NULL, 'd@example.com'), (7, 'outgoing', NULL, 'e@example.com'), "
+                 "(8, 'exception', 'Missing recipient', NULL), (9, 'sent', NULL, 'f@example.com'), "
+                 "(10, 'cancel', NULL, 'g@example.com')")
         self.after_module_upgrade()
         output = self.run_preflight('verify-upgrade')
-        self.assertIn('Mail: 2 messages the upgrade queued are held', output)
-        self.assertTrue(output.endswith('UPGRADE_VERIFIED 2'), output)
-        mail = lambda: {i: (s, r) for i, s, r in self.sql('SELECT id, state, failure_reason FROM mail_mail ORDER BY id')}
-        self.assertEqual(mail(), {1: ('outgoing', None), 2: ('sent', None), 3: ('exception', HOLD),
-                                  4: ('exception', HOLD), 5: ('exception', None)})
+        # Every outgoing mail is held: the two that -u queued, the older one
+        # and the older one that -u gave an address. No other row changed.
+        self.assertIn('Mail held (state exception) until deploy-app.sh --release-queued-mail: '
+                      '2 that the upgrade queued, 2 that waited in the queue before it.', output)
+        self.assertTrue(output.endswith('UPGRADE_VERIFIED 2 2'), output)
+        untouched = {3: ('sent', None, 'a@example.com'), 4: ('exception', 'SMTP: connection refused', 'b@example.com'),
+                     5: ('cancel', None, 'c@example.com'), 8: ('exception', 'Missing recipient', None),
+                     9: ('sent', None, 'f@example.com'), 10: ('cancel', None, 'g@example.com')}
+        self.assertEqual(self.mail(), {**untouched,
+                                       1: ('exception', HOLD, 'buyer@example.com'), 2: ('exception', HOLD, 'supplier@example.com'),
+                                       6: ('exception', HOLD, 'd@example.com'), 7: ('exception', HOLD, 'e@example.com')})
+        self.assertEqual(self.sql("SELECT count(*) FROM mail_mail WHERE state = 'outgoing'"), [(0,)])
         self.assertEqual(self.params()['perodua.image_modhash'], 'upgraded:' + self.new_fp)
-        self.assertEqual(self.kit()['held_mail'], [3, 4])
+        self.assertEqual((self.kit()['held_mail'], self.kit()['mail_max_id']), ([1, 2, 6, 7], 5))
         # Upgraded and checked: only deploy-app.sh's own check accepts it.
         self.assertIn('checked but not finished', self.run_preflight('check', ok=False))
         self.assertIn('module fingerprint does not match', self.run_preflight('check', script='old', ok=False))
@@ -459,13 +487,87 @@ class PreflightModuleUpgradeTests(unittest.TestCase):
         self.assertEqual(self.run_preflight('stamp-upgrade'), 'READY 1')
         self.assertEqual(self.params()['perodua.image_modhash'], self.new_fp)
         self.assertEqual(self.run_preflight('check'), 'READY 1')
-        # A held mail the owner deleted, or sent by hand, stays as it is.
-        self.sql("UPDATE mail_mail SET state = 'cancel' WHERE id = 4")
-        self.assertEqual(self.run_preflight('release-mail'), 'RELEASED 1')
-        self.assertEqual(mail(), {1: ('outgoing', None), 2: ('sent', None), 3: ('outgoing', None),
-                                  4: ('cancel', HOLD), 5: ('exception', None)})
-        self.assertEqual((self.kit()['held_mail'], self.kit()['released_mail']), ([], [3, 4]))
-        self.assertEqual(self.run_preflight('release-mail'), 'RELEASED 0')
+        # Until the release nothing changes the held rows.
+        self.assertEqual(self.sql("SELECT count(*) FROM mail_mail WHERE state = 'outgoing'"), [(0,)])
+        # A held mail the owner cancelled or deleted stays as it is, and so
+        # does a row with the same reason that this upgrade did not hold.
+        self.sql("UPDATE mail_mail SET state = 'cancel' WHERE id = 7")
+        self.sql('DELETE FROM mail_mail WHERE id = 1')
+        self.sql("INSERT INTO mail_mail (id, state, failure_reason, email_to) VALUES (11, 'exception', %s, 'h@example.com')", (HOLD,))
+        self.assertEqual(self.run_preflight('release-mail'), 'RELEASED 1 1')
+        self.assertEqual(self.mail(), {**untouched,
+                                       2: ('outgoing', None, 'supplier@example.com'), 6: ('outgoing', None, 'd@example.com'),
+                                       7: ('cancel', HOLD, 'e@example.com'), 11: ('exception', HOLD, 'h@example.com')})
+        self.assertEqual((self.kit()['held_mail'], self.kit()['released_mail']), ([], [1, 2, 6, 7]))
+        after = self.mail()
+        self.assertEqual(self.run_preflight('release-mail'), 'RELEASED 0 0')
+        self.assertEqual(self.mail(), after)
+
+    def test_only_older_mail_waits_in_the_queue(self):
+        # -u queued nothing: the mail that waited before it is held all the same.
+        self.sql("INSERT INTO mail_mail (id, state) VALUES (1, 'sent'), (2, 'outgoing'), (3, 'outgoing')")
+        self.mark()
+        self.after_module_upgrade()
+        output = self.run_preflight('verify-upgrade')
+        self.assertIn('Mail held (state exception) until deploy-app.sh --release-queued-mail: '
+                      '0 that the upgrade queued, 2 that waited in the queue before it.', output)
+        self.assertTrue(output.endswith('UPGRADE_VERIFIED 0 2'), output)
+        self.assertEqual(self.mail(), {1: ('sent', None, None), 2: ('exception', HOLD, None), 3: ('exception', HOLD, None)})
+        self.assertEqual(self.run_preflight('stamp-upgrade'), 'READY 1')
+        self.assertEqual(self.run_preflight('release-mail'), 'RELEASED 0 2')
+        self.assertEqual(self.mail(), {1: ('sent', None, None), 2: ('outgoing', None, None), 3: ('outgoing', None, None)})
+
+    def test_a_second_verify_upgrade_holds_and_counts_each_mail_once(self):
+        self.sql("INSERT INTO mail_mail (id, state, failure_reason) VALUES (1, 'outgoing', NULL), (2, 'exception', 'SMTP: timeout')")
+        self.mark()
+        self.sql("INSERT INTO mail_mail (id, state) VALUES (3, 'outgoing'), (4, 'outgoing'), (5, 'sent')")
+        self.after_module_upgrade()
+        line = ('Mail held (state exception) until deploy-app.sh --release-queued-mail: '
+                '2 that the upgrade queued, 1 that waited in the queue before it.')
+        # The first run holds the mail, then refuses the result: the mark stays.
+        self.module('perodua_ui', state='to upgrade', version='19.0.1.79.0')
+        first = self.process('verify-upgrade')
+        self.assertEqual(first.returncode, 1, first.stdout)
+        self.assertIn('the upgraded database is not right: perodua_ui is to upgrade', first.stderr)
+        self.assertIn(line, first.stdout)
+        self.assertNotIn('UPGRADE_VERIFIED', first.stdout)
+        held = {1: ('exception', HOLD, None), 2: ('exception', 'SMTP: timeout', None), 3: ('exception', HOLD, None),
+                4: ('exception', HOLD, None), 5: ('sent', None, None)}
+        self.assertEqual(self.mail(), held)
+        self.assertEqual(self.kit()['held_mail'], [1, 3, 4])
+        self.assertEqual(self.params()['perodua.image_modhash'], 'upgrading:' + self.from_fp)
+        # The second run, on the same database: the same rows, the same counts.
+        self.module('perodua_ui', version='19.0.1.79.0')
+        output = self.run_preflight('verify-upgrade')
+        self.assertIn(line, output)
+        self.assertTrue(output.endswith('UPGRADE_VERIFIED 2 1'), output)
+        self.assertEqual(self.mail(), held)
+        self.assertEqual(self.kit()['held_mail'], [1, 3, 4])
+        # A third run is refused: the database is no longer marked. Nothing changes.
+        self.assertIn('verify-upgrade applies only to a database that a module upgrade marked',
+                      self.run_preflight('verify-upgrade', ok=False))
+        self.assertEqual(self.mail(), held)
+        self.assertEqual(self.kit()['held_mail'], [1, 3, 4])
+        self.assertEqual(self.run_preflight('stamp-upgrade'), 'READY 1')
+        self.assertEqual(self.run_preflight('release-mail'), 'RELEASED 2 1')
+        self.assertEqual(self.mail(), {1: ('outgoing', None, None), 2: ('exception', 'SMTP: timeout', None),
+                                       3: ('outgoing', None, None), 4: ('outgoing', None, None), 5: ('sent', None, None)})
+
+    def test_a_mail_queued_between_two_runs_is_held_and_counted_once(self):
+        # Nothing runs between two verify-upgrade runs. If a mail does enter
+        # the queue, the next run holds it too and counts the others once.
+        self.sql("INSERT INTO mail_mail (id, state) VALUES (1, 'outgoing')")
+        self.mark()
+        self.sql("INSERT INTO mail_mail (id, state) VALUES (2, 'outgoing')")
+        self.after_module_upgrade()
+        self.module('perodua_ui', state='to upgrade', version='19.0.1.79.0')
+        self.assertEqual(self.process('verify-upgrade').returncode, 1)
+        self.assertEqual(self.kit()['held_mail'], [1, 2])
+        self.sql("INSERT INTO mail_mail (id, state) VALUES (3, 'outgoing')")
+        self.module('perodua_ui', version='19.0.1.79.0')
+        self.assertTrue(self.run_preflight('verify-upgrade').endswith('UPGRADE_VERIFIED 2 1'))
+        self.assertEqual(self.kit()['held_mail'], [1, 2, 3])
+        self.assertEqual(self.mail(), {mail: ('exception', HOLD, None) for mail in (1, 2, 3)})
 
     def test_a_wrong_result_is_refused_and_keeps_the_mark(self):
         self.cron(1, False, 'perodua_integration.cron_consume_promise_feed')

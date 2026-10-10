@@ -29,6 +29,7 @@ from test_deploy_app_upgrade import RELEASE, REVISION, SCRIPT, SCRIPTS, UpgradeH
 
 
 TEXT = SCRIPT.read_text(encoding='utf-8')
+README = (SCRIPTS.parent / 'README.md').read_text(encoding='utf-8')
 MODULE_UPGRADE_FROM = re.search(r'^MODULE_UPGRADE_FROM=([0-9a-f]{32})$', TEXT, re.M).group(1)
 ACCEPTED = re.search(r'^OLD_RELEASES_ACCEPTED=(\S+)$', TEXT, re.M).group(1).split(',')
 OLD = 'client-stable-uiux-v1.0.6'
@@ -163,8 +164,64 @@ class ModuleUpgradeTests(ModuleUpgradeFixture, unittest.TestCase):
         self.assertLess(names.index('staged preflight verify-upgrade'), names.index('up'))
         self.assertIn('Cron jobs: 5 flags put back as before the upgrade.', result.stdout)
         self.assertIn('cron_pull_pss_orders stays off: it reads the mock feed', result.stdout)
-        self.assertIn('Held mail: 2 messages that the module upgrade queued.', result.stdout)
+        # Two numbers: the mail -u queued, and the mail that waited before it.
+        self.assertIn('Mail held (state exception) until deploy-app.sh --release-queued-mail: '
+                      '2 that the upgrade queued, 1 that waited in the queue before it.', result.stdout)
+        self.assertIn('Held mail: 2 that the module upgrade queued, 1 that waited in the queue before the upgrade.', result.stdout)
         self.assertIn(f'sudo bash deploy-app.sh --release-queued-mail --dir {self.deploy_dir}', result.stdout)
+
+    def test_no_mail_queue_runs_between_the_stop_of_the_app_and_the_mail_hold(self):
+        # From the stop for the backup to verify-upgrade (the hold): only
+        # one-off runs, the removal of the old containers, and one run of
+        # Odoo, which has no cron thread and stops after the upgrade. So no
+        # mail queue runs on the database before the hold.
+        result = self.upgrade()
+        self.assertEqual(result.returncode, 0, result.stdout)
+        names = self.names()
+        stop, hold = names.index('stop web odoo'), names.index('staged preflight verify-upgrade')
+        self.assertEqual(names[stop + 1:hold], BACKUP[3:] + RECHECK + UPGRADE[:-1])
+        self.assertEqual(names[hold + 1:names.index('up')], DEPLOY[:DEPLOY.index('up')])
+        for step in ('up', 'restart'):
+            self.assertNotIn(step, names[:hold])
+        [run] = [e['args'] for e in self.calls() if any(' -u ' in a for a in e['args'])]
+        command = run[run.index('odoo') + 3]
+        self.assertIn('--max-cron-threads=0', command)
+        self.assertIn('--stop-after-init', command)
+
+    def test_the_final_message_names_the_list_of_the_held_mail_in_the_readme(self):
+        # With PUBLIC_ROOT the public host names do not open Odoo's own pages,
+        # so the message names the README step that lists the mail with psql.
+        self.write_app_env(PUBLIC_ROOT='/dev', PUBLIC_BASE_URL='https://stgiss.perodua.com.my/dev')
+        result = self.upgrade()
+        self.assertEqual(result.returncode, 0, result.stdout)
+        version = RELEASE.rsplit('-', 1)[1]
+        heading = f'Upgrade an App server to {version}'
+        self.assertIn(f'Review the held mail: README.md, "{heading}", step 13 lists it with psql on the DB server '
+                      '(in Odoo: Settings > Technical > Emails, status Delivery Failed). Then send it with: '
+                      f'sudo bash deploy-app.sh --release-queued-mail --dir {self.deploy_dir}', result.stdout)
+        # The README has that section and that step, and its list selects the
+        # rows by the state and the reason that the hold writes.
+        self.assertEqual(README.count(f'\n## {heading}\n'), 1)
+        section = README.split(f'\n## {heading}\n', 1)[1].split('\n## ', 1)[0]
+        self.assertEqual(section.count('\n13. The held mail.'), 1)
+        step = section.split('\n13. The held mail.', 1)[1].split('\n**When the upgrade stops.**', 1)[0]
+        reason = re.search(r"^HOLD_REASON = '([^']+)'$", TEXT, re.M).group(1)
+        prefix = re.search(r"m\.state = 'exception' AND m\.failure_reason LIKE '([^%']+)%'", step).group(1)
+        self.assertTrue(reason.startswith(prefix), (reason, prefix))
+        self.assertIn('sudo bash deploy-app.sh --release-queued-mail --dir /opt/perodua-app', step)
+        # The lines that the README quotes are the lines of the script.
+        for quoted in ('Held mail: N that the module upgrade queued, M that waited in the queue before the upgrade.',
+                       f'Review the held mail: README.md, "{heading}", step 13 lists it with psql on the DB server '
+                       '(in Odoo: Settings > Technical > Emails, status Delivery Failed). Then send it with: '
+                       'sudo bash deploy-app.sh --release-queued-mail --dir /opt/perodua-app'):
+            self.assertIn(quoted, section)
+
+    def test_an_answer_without_the_two_mail_counts_is_refused(self):
+        # verify-upgrade must say how many mails of each kind it holds.
+        result = self.upgrade(verified='UPGRADE_VERIFIED 2')
+        self.assert_no_old_app_after_the_mark(result)
+        self.assertIn('Unexpected answer from the check of the upgraded database', result.stdout)
+        self.assertNotIn('Held mail:', result.stdout)
 
     def test_restore_txt_names_the_module_upgrade_and_the_point_of_no_return(self):
         self.assertEqual(self.upgrade().returncode, 0)
@@ -456,6 +513,9 @@ class ModuleUpgradeTests(ModuleUpgradeFixture, unittest.TestCase):
         self.assertEqual(self.names(), ['pull', 'pull'] + DEPLOY)
         self.assertIn('are upgraded to %s and checked: deploying it, with no module upgrade' % RELEASE, result.stdout)
         self.assertEqual(self.db_state(), 'new')
+        # The run that held the mail printed the counts; this one names the list.
+        self.assertNotIn('Held mail:', result.stdout)
+        self.assertIn('Review the held mail: README.md, "Upgrade an App server to', result.stdout)
 
     def test_a_rerun_of_upgrade_from_pending_switches_without_backup_or_module_upgrade(self):
         # An earlier run upgraded and checked the database, then stopped before
@@ -476,8 +536,16 @@ class ModuleUpgradeTests(ModuleUpgradeFixture, unittest.TestCase):
         command = ['bash', str(SCRIPT), '--release-queued-mail', '--dir', str(self.deploy_dir), '--non-interactive']
         result = subprocess.run(command, env=self.env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60)
         self.assertEqual(result.returncode, 0, result.stdout)
-        self.assertIn('2 held mail(s) are queued again (outgoing)', result.stdout)
+        self.assertIn('3 held mail(s) are queued again (outgoing): 2 that the module upgrade queued, '
+                      '1 that waited in the queue before the upgrade. Odoo sends them with its mail queue.', result.stdout)
         self.assertEqual(self.module_steps(), [('preflight release-mail', RELEASE)])  # no pull, no restart
+        # An answer without the two counts is not taken as a count.
+        self.log.unlink()
+        result = subprocess.run(command, env=dict(self.env, FAKE_RELEASED='RELEASED 3'), text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Unexpected answer from the database check: RELEASED 3', result.stdout)
+        self.assertNotIn('queued again', result.stdout)
         # Only from the scripts folder of the release the directory runs.
         self.deployed(OLD, OLD_REVISION)
         self.log.unlink()

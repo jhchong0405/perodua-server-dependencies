@@ -49,10 +49,11 @@ UPGRADE=0 BACKUP_BASE='' BACKUP_DIR='' OLD_RELEASE='' OLD_REVISION='' WAS_RUNNIN
 # A module upgrade: the modules it upgrades, Odoo's demo-data option, the
 # retired rows it deletes (and their lines in the report), the one-off
 # container and its process, whether a database upgraded earlier only waits
-# for its deployment, the held mail, and whether the containers of the old
+# for its deployment, the held mail (the mail the upgrade queued, and the mail
+# that waited in the queue before it), and whether the containers of the old
 # release are removed.
 MODULE_UPGRADE=0 UPGRADE_MODULES='' DEMO_FLAG='' RETIRED_TOTAL=0 RETIRED_LINES=() DROP_RETIRED=0 CONFIRM=''
-UPGRADE_CONTAINER='' UPGRADE_PID='' PENDING_ONLY=0 PENDING_STAMP=0 HELD_MAIL='' RELEASE_MAIL=0 DB_MARKED=0 OLD_REMOVED=0
+UPGRADE_CONTAINER='' UPGRADE_PID='' PENDING_ONLY=0 PENDING_STAMP=0 HELD_MAIL='' HELD_MAIL_BEFORE='' RELEASE_MAIL=0 DB_MARKED=0 OLD_REMOVED=0
 DB_HOST='' DB_PORT=5432 DB_NAME=perodua DB_USER=odoo DB_PASSWORD_FILE=''
 PROJECT_NAME=perodua-client-uiux HTTP_PORT=8110 BIND_IP=0.0.0.0
 STARTUP_TIMEOUT=600 INIT_TIMEOUT=3600
@@ -96,10 +97,11 @@ directory and its App stay as they were. With the same Odoo modules no module
 upgrade (-u) runs. With other modules it runs one only from the modules of
 v1.0.3 to v1.0.8 and a directory of v1.0.5 to v1.0.8: after the backup it
 removes the old App's containers (from then on the backup is the only way
-back), upgrades the modules once, checks the result, holds the mail the
-upgrade queued and puts the cron flags back. It asks to type the database
-name, or takes --confirm DATABASE. --drop-retired-data agrees to delete the
-data of retired modules; it is saved as CSV in the backup folder first.
+back), upgrades the modules once, checks the result, holds every mail of the
+mail queue (the mail the upgrade queued and the mail that waited before it)
+and puts the cron flags back. It asks to type the database name, or takes
+--confirm DATABASE. --drop-retired-data agrees to delete the data of retired
+modules; it is saved as CSV in the backup folder first.
 --release-queued-mail queues the held mail again, after its review.
 HTTP only: default 0.0.0.0:8110. Odoo ports are private to the Compose network.
 Optional keys, read only from --config or app.env: PUBLIC_ROOT (such as /dev,
@@ -553,15 +555,17 @@ elif [[ -e $DEPLOY_DIR/compose.yml || -e $DEPLOY_DIR/secrets ]] || { [[ -e $DEPL
 fi
 if ((RELEASE_MAIL)); then
     # The mail a module upgrade held (verify-upgrade), queued again after the
-    # owner reviewed it. Only the rows that upgrade held, and only once the
+    # owner reviewed it. Only the rows that upgrade held (the mail it queued
+    # and the mail that waited in the queue before it), and only once the
     # deployment of this release finished (the database is stamped READY).
     ! unverified || fail "The first deployment in $DEPLOY_DIR stopped before it used its database: there is no held mail"
     printf 'Queuing the mail that the module upgrade held in database %s again...\n' "$DB_NAME"
     released=$(docker compose --project-name "$PROJECT_NAME" --file "$DEPLOY_DIR/compose.yml" \
         run --rm --no-deps -T odoo python3 /opt/deploy/preflight.py release-mail </dev/null) \
         || fail 'The held mail was not released, for the reason above. Nothing was changed'
-    [[ $released =~ ^RELEASED\ ([0-9]+)$ ]] || fail "Unexpected answer from the database check: $released"
-    printf '%s held mail(s) are queued again (outgoing): Odoo sends them with its mail queue.\n' "${BASH_REMATCH[1]}"
+    [[ $released =~ ^RELEASED\ ([0-9]+)\ ([0-9]+)$ ]] || fail "Unexpected answer from the database check: $released"
+    printf '%s held mail(s) are queued again (outgoing): %s that the module upgrade queued, %s that waited in the queue before the upgrade. Odoo sends them with its mail queue.\n' \
+        "$((10#${BASH_REMATCH[1]} + 10#${BASH_REMATCH[2]}))" "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
     exit 0
 fi
 containers=$(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT_NAME")
@@ -679,13 +683,16 @@ cat > "$TEMP_DIR/preflight.py" <<'PY'
 #                        perodua.image_modhash to 'upgrading:FROM'. Neither the
 #                        old release's check nor this one's accepts that.
 #   verify-upgrade       after -u: puts the cron flags back (a mock intake pull
-#                        stays off), holds the mail -u queued, checks the
-#                        result and sets 'upgraded:<fingerprint>'
+#                        stays off), holds every outgoing mail (the mail -u
+#                        queued and the mail that waited before it), checks
+#                        the result and sets 'upgraded:<fingerprint>'. Prints
+#                        UPGRADE_VERIFIED <queued by -u> <waited before>
 #   check --accept-pending
 #                        prints UPGRADE_PENDING <attachments> for that state;
 #                        without the option check refuses it
 #   stamp-upgrade        after the deployment: the fingerprint, then READY
-#   release-mail         queues the held mail again: RELEASED <count>
+#   release-mail         queues the held mail again:
+#                        RELEASED <queued by -u> <waited before>
 import ast, csv, hashlib, io, json, os, pathlib, re, sys, tarfile, time
 import psycopg2
 mode = sys.argv[1]
@@ -817,6 +824,11 @@ def kit_record(cur):
         fail(KIT_PARAM + ' is not readable')
 def in_list(column, values):  # "column IN (%s, ...)" and its values; never empty
     return column + ' IN (' + ', '.join(['%s'] * len(values)) + ')', tuple(values)
+def held_counts(record):
+    # The held mail as two numbers: the mail -u queued (an id above the last
+    # one that mark-upgrading saved) and the mail that waited before it.
+    queued = sum(1 for mail in record['held_mail'] if mail > record['mail_max_id'])
+    return queued, len(record['held_mail']) - queued
 def system_mode(params, system):
     # perodua.connector.mixin._resolve_mode, from the parameters alone.
     for key in ('perodua_integration.mode.' + system, 'perodua_integration.mode'):
@@ -974,15 +986,21 @@ def verify_upgrade(cn, cur, modules, stored, fingerprint):
         if target != bool(active):
             cur.execute('UPDATE ir_cron SET active = %s WHERE id = %s', (target, cron))
             restored += target == before
-    # Every mail the run queued waits for the owner's review.
+    # Every mail of the queue (state outgoing) waits for the owner's review:
+    # the mail the run queued, and the mail that waited before it, which the
+    # run may have changed (a migration gives an older release mail its
+    # address). A row in any other state stays as it is, so a second run finds
+    # the held rows as they are and counts each of them once.
     held = []
     if table_exists(cur, 'mail_mail'):
-        cur.execute("SELECT id FROM mail_mail WHERE id > %s AND state = 'outgoing' ORDER BY id", (record['mail_max_id'],))
+        cur.execute("SELECT id FROM mail_mail WHERE state = 'outgoing' ORDER BY id")
         held = [row[0] for row in cur.fetchall()]
         if held:
             where, values = in_list('id', held)
-            cur.execute("UPDATE mail_mail SET state = 'exception', failure_reason = %s WHERE " + where, (HOLD_REASON,) + values)
+            cur.execute("UPDATE mail_mail SET state = 'exception', failure_reason = %s WHERE state = 'outgoing' AND " + where,
+                        (HOLD_REASON,) + values)
     record['held_mail'] = sorted(set(record['held_mail']) | set(held))
+    held_queued, held_before = held_counts(record)
     put(cur, KIT_PARAM, json.dumps(record, sort_keys=True))
     cn.commit()
     print('Cron jobs: %d flags put back as before the upgrade.' % restored)
@@ -990,7 +1008,8 @@ def verify_upgrade(cn, cur, modules, stored, fingerprint):
         print('Cron jobs: %s stays off: it reads the mock feed while its system resolves to mock.' % xmlid)
     if new:
         print('Cron jobs new with this release: ' + ', '.join(new) + '.')
-    print('Mail: %d messages the upgrade queued are held (state exception), until deploy-app.sh --release-queued-mail.' % len(held))
+    print('Mail held (state exception) until deploy-app.sh --release-queued-mail: %d that the upgrade queued,'
+          ' %d that waited in the queue before it.' % (held_queued, held_before))
     # Then the result itself (plan section 3, go/no-go).
     installed = {name for name, (state, _, _) in modules.items() if state == 'installed'}
     problems = ['%s is %s' % (name, state) for name, (state, _, _) in sorted(modules.items())
@@ -1015,22 +1034,26 @@ def verify_upgrade(cn, cur, modules, stored, fingerprint):
         sys.exit(1)
     put(cur, 'perodua.image_modhash', UPGRADED + fingerprint)
     cn.commit()
-    print('UPGRADE_VERIFIED %d' % len(held))
+    print('UPGRADE_VERIFIED %d %d' % (held_queued, held_before))
     sys.exit(0)
 def release_mail(cn, cur):
+    # Only the rows verify-upgrade held and that are still held: a row the
+    # owner deleted, cancelled or sent again since stays as it is. Two
+    # updates, so that each number is the count of the rows it changed.
     record = kit_record(cur)
     held = (record or {}).get('held_mail') or []
-    released = 0
+    released = [0, 0]
     if held:
         where, values = in_list('id', held)
-        cur.execute("UPDATE mail_mail SET state = 'outgoing', failure_reason = NULL WHERE state = 'exception' AND failure_reason = %s AND "
-                    + where, (HOLD_REASON,) + values)
-        released = cur.rowcount
+        for index, side in enumerate(('id > %s', 'id <= %s')):
+            cur.execute("UPDATE mail_mail SET state = 'outgoing', failure_reason = NULL WHERE state = 'exception' AND failure_reason = %s AND "
+                        + where + ' AND ' + side, (HOLD_REASON,) + values + (record['mail_max_id'],))
+            released[index] = cur.rowcount
         record['released_mail'] = sorted(set(record.get('released_mail', [])) | set(held))
         record['held_mail'] = []
         put(cur, KIT_PARAM, json.dumps(record, sort_keys=True))
         cn.commit()
-    print('RELEASED %d' % released)
+    print('RELEASED %d %d' % tuple(released))
     sys.exit(0)
 with connect(db) as cn:
     with cn.cursor() as cur:
@@ -1375,8 +1398,9 @@ The module upgrade of database $DB_NAME on $DB_HOST, from $OLD_RELEASE to $RELEA
   2. Mark the database for the upgrade and remove the containers of $OLD_RELEASE.
      From then on $OLD_RELEASE cannot run on this database, and the only way
      back is to restore the backup (restore.txt).
-  3. Upgrade the modules once (-u, no -i, cron jobs off). Mail the upgrade
-     queues is held; release it after review with --release-queued-mail.
+  3. Upgrade the modules once (-u, no -i, cron jobs off). Then hold every mail
+     of the mail queue: the mail the upgrade queues, and the mail that waits
+     in the queue before it. Release it after review with --release-queued-mail.
   4. Check the result, put the cron flags back, deploy $RELEASE.
 Point of no return: once users write data with $RELEASE, going back to the
 backup loses that data. After that point, fix forward.
@@ -1438,13 +1462,18 @@ module_upgrade() {  # after the backup: the mark, -u, and the check of its resul
     ((status != 124)) || fail "The module upgrade did not finish within INIT_TIMEOUT=$INIT_TIMEOUT seconds; see $BACKUP_DIR/module-upgrade.log"
     ((status == 0)) || fail "The module upgrade (-u) failed; see $BACKUP_DIR/module-upgrade.log"
     UPGRADE_STATE=migrated
-    printf 'Module upgrade finished. Checking the result, putting the cron flags back and holding the queued mail...\n'
+    # From the stop for the backup until the deployment below starts this
+    # release, the only Odoo process on the database is the run of -u above,
+    # which has no cron threads and stops after the upgrade; the containers
+    # of the old release are removed. So no mail queue runs before
+    # verify-upgrade holds the queue.
+    printf 'Module upgrade finished. Checking the result, putting the cron flags back and holding every mail of the mail queue...\n'
     if ! state=$(staged run --rm --no-deps -T odoo python3 /opt/deploy/preflight.py verify-upgrade </dev/null 2> "$TEMP_DIR/verify.log"); then
         cat "$TEMP_DIR/verify.log" >&2
         fail 'The upgraded database failed its checks (above)'
     fi
-    [[ ${state##*$'\n'} =~ ^UPGRADE_VERIFIED\ ([0-9]+)$ ]] || fail "Unexpected answer from the check of the upgraded database: $state"
-    HELD_MAIL=${BASH_REMATCH[1]}
+    [[ ${state##*$'\n'} =~ ^UPGRADE_VERIFIED\ ([0-9]+)\ ([0-9]+)$ ]] || fail "Unexpected answer from the check of the upgraded database: $state"
+    HELD_MAIL=${BASH_REMATCH[1]} HELD_MAIL_BEFORE=${BASH_REMATCH[2]}
     [[ $state != *$'\n'* ]] || printf '%s\n' "${state%$'\n'*}"
     printf 'The upgraded database passed its checks.\n'
 }
@@ -1899,8 +1928,12 @@ fi
 if ((PENDING_STAMP)); then
     printf 'The Odoo modules were upgraded (-u). %s cannot run on this database any more: the backup is the only way back, and only until users write data (the point of no return).\n' \
         "${OLD_RELEASE:-The release before}"
-    [[ -z $HELD_MAIL ]] || printf 'Held mail: %s messages that the module upgrade queued.\n' "$HELD_MAIL"
-    printf 'Review the held mail (Settings > Technical > Emails, state Exception), then send it with: sudo bash deploy-app.sh --release-queued-mail --dir %q\n' "$DEPLOY_DIR"
+    [[ -z $HELD_MAIL ]] || printf 'Held mail: %s that the module upgrade queued, %s that waited in the queue before the upgrade.\n' \
+        "$HELD_MAIL" "$HELD_MAIL_BEFORE"
+    # The public host names do not open Odoo's own pages when PUBLIC_ROOT is
+    # set, so the message also names the list that needs no web page.
+    printf 'Review the held mail: README.md, "Upgrade an App server to %s", step 13 lists it with psql on the DB server (in Odoo: Settings > Technical > Emails, status Delivery Failed). Then send it with: sudo bash deploy-app.sh --release-queued-mail --dir %q\n' \
+        "${RELEASE##*-}" "$DEPLOY_DIR"
 fi
 if [[ $BIND_IP == 127.0.0.1 ]]; then
     printf 'HTTP URL: http://127.0.0.1:%s%s/app/ (this server only). From your computer: ssh -N -L %s:127.0.0.1:%s <user>@<APP_SERVER_IP>, then open http://localhost:%s%s/app/\n' \
