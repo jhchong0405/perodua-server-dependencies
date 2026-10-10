@@ -283,6 +283,146 @@ wait "$squatter" 2> /dev/null || true
 sed -i '/ \/sit\/ /d' "$STATE/routes.conf"
 expect https://stgissrp.perodua.com.my/dev/z '200 port=8110 path=/dev/z'
 
+step 'diagnose: a front (a WAF) that forwards HTTPS to port 80 makes a redirect loop'
+apt-get install -y -qq libnginx-mod-http-headers-more-filter > /dev/null
+rm -f /etc/nginx/modules-enabled/*headers-more*
+mkdir -p /front
+front() {
+    cat > /front/nginx.conf << EOF
+load_module /usr/lib/nginx/modules/ngx_http_headers_more_filter_module.so;
+pid /front/nginx.pid;
+error_log /front/error.log;
+events {
+}
+http {
+    access_log off;
+    server {
+        listen 127.0.0.2:8443 ssl;
+        ssl_certificate $STATE/fullchain.pem;
+        ssl_certificate_key $STATE/key.pem;
+        more_set_headers 'Server: CloudWAF';
+        location / {
+            proxy_pass $1;
+            proxy_set_header Host \$host;
+            proxy_ssl_server_name on;
+            proxy_ssl_name \$host;
+        }
+    }
+}
+EOF
+    nginx -t -q -c /front/nginx.conf
+}
+front_answers() {
+    [[ $(curl -sk --connect-to stgissrp.perodua.com.my:443:127.0.0.2:8443 -o /dev/null -w '%{http_code}' \
+        https://stgissrp.perodua.com.my/dev/ || true) == "$1" ]]
+}
+workers() { { cat /proc/[0-9]*/stat 2> /dev/null || true; } | awk -v master="$(cat /run/nginx.pid)" '$4 == master { print $1 }' | sort; }
+unchanged() { find "$STATE" /etc/nginx -type f -exec sha256sum {} + | sort; workers; }
+front http://127.0.0.1:80
+nginx -c /front/nginx.conf
+eventually front_answers 301 && pass 'the fake front at 127.0.0.2:8443 sends HTTPS requests to port 80' || fail 'the fake front does not answer'
+curl -skS -L --max-redirs 4 -o /dev/null -D /tmp/loop.headers --connect-to stgissrp.perodua.com.my:443:127.0.0.2:8443 \
+    https://stgissrp.perodua.com.my/dev/app/ 2> /tmp/err && rc=0 || rc=$?
+tr -d '\r' < /tmp/loop.headers > /tmp/loop.txt
+token=$(nginx -v 2>&1 | sed 's/^nginx version: //')
+length=$((157 + ${#token}))
+[[ $rc == 47 && $(grep -c '^HTTP/1.1 301 Moved Permanently$' /tmp/loop.txt) == 5 ]] \
+    && pass "curl -L --max-redirs 4: five 301 answers, then: $(cat /tmp/err)" || fail "curl exit $rc: $(cat /tmp/loop.txt /tmp/err)"
+[[ $(grep -cx 'Server: CloudWAF' /tmp/loop.txt) == 5 && $(grep -cx "Content-Length: $length" /tmp/loop.txt) == 5
+   && $(grep -cx 'Location: https://stgissrp.perodua.com.my/dev/app/' /tmp/loop.txt) == 5 ]] \
+    && pass "each answer: Server: CloudWAF, Content-Length: $length (157 + the ${#token} characters of $token), Location: the same URL" \
+    || fail "the answers: $(cat /tmp/loop.txt), nginx: $token"
+before=$(unchanged)
+bash https.sh diagnose --front 127.0.0.2:8443 > /tmp/diagnose 2>&1 && rc=0 || rc=$?
+cat /tmp/diagnose
+[[ $rc == 4 ]] && grep -qx 'Result: 3 problem(s) found' /tmp/diagnose && pass 'diagnose exits with status 4' || fail "diagnose exited with $rc"
+for route in 'api.example.perodua.com.my /dev/api/' 'stgissrp.perodua.com.my /dev/'; do
+    grep -qxF "  PROBLEM $route: the front at 127.0.0.2:8443 (Server: CloudWAF) sends HTTPS requests to port 80 of this server, where this route redirects to https://: a redirect loop. Ask the front's owner to forward HTTPS to port 443 with the original Host header, or add http to this route (README: Behind a TLS front on port 80)" /tmp/diagnose \
+        && pass "diagnose: the front loops for $route" || fail "diagnose did not find the loop of the front for $route"
+done
+grep -Eq '^  PROBLEM redirect loop from 127\.0\.0\.1 \(([5-9]|[1-9][0-9]+) answers, last: GET /dev/app/ HTTP/1\.[01] at [0-9]{2}/[A-Z][a-z]{2}/' /tmp/diagnose \
+    && pass 'diagnose: the access log shows the loop of the five requests that curl sent' || fail 'diagnose did not find the loop in the access log'
+grep -qF '  NOTE /etc/nginx/sites-enabled/default is the default server on port 80' /tmp/diagnose \
+    && pass "diagnose: Ubuntu's default site answers other names on port 80" || fail 'diagnose did not name the default site'
+[[ $(unchanged) == "$before" ]] && pass 'diagnose changed no file and did not reload nginx' || fail 'diagnose changed a file or reloaded nginx'
+
+step 'diagnose: the same front forwarding HTTPS to port 443 with the original Host header'
+front https://127.0.0.1:443
+nginx -c /front/nginx.conf -s reload
+eventually front_answers 200 && pass 'the fake front sends HTTPS requests to port 443' || fail 'the fake front does not forward to 443'
+python3 - << 'PY'
+import datetime, re
+path = "/var/log/nginx/access.log"
+def older(match):
+    time = datetime.datetime.strptime(match.group(1), "%d/%b/%Y:%H:%M:%S %z") - datetime.timedelta(hours=2)
+    return "[" + time.strftime("%d/%b/%Y:%H:%M:%S %z") + "]"
+with open(path) as log:
+    text = re.sub(r"\[(\d\d/[A-Z][a-z]{2}/\d{4}:\d\d:\d\d:\d\d [+-]\d{4})\]", older, log.read())
+with open(path, "w") as log:
+    log.write(text)
+PY
+grep -q '" 301 ' /var/log/nginx/access.log && pass 'the access log keeps the loop, with its times moved two hours back (as two hours later)' \
+    || fail 'the access log has no 301 answer'
+for run in 1 2 3; do
+    bash https.sh diagnose --front 127.0.0.2:8443 > /tmp/diagnose 2>&1 && rc=0 || rc=$?
+    [[ $rc == 0 ]] || break
+done
+cat /tmp/diagnose
+[[ $rc == 0 ]] && grep -qx 'Result: no problem found' /tmp/diagnose \
+    && pass "diagnose exits with status 0, $run runs in a row" || fail "diagnose run $run exited with $rc"
+grep -qxF '  OK stgissrp.perodua.com.my /dev/: through the front at 127.0.0.2:8443 answers 200 (Server: CloudWAF)' /tmp/diagnose \
+    && grep -qxF '  OK api.example.perodua.com.my /dev/api/: through the front at 127.0.0.2:8443 answers 200 (Server: CloudWAF)' /tmp/diagnose \
+    && pass 'diagnose: the way through the front is OK' || fail 'diagnose did not report the front as OK'
+grep -qF '  OK no redirect loop in the last 30 minutes of /var/log/nginx/access.log (' /tmp/diagnose \
+    && grep -Eq '^  NOTE earlier redirect loop from 127\.0\.0\.1 \([0-9]+ answers, last: GET /dev/(app/)? HTTP/1\.[01] at [^,]+, 1[12][0-9] minutes before this run\)' /tmp/diagnose \
+    && pass 'diagnose: the loop of two hours ago is a NOTE, not a PROBLEM' || fail 'diagnose did not report the earlier loop as a NOTE'
+[[ $(unchanged) == "$before" ]] && pass 'diagnose changed no file and did not reload nginx' || fail 'diagnose changed a file or reloaded nginx'
+
+step 'diagnose: the same front on port 80, to routes with http'
+cp "$STATE/routes.conf" /tmp/routes.conf
+sed -i -E -e 's#^(api\.example\.perodua\.com\.my +/(dev|uat)/api/ +800[01] +)strip$#\1strip,http#' \
+    -e 's#^(stgissrp\.perodua\.com\.my +/(dev|uat)/ +811[01])$#\1   http#' "$STATE/routes.conf"
+[[ $(grep -c 'http$' "$STATE/routes.conf") == 4 ]] && pass 'http on the four routes' || fail "the routes: $(cat "$STATE/routes.conf")"
+bash https.sh apply | grep 'port 80'
+nginx -c /front/nginx.conf -s quit
+eventually front_answers 000 && pass 'the fake front stopped' || fail 'the fake front still answers'
+front http://127.0.0.1:80
+nginx -c /front/nginx.conf
+eventually front_answers 200 && pass 'the fake front sends HTTPS requests to port 80, and the routes with http answer' \
+    || fail 'the fake front on port 80 does not get 200'
+got=$(curl -sk --connect-to stgissrp.perodua.com.my:443:127.0.0.2:8443 https://stgissrp.perodua.com.my/dev/x || true)
+[[ $got == 'port=8110 path=/dev/x proto=https host=stgissrp.perodua.com.my'* ]] && pass "through the front and port 80: $got" \
+    || fail "through the front and port 80: $got"
+before=$(unchanged)
+for run in 1 2 3; do
+    bash https.sh diagnose --front 127.0.0.2:8443 > /tmp/diagnose 2>&1 && rc=0 || rc=$?
+    [[ $rc == 0 ]] || break
+done
+cat /tmp/diagnose
+[[ $rc == 0 ]] && grep -qx 'Result: no problem found' /tmp/diagnose \
+    && pass "diagnose exits with status 0, $run runs in a row" || fail "diagnose run $run exited with $rc"
+for route in 'api.example.perodua.com.my /dev/api/' 'api.example.perodua.com.my /uat/api/' 'stgissrp.perodua.com.my /dev/' 'stgissrp.perodua.com.my /uat/'; do
+    grep -qxF "  OK $route: HTTP on this server answers 200: served on port 80 too, for a TLS front (http)" /tmp/diagnose \
+        && pass "diagnose: port 80 serves $route" || fail "diagnose: port 80 does not serve $route"
+done
+grep -qxF '  OK stgissrp.perodua.com.my /dev/: through the front at 127.0.0.2:8443 answers 200 (Server: CloudWAF)' /tmp/diagnose \
+    && grep -qxF '  OK api.example.perodua.com.my /dev/api/: through the front at 127.0.0.2:8443 answers 200 (Server: CloudWAF)' /tmp/diagnose \
+    && pass 'diagnose: the way through the front on port 80 is OK' || fail 'diagnose did not report the front on port 80 as OK'
+grep -qF '  OK no redirect loop in the last 30 minutes of /var/log/nginx/access.log (' /tmp/diagnose \
+    && grep -Eq '^  NOTE earlier redirect loop from 127\.0\.0\.1 ' /tmp/diagnose \
+    && pass 'diagnose: the loop of two hours ago is still a NOTE' || fail 'diagnose did not report the earlier loop as a NOTE'
+[[ $(unchanged) == "$before" ]] && pass 'diagnose changed no file and did not reload nginx' || fail 'diagnose changed a file or reloaded nginx'
+printf 'server {\n    listen 80;\n    server_name stgissrp.perodua.com.my;\n    return 200 hand-written;\n}\n' > /etc/nginx/conf.d/perodua-front.conf
+bash https.sh diagnose --front 127.0.0.2:8443 > /tmp/diagnose 2>&1 && rc=0 || rc=$?
+[[ $rc == 0 ]] && grep -qF '  NOTE /etc/nginx/conf.d/perodua-front.conf, a file that apply did not write, serves host names of the table: stgissrp.perodua.com.my (80). ' /tmp/diagnose \
+    && pass 'diagnose: a hand-written file for a host name of the table is a NOTE' || fail "diagnose with a hand-written file: exit $rc, $(cat /tmp/diagnose)"
+rm /etc/nginx/conf.d/perodua-front.conf
+cp /tmp/routes.conf "$STATE/routes.conf"
+bash https.sh apply > /dev/null
+nginx -c /front/nginx.conf -s quit
+eventually front_answers 000 && pass 'the fake front stopped' || fail 'the fake front still answers'
+rm -rf /front
+
 step 'uninstall'
 bash https.sh uninstall --confirm yes
 eventually closed && pass 'nothing answers HTTPS any more' || fail 'HTTPS still answers'

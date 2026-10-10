@@ -440,7 +440,7 @@ creates a run folder there. It checks:
   which monitoring reads as UNKNOWN, not WARNING or CRITICAL.
 
 `test_https.py` runs `https.sh` with real openssl against fake `nginx`, `systemctl`,
-`ss` and `curl`. A throwaway root and intermediate sign the requests the script
+`ss`, `curl`, `getent` and `date`. A throwaway root and intermediate sign the requests the script
 makes, the way the certificate issuer would; the fake `nginx` records its calls,
 fails `-t` or `-T` on request and prints for `-T` the files the test gives it. A
 reload through the fake `systemctl` copies the script's configuration and chain to
@@ -631,6 +631,99 @@ directories (`--unit-dir`, `--lib-dir`). It checks:
   timer, its units and the copy (another `--dir` leaves them alone), keeps the
   accounts, and `--purge` deletes them.
 
+For `diagnose` (the calls with its user agent), the fake `curl` answers HTTPS
+(port 443) and HTTP (port 80) on 127.0.0.1 as the kit's nginx without `http`
+routes does unless the test says otherwise, and a front at the address and port
+the test names; a front that answers each request with a
+redirect to the same URL stands in for a WAF that forwards HTTPS to port 80. The
+fake `getent` gives the addresses the test puts in for a host name, the fake
+`nginx -V` the log files the test names, and the fake `date` the time of the run
+the test sets for `date +%s` (each other `date` call runs the real one). It
+checks:
+- on a healthy server (the kit applied, Ubuntu's default site next to it, the
+  services on 127.0.0.1 only) every line is OK or NOTE, in the order Ports, nginx
+  files, Host names, Access log, nginx workers, and the exit status is 0: where
+  each port listens, the nginx files on ports 80 and 443 with a NOTE for the
+  default site, HTTPS and the redirect of HTTP on this server for each host and
+  path, a NOTE when the resolver gives no address or one of this server's, and an
+  access log of 301 answers to browsers that are not loops (slash redirects, a
+  third one 40 seconds or a day later, the same request from three senders, four
+  identical answers within 3 seconds, five within 4 seconds from two browsers,
+  lines in another format and the script's own requests, which are not counted)
+  with the top senders as NOTEs; workers that exited on a signal are a NOTE with
+  the last one;
+- a front given with `--front ADDRESS[:PORT]` that answers with a redirect to the
+  same URL, followed or not (a relative `Location`), is a PROBLEM for each host
+  name with its first route and exit status 4, and so is a front whose
+  `Location` changes on each redirect, which only curl's stop at its limit
+  (exit status 47) finds. The PROBLEM gives the two remedies: HTTPS to port 443
+  on the front, or `http` on the route. Every
+  curl call has `--max-time 10`, and the front check gets
+  `--connect-to HOST:443:ADDRESS:PORT` (port 443 by default) and at most 5
+  redirects. A front that answers 200, found through the resolver or given, is
+  OK, and so is a front that answers 404 as this server does; one that does not
+  answer is a NOTE; one that answers 403 where this server answers 200, or 502
+  where this server answers 502 too, is a PROBLEM;
+- an access log with the incident's WAF lines (five 301 answers to the same
+  sender, request and browser within a few seconds) is a PROBLEM for each sender,
+  with the two remedies, while the loop is less than 30 minutes old, the most
+  answers first; a month
+  later, the loop over midnight at the end of October is the PROBLEM and the
+  incident's loops are NOTEs with their age in minutes; a log of 200,000 lines is
+  read in one pass;
+- six looping senders give five PROBLEMs and a NOTE for the sixth, and six
+  earlier loops five NOTEs and one more; a loop whose lines mix the time zones
+  +0800, +0000 and -0500 is found, and five answers one minute apart in reverse
+  order, or 5 seconds apart, are not a loop;
+- a missing, unreadable or foreign-format log, and a missing `ss`, `nginx`,
+  `getent` or `curl`, give a NOTE, not a failure. `nginx -T` does not run, and
+  creates no file, while the access log, the error log or a log file that
+  `nginx -V` names is missing. A tool that the test host has in an sbin
+  directory cannot be hidden, because `https.sh` adds those directories to its
+  PATH: the test then checks the others and reports itself as skipped;
+- HTTPS on 127.0.0.1 only, a service port that does not listen, a 502, port 80
+  answering 200 where HTTPS answers 401, or a 301 to `http://` or to another
+  host, instead of the redirect on a route without `http`, `nginx -T` failing
+  and an nginx without the file of `apply` are PROBLEMs; a service port open to
+  all networks and a route with port `-` are NOTEs;
+- on routes without `http`, port 80 that gives the answer of HTTPS (a
+  hand-written front file for each host name on ports 80 and 443, as on the
+  DEV server) is a PROBLEM for each route that says to add `http` first for a
+  TLS front on port 80, then remove the other file and run `apply`, and not
+  that port 80 must only redirect; the front that gets 200 is OK at the same
+  time. With `http` on the routes, the same state gives exit status 0 and the
+  NOTE for the hand-written file;
+- on routes with `http` (`strip,http`, `http,strip`, `http`), port 80 that
+  gives the answer of HTTPS (200, or 303 on both) is OK. Port 80 that still
+  gives the 301 to `https://` (`http` added after the last `apply`) is a
+  PROBLEM for each route, and a front loop on such a route is a PROBLEM that
+  does not say to add `http`. Another answer than the one of HTTPS (404, or a
+  301 to another address) is a PROBLEM;
+- a front that gets 200 through port 80 from the routes with `http` is OK. On
+  a host name with routes with and without `http`, the front check takes its
+  first route without `http` and finds the loop there, after the lines of that
+  route;
+- a table with `api` routes, an `http` route with port `-` and the default
+  server of port 443 that `apply` writes gives no PROBLEM, and no NOTE about
+  that default server;
+- another nginx file that serves host names of the table on port 80 or 443 (a
+  hand-written front file, with a name in upper case, a name in quotes and a
+  statement over two lines, or a server block without `listen`, which is port
+  80) gives one NOTE for each file, with each name and its ports, between the
+  other nginx file lines; a file on port 8080, a commented `server_name`, an
+  `upstream` server and the same file without these names give none. The NOTE
+  says to add `http` first, then to remove the file and run `apply`. Ubuntu's
+  default site with a host name of the table gets the NOTE too, next to the
+  NOTE about the default server, and `apply` refuses it;
+- `diagnose` changes no file under `--dir` or the nginx folder, calls only
+  `nginx -V` and `nginx -T` (no reload, no `systemctl`), runs while another
+  command holds the lock, needs no certificate, and does not create a missing
+  routes table; `--front`, `--access-log` and `--error-log` belong to it
+  (`status`, `apply` and `csr` refuse them), and a bad `--front` (empty, `-x`,
+  `...`, a name that ends with a dot, a URL, a port over 65535) is refused. Every list of `strip`,
+  `http` and `api` works with it, and a wrong one (`strip, api`, `api,api`,
+  `rewrite`) is refused.
+
 `check-https.sh` runs `https.sh` end to end with real nginx in a throwaway
 Ubuntu 24.04 container, with echo servers standing in for the services:
 
@@ -673,8 +766,53 @@ and changes the key while nginx runs, comparing the exact certificate nginx
 presents, and refuses a second nginx file for one of the host names. With
 another nginx file holding a port that a program already has, nginx cannot
 reload: `apply` must fail and put the previous configuration back, and
-`uninstall` must fail and change nothing. Then it uninstalls, and `apply` then
-refuses another nginx file that is the default server for port 443. It refuses to run outside a container.
+`uninstall` must fail and change nothing.
+
+Then it reproduces the redirect loop of 2026-10-07 (a WAF that forwards HTTPS to
+port 80). A second nginx on 127.0.0.2:8443, with the throwaway certificate and
+its own configuration file, stands in for the WAF: it sets `Server: CloudWAF`
+(the headers-more module, installed for this check and loaded by that nginx
+only) and forwards to `http://127.0.0.1:80` with the original Host header. The
+incident's `curl -L --max-redirs 4` through it gets the same 301 five times, with
+`Location` the URL it asked for and `Content-Length` 157 plus the length of the
+server token (178 for `nginx/1.24.0 (Ubuntu)`), and stops with exit status 47.
+`diagnose --front 127.0.0.2:8443` then reports the loop for both host names,
+with the two remedies, and, from the access log, the loop of those requests,
+with exit status 4. Once the fake front forwards to `https://127.0.0.1:443` (the
+host name as SNI) and the times in the access log are moved two hours back (as
+two hours later), three runs in a row report the way through the front as OK,
+the loop of two hours ago as a NOTE, and exit status 0: the script's own
+requests do not look like a loop. Then the four routes get `http` (`apply`),
+and the fake front, started again, forwards to `http://127.0.0.1:80`: it gets
+200 and the echo server's answer, and three runs in a row report port 80 as
+serving each route, the way through the front as OK, the old loop still as a
+NOTE, and exit status 0. In each of these steps, no file under
+`/etc/perodua-https` or `/etc/nginx` changes and the nginx workers stay the
+same (no reload). A hand-written nginx file for `stgissrp` on port 80 then
+gives a NOTE with exit status 0, and is removed. The routes go back to the
+table without `http`, and the fake front is stopped and removed. Then it
+uninstalls, and `apply` then refuses another nginx file that is the default
+server for port 443. It refuses to run outside a container.
+
+`test_client_check.py` checks `scripts/client-check.ps1`, the check of each host
+name from a Windows PC. Its static checks always run and need no PowerShell: a
+small tokenizer separates code, strings and comments, and the checks find in
+the code any operator, cmdlet, parameter or .NET member of PowerShell 7 only
+(the script must also run in Windows PowerShell 5.1), any comment but
+`#Requires -Version 5.1`, a non-ASCII byte, a parameter of the agreed
+interface that is missing, an HTTP cmdlet or a certificate bypass instead of
+`curl.exe`, a `curl.exe` call without `--max-time 10`, a second native call
+of curl, an option that follows redirects, and a `LOOP` reason that does not
+give both setups (HTTPS to port 443 on the front, or the `http` option on the
+route and `apply`). The PowerShell tests run only
+when `pwsh` (PowerShell 7) is on the PATH of a Linux or macOS host, and are
+skipped otherwise: the PowerShell parser, runs with a fake `curl.exe` for each
+verdict (a loop through the front or on the direct path too, a changed Host
+header, a blocked App API path, a certificate that the PC does not trust, a
+front or server fault, no DNS, no answer from the App server, no `curl.exe`),
+the refusals with exit status 2, and byte-for-byte changes of a hosts file
+(added and removed lines, a line that keeps its other names, CRLF and LF line
+ends, an empty file, a UTF-16 file that is refused).
 
 `check-upgrade-backup.sh` runs the backup of `deploy-app.sh --upgrade` and the
 restore steps of its `restore.txt` against real PostgreSQL 16 (a `postgres:16`

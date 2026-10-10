@@ -1125,6 +1125,29 @@ server's private address when F5 connects to the web ports directly.
   answers while one environment is down. This nginx is not part of either
   deployment: `deploy-app.sh`, `service.sh` and `uninstall.sh` do not start,
   stop or remove it.
+- **A WAF or another front proxy in front of `https.sh`:** when the nginx of
+  `https.sh` gives the host names HTTPS on this server, a WAF, a CDN or F5 in
+  front of it uses one of two setups for each host name. In setup A, it sends
+  HTTPS to port 443 of this server, with the original Host header (the same
+  TLS server name, SNI, is recommended; without SNI, the Host header still
+  selects the host name). In setup B, it sends plain HTTP to port 80 with the
+  original Host header, and each route that it uses has the `http` option of
+  `https.sh` (see "Behind a TLS front on port 80" in the
+  [README](../README.md#behind-a-tls-front-on-port-80), with its risks). It
+  sends both paths, `/dev/` and `/uat/`, the same way; the routes table of
+  `https.sh` then sends each path to its web port. On a route without `http`,
+  port 80 answers every request with a redirect to `https://` with the same
+  host name and path. A front that sends HTTPS requests there passes that
+  redirect back, the browser asks again, and after some rounds the browser
+  stops with `ERR_TOO_MANY_REDIRECTS`. Do not send the front to the web ports
+  (8110, 8111): they bypass the nginx of `https.sh`, and with
+  `BIND_IP=127.0.0.1` they listen on this server only. The other settings of
+  the front (timeouts of 720 seconds, uploads of 128 MB, no JavaScript
+  challenge on the App API path, the back-to-source address ranges) are in
+  [Behind a WAF or another front proxy](../README.md#behind-a-waf-or-another-front-proxy).
+  `sudo bash https.sh diagnose --front ADDRESS` on this server and
+  `scripts/client-check.ps1` on a Windows PC check the path of each host name.
+  See the [record of 2026-10-08](WAF-REDIRECT-LOOP-2026-10-08.md).
 
 ### Things to know
 
@@ -1211,6 +1234,11 @@ than 443. `deploy-app.sh` writes it from `PUBLIC_BASE_URL`, so:
   [README](../README.md#behind-a-tls-front-on-port-80)). The ISS-Oracle API on
   stgiss has a line of its own, `stgiss.perodua.com.my /api/ 8000 strip,http,api`
   (see "Publish it with HTTPS" in the [README](../README.md#publish-it-with-https)).
+  A front that sends HTTPS requests to port 80 for a line without `http` gets a
+  redirect loop (see
+  [Behind a WAF or another front proxy](../README.md#behind-a-waf-or-another-front-proxy)).
+  All sign-ins happen on stgiss: while stgiss does not work through the front,
+  no user can sign in through the front, even when the module names work.
 
 **What users and support see:**
 
