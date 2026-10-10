@@ -167,7 +167,15 @@ directory's own, or the staged one of the new release) and the release that
   `restore.txt`, which is printed as well and names each restore command: step
   4 also deletes the Odoo sessions and says that every user signs in again;
   step 5 copies the old identity and `app.env` back and deploys without
-  `--upgrade`;
+  `--upgrade`. Before step 1 it names the scripts folder of the upgrade for
+  steps 1 to 4, says that each command must end with exit status 0 and that
+  the next step waits for it, what success looks like, that the
+  `perl: warning` lines of step 3 are harmless, the down time and that the
+  HTTPS front stays; step 3 gives the lock numbers of the check;
+- the check prints `Locks for the way back:` with the numbers of
+  `RESTORE_LOCKS`; with the same modules, a lock table too small for
+  `restore.txt` step 3 is a warning with the value to set, and the upgrade
+  goes on;
 - a failure after the switch (recording the addresses, the HTTP check) says
   that the directory names the new release, whether the App is stopped or the
   containers were recreated, and how to finish, go back and restore; the
@@ -206,9 +214,11 @@ only `from`. It checks:
   `release-mail` without the two numbers is refused. `restore.txt` names
   the module upgrade and the point of no return;
 - each accepted old release (v1.0.5 to v1.0.8) goes
-  through; v1.0.4, another fingerprint, every refusal of `upgrade-check`, retired
-  data without `--drop-retired-data`, a refusal of the guard and a missing or
-  wrong confirmation stop before the App stops, and nothing changes;
+  through; v1.0.4, another fingerprint, every refusal of `upgrade-check` (the
+  lock table of the way back included), a lock count that cannot be read,
+  retired data without `--drop-retired-data`, a refusal of the guard and a
+  missing or wrong confirmation stop before the App stops, and nothing changes;
+  the lock numbers are in the output and in step 3 of `restore.txt`;
   `--confirm`, `--drop-retired-data` and `--release-queued-mail` are refused
   where they do not apply;
 - after the backup, `upgrade-check` runs again with the App stopped. Retired
@@ -239,6 +249,8 @@ only `from`. It checks:
 - as root on Linux: `service.sh` (byte for byte that of v1.0.5 to v1.0.8, pinned
   by its sha256) refuses `start` and `restart` on a marked database, before and
   after the switch, without `up` and without its advice to reset.
+  `reset_database.py` is pinned the same way: `restore.txt` says that both are
+  the same in the folders of the old and the new release.
 
 `test_preflight_module_upgrade.py` runs the exact `preflight.py` that
 `deploy-app.sh` writes, and the one of v1.0.5 to v1.0.8
@@ -267,6 +279,24 @@ result: the held rows and the counts stay the same, and a row that entered
 the queue in between is counted once), the refusals of `verify-upgrade`
 (which still writes the cron flags and the hold), and the CSV files of
 `retired-export`.
+
+The lock check of the way back: `upgrade-check` prints `RESTORE_LOCKS` before
+`READY` and before `MODULES`. With SQLite the lock table comes from
+`FAKE_PG_LOCK_TABLE`: exactly enough room passes (also with a prepared
+transaction), one lock more refuses the module upgrade with both numbers and
+the value to set, `mark-upgrading` then exits 3 and writes nothing, and the
+same modules are not refused. On PostgreSQL, with `pg_dump`, `pg_restore` and
+`psql` on the PATH, a database with every kind of object (150 Odoo-shaped
+tables, an extension, enum, domain and composite types, a function and a
+trigger, a partitioned, an inheriting and an unlogged table, a view, a
+materialized view and a second schema) is dumped, emptied a few tables per
+transaction and restored in one transaction, as `restore.txt` step 3 does.
+Before the commit, the transaction reads `pg_locks`: each relation is locked,
+the other objects are at most the count and more than nine tenths of it (as
+PostgreSQL 16.15 locks dependencies), the lock table holds at most 20 more,
+and the restored database counts the same. When the server has no room for
+the count, the check refuses, and a restore that fails stops with
+`out of shared memory`.
 
 `test_uninstall_app.py` runs `uninstall.sh --role app` against a fake Docker CLI.
 The fake keeps containers, volumes and networks in a file, including those of
@@ -823,7 +853,8 @@ on the host, such as the pinned release image:
 bash tests/check-upgrade-backup.sh IMAGE
 ```
 
-It takes the command lines from `deploy-app.sh`, and checks that the dump and
+It takes the command lines from `deploy-app.sh` (and `restore.txt` must say
+that each command ends with exit status 0), and checks that the dump and
 the archive are the two runs with the no-log compose file, and that a module
 upgrade's `retired-export` uses that file too. A database shaped as Odoo
 leaves it (900 tables with foreign keys to `res_users`, inheriting tables, an
@@ -923,6 +954,13 @@ refuses an empty database, writes only `report.url` without a base URL, commits
 `web.base.url` and `web.base.url.freeze` with one (a rerun changes nothing),
 refuses an invalid base URL without changing anything, and leaves the database
 `READY`.
+
+`test_preflight_module_upgrade.py` then runs with `PREFLIGHT_TEST_PG` on a
+database of its own role, and its lock test again on a second cluster with
+`max_locks_per_transaction` 10 and `max_connections` 20 (room for 200 locks):
+there the module upgrade is refused, and a restore of the fixture that fails
+must stop with `out of shared memory` (it did in the test runs). The second
+cluster is removed after it.
 
 `uninstall.sh --role db` coverage:
 - removing a deployment only after an exact confirmation and with no open

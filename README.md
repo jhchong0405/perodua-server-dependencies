@@ -466,6 +466,9 @@ attachments in `/opt/perodua-app/backups/TIME-OLD_RELEASE/` (or in a folder
 that you give with `--backup-dir PATH`). If the backup fails, it starts the old
 App again and stops. Then it deploys the new release with the usual checks.
 `restore.txt` in the backup folder gives the commands that put the data back.
+Before the App stops, the check also counts the locks that the restore of
+this database takes (`Locks for the way back: ...`), with the room that the DB
+server has for them.
 
 If it stops before the switch, the directory and its App stay as they were. If
 it stops later, it tells you the state of the server and the ways back:
@@ -500,6 +503,9 @@ database in the same `--upgrade`. It does this only when:
   v1.0.7 or v1.0.8;
 - the database is a UAT database that `--init-db` set up, without sample data
   and without `perodua_demo_client`. A restored database is refused;
+- the DB server has room for the locks of the way back: `restore.txt`
+  restores the database in one transaction (see
+  [The lock table of the way back](docs/DEPLOYMENT.md#the-lock-table-of-the-way-back));
 - the checks of [the module upgrade](docs/DEPLOYMENT.md#module-upgrade--u)
   find no other problem.
 
@@ -538,7 +544,8 @@ These steps move a server from v1.0.5, v1.0.6, v1.0.7 or v1.0.8 to v1.2.0.
 v1.2.0 has other Odoo modules than these releases, so the upgrade runs a
 **module upgrade** (`-u`): it saves the database and the attachments, upgrades
 the modules of the database one time, checks the result and starts v1.2.0. The
-data stays. Do the steps on the App server only; the DB server needs no step.
+data stays. Do the steps on the App server. The DB server needs a step only
+when its lock table is too small for the way back (see "Before you start").
 The commands use the deployment directory `/opt/perodua-app` and the database
 name `perodua`: if yours are others, use them in their place.
 [Upgrade to a new release](#upgrade-to-a-new-release) and
@@ -586,6 +593,34 @@ name `perodua`: if yours are others, use them in their place.
   its mail queue while it runs.
 - **The way back is the backup.** After the upgrade, the release that ran
   before cannot run on the database. See "The way back" at the end.
+- **The lock table of the DB server.** The way back restores the database in
+  one transaction. Until it ends, it holds a lock on each table, index,
+  sequence, constraint and type that it creates: about 10,500 for a UAT
+  database of v1.0.8. With a margin of 1,000, `max_locks_per_transaction` x
+  (`max_connections` + `max_prepared_transactions`) must be about 11,500 or
+  more. Step 11 counts it and refuses the upgrade before anything changes when
+  the room is too small. Show the settings, on the DB server:
+
+  ```bash
+  sudo -u postgres psql -X -At -c "SELECT current_setting('max_locks_per_transaction'), current_setting('max_connections'), current_setting('max_prepared_transactions')"
+  ```
+
+  PostgreSQL's defaults (`64|100|0`) give room for 6,400 locks: too few. To set
+  128 (room for 12,800), when nobody works in the system:
+
+  1. On the App server, from a `scripts` folder, stop the App:
+     `sudo bash service.sh --role app --dir /opt/perodua-app stop`
+  2. On the DB server, set the value for the cluster `main` of `deploy-db.sh`
+     (it writes `/etc/postgresql/16/main/postgresql.conf`):
+     `sudo pg_conftool 16 main set max_locks_per_transaction 128`
+  3. On the DB server, from its `scripts` folder, restart PostgreSQL:
+     `sudo bash service.sh --role db restart`. Then the command above shows
+     `128` first.
+  4. On the App server, from the same folder, start the App:
+     `sudo bash service.sh --role app --dir /opt/perodua-app start`
+
+  With another `max_connections`, use the value that the refusal of step 11
+  names.
 
 **The new `scripts` folder.** Start in the folder that holds the old `setup`
 folders. Keep them: the way back uses the folder of the release that runs now.
@@ -712,6 +747,12 @@ of v1.0.5 to v1.0.8. These steps make sure that they are still correct.
       `Database perodua has the modules of client-stable-uiux-v1.0.8 (fingerprint 3b62a97697d2974ef37328de7f3d034d). client-stable-uiux-v1.2.0 has other modules: this upgrade runs a module upgrade (-u) of 30 modules. N attachments.`
       The release is the one that runs now. A database that `--init-db` set
       up has 30 modules to upgrade;
+    - counts the locks of the way back. It shows
+      `Locks for the way back: restore.txt step 3 restores database perodua in one transaction and locks about N objects (...). With a margin of 1000 it needs M. The DB server has room for R: max_locks_per_transaction ...`.
+      When R is less than M, it stops with
+      `Database preflight: module upgrade refused: the way back would fail. ...`:
+      set the value that the line names (see "Before you start"), then do
+      step 11 again;
     - counts the data of the retired modules. `Retired data: none.` is the
       usual answer. If it lists tables, columns or attachments with a count,
       it stops with `The module upgrade deletes the retired data above`: get
@@ -887,15 +928,26 @@ modules: the old release then refuses the database.
 
 Follow `restore.txt` in the backup folder of step 12
 (`/opt/perodua-app/backups/TIME-client-stable-uiux-v1.0.8/restore.txt`), all
-of its steps, in order. It has the commands with the real paths:
+of its steps, in order, one command at a time. It has the commands with the
+real paths. Run steps 1 to 4 in the `scripts` folder of v1.2.0 (`restore.txt`
+names it) or of the old release: `service.sh` and `reset_database.py` are the
+same in both. Each command must end without an error, with exit status 0
+(`echo $?` shows `0`). If one fails, stop: do not run the next step. A failed
+step 3, for example, leaves the database empty.
 
-1. Stop the App.
-2. Empty the database. Run this command in a `scripts` folder:
-   `reset_database.py` is there.
+1. Stop the App. It shows `App stopped.`
+2. Empty the database. It shows only the `Container ... Creating` and
+   `Created` lines of Docker.
 3. Restore `database.dump`, with the tools of the Odoo image as the command
-   does. The `pg_restore` of the DB server cannot read the file.
+   does. The `pg_restore` of the DB server cannot read the file. It shows the
+   same Docker lines, and can also show lines that start with
+   `perl: warning: Setting locale failed` and
+   `perl: warning: Falling back to the standard locale`. They are harmless:
+   the Odoo image has no `en_US.UTF-8` locale. If it stops with
+   `out of shared memory`, raise `max_locks_per_transaction` on the DB server
+   as `restore.txt` says, then run steps 2 and 3 again.
 4. Put the attachments back. This also ends every sign-in: all users must
-   sign in again.
+   sign in again. It shows only the Docker lines.
 5. Copy `deployment-identity` and `app.env` from the backup folder back into
    the directory. Then go to the old `scripts` folder of the release that ran
    before (for v1.0.8, for example `../../setup-v1.0.8/scripts`) and deploy
@@ -907,7 +959,15 @@ of its steps, in order. It has the commands with the real paths:
 
    It shows `Deployment verified:` with the old release.
 
-The HTTPS configuration of step 10 can stay: v1.0.5 to v1.0.8 work with it.
+The App is down from step 1 to the end of step 5: about one minute when the
+images of the old release are still on the server (a test with v1.0.8: 50
+seconds for the commands, 45 seconds without the App), longer when step 5
+must pull them. Meanwhile the HTTPS names show an error such as
+`502 Bad Gateway`.
+
+The HTTPS configuration of step 10 can stay: v1.0.5 to v1.0.8 work with it,
+and no nginx step is needed. nginx keeps closing port 443 for a host name that
+is not in the table and for the server's IP address, as after step 10.
 When the cause is solved, do step 11 again from the folder of v1.2.0.
 
 ### From v1.0.3 or v1.0.4

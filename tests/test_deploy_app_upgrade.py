@@ -73,6 +73,10 @@ def deployed_preflight_is_new():
     # one this release wrote at the switch.
     with open(os.path.join(deploy_dir, 'preflight.py')) as f:
         return 'UPGRADE_PENDING' in f.read()
+def locks():
+    # The RESTORE_LOCKS line of upgrade-check: FAKE_LOCKS, or a database that
+    # fits the lock table of the DB server.
+    return 'RESTORE_LOCKS ' + os.environ.get('FAKE_LOCKS', '120 130 1000 64 100 0') + '\n'
 def module_db(cmd):
     # FAKE_DB: the database of a module upgrade, as a JSON file. Its modhash
     # is 'from' (the old modules), 'upgrading' (marked), 'upgraded' (checked
@@ -104,9 +108,9 @@ def module_db(cmd):
             if os.environ.get('FAKE_OTHER_FINGERPRINT'):
                 reply(code=1, err='Database preflight: database module fingerprint does not match this release, and is not the fingerprint this release upgrades modules from')
             retired = value('RETIRED', 'table perodua_transporter_rate 0|column stock_picking.perodua_dispatch_state 0')
-            reply(''.join('RETIRED ' + r + '\n' for r in retired.split('|'))
+            reply(''.join('RETIRED ' + r + '\n' for r in retired.split('|')) + locks()
                   + 'MODULES ' + value('MODULES', 'perodua_client_stable,perodua_ui') + '\nMODULE_UPGRADE 3')
-        reply('UPGRADE_PENDING 3' if state == 'upgraded' else 'READY 3')
+        reply('UPGRADE_PENDING 3' if state == 'upgraded' else locks() + 'READY 3')
     if mode == 'check':
         if state == 'upgraded':
             if '--accept-pending' in cmd: reply('UPGRADE_PENDING 3')
@@ -174,6 +178,8 @@ if args and args[0] == 'compose':
         if cmd[:2] == ['python3', '/opt/deploy/preflight.py']:
             if cmd[2] in ('check', 'upgrade-check'):
                 state = os.environ.get('FAKE_CHECK', '')
+                if cmd[2] == 'upgrade-check' and state.startswith('READY'):
+                    state = locks() + state
                 reply(state, 0 if state else 1, '' if state else os.environ.get('FAKE_CHECK_ERR', 'Database preflight: fixture'))
             if cmd[2] == 'public-urls':
                 code = int(os.environ.get('FAKE_PUBLIC_URLS_EXIT', '0'))
@@ -539,6 +545,24 @@ class UpgradeTests(UpgradeHarness, unittest.TestCase):
                       result.stdout)
         hint = (backup / 'restore.txt').read_text()
         self.assertIn(hint, result.stdout)  # printed as well
+        # How to run it: the folder, the exit status, the harmless warnings,
+        # the down time and the HTTPS front.
+        self.assertIn(f'  - Steps 1 to 4 run in a scripts folder of {OLD_RELEASE} or of {RELEASE}, such\n'
+                      f'    as {SCRIPTS} (this upgrade ran there): service.sh and\n'
+                      '    reset_database.py are in it, the same in both releases. Step 5 runs in a\n'
+                      f'    scripts folder of {OLD_RELEASE}.\n'
+                      '  - Each command must end without an error (exit status 0: echo $? shows 0).\n'
+                      '    If one fails, stop: do not run the next step.', hint)
+        for line in ('step 1 shows\n    "App stopped."', 'step 5 shows "Deployment verified:"\n    with',
+                     'lines that start with "perl: warning: Setting locale\n    failed"', 'They\n    are harmless',
+                     f'The App is down from step 1 to the end of step 5: about one minute when\n    the images of {OLD_RELEASE} '
+                     'are still on this server, longer when step 5\n    must pull them.',
+                     f'The HTTPS front (https.sh) can stay as it is: {OLD_RELEASE} works behind\n    it, so no nginx step is needed.',
+                     'At the backup it had room for 6400 locks, and this step\n   needed 1250 with a margin'):
+            self.assertIn(line, hint)
+        self.assertLess(hint.index('Run the commands in this order'), hint.index('1. Stop the App'))
+        self.assertIn('Locks for the way back:', result.stdout)
+        self.assertNotIn('Warning: with these settings', result.stdout)  # the default fixture fits
         for line in ('sudo bash service.sh --role app --dir ' + str(self.deploy_dir) + ' stop',
                      'odoo python3 - < reset_database.py',
                      'pg_restore --no-owner --no-acl --file=-',
@@ -555,6 +579,20 @@ class UpgradeTests(UpgradeHarness, unittest.TestCase):
             self.assertIn(line, hint)
         self.assertNotIn('deploy-app.sh --upgrade', hint)
         self.assertNotIn('fixture-password', hint)
+
+    def test_with_the_same_modules_a_lock_table_too_small_for_the_restore_is_a_warning(self):
+        # The way back without the data needs no restore: the upgrade goes on.
+        result = self.run_script(locks='5246 5440 1000 64 100 0')
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn('Locks for the way back: restore.txt step 3 restores database perodua in one transaction and locks '
+                      'about 10686 objects', result.stdout)
+        self.assertIn('Warning: with these settings, restore.txt step 3 stops with "out of shared memory" and leaves '
+                      f'database perodua empty. The way back without the data of the backup (the identity and app.env of '
+                      f'{OLD_RELEASE}, then its deploy-app.sh) needs no restore. To keep the way back with the data, set '
+                      'max_locks_per_transaction to 117 or more on the DB server and restart PostgreSQL.', result.stdout)
+        [backup] = self.backups()
+        self.assertIn('room for 6400 locks, and this step\n   needed 11686 with a margin: set max_locks_per_transaction to\n'
+                      '   117 or more there', (backup / 'restore.txt').read_text())
 
     def test_the_backup_runs_keep_no_container_log(self):
         # pg_dump and tar stream the backup to standard output; Docker's json-file

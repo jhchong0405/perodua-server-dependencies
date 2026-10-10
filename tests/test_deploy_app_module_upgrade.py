@@ -39,6 +39,15 @@ CONTAINER = 'perodua-upgrade-fixture-module-upgrade'
 # this file, byte for byte. If it changes, keep a copy of that one for the test
 # below: it is what the old scripts folder runs after the mark.
 OLD_SERVICE_SHA256 = 'b3c2533b5f2f7b78c6e2b2c036ce215dc8e306f56b96058ef8a4ddb13f1ce26c'
+# reset_database.py of the same kit versions. restore.txt runs both in a
+# scripts folder of the old or the new release, and says that they are the same.
+OLD_RESET_SHA256 = 'c752cb12030caf3928c66475640fb8803983dd2815e3c10230691f7e340f05c4'
+# The refusal of preflight.py when the backup does not fit the lock table.
+LOCKS_REFUSED = ('the way back would fail. restore.txt step 3 restores the backup of database perodua in one transaction, '
+                 'which locks about 10686 objects (5246 tables, indexes, sequences, views and TOAST tables, and 5440 '
+                 'constraints, types and other objects). With a margin of 1000 for the other sessions on the DB server, it '
+                 'needs 11686 locks, and the DB server has room for 6400: max_locks_per_transaction 64 x (max_connections 100 '
+                 '+ max_prepared_transactions 0)')
 
 BACKUP = ['staged backup size', 'running?', 'stop web odoo', 'staged pg_dump', 'staged pg_restore --list',
           'staged filestore archive']
@@ -278,6 +287,34 @@ class ModuleUpgradeTests(ModuleUpgradeFixture, unittest.TestCase):
                 self.assertIn('module upgrade refused: ' + reason, result.stdout)
                 self.assertIn('module upgrade refused: perodua_e2e is installed', result.stdout)
         self.env.pop('FAKE_REFUSE')
+
+    def test_the_lock_check_of_the_way_back(self):
+        # The numbers are in the output of the check, and in restore.txt step 3.
+        result = self.upgrade(locks='5000 900 1000 64 100 0')
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn('Locks for the way back: restore.txt step 3 restores database perodua in one transaction and locks '
+                      'about 5900 objects (5000 tables, indexes, sequences, views and TOAST tables, 900 constraints, types '
+                      'and other objects). With a margin of 1000 it needs 6900. The DB server has room for 6400: '
+                      'max_locks_per_transaction 64 x (max_connections 100 + max_prepared_transactions 0).', result.stdout)
+        [backup] = self.backups()
+        self.assertIn('   If it stops with "out of shared memory", the lock table of the DB server is\n'
+                      '   too small. At the backup it had room for 6400 locks, and this step\n'
+                      '   needed 6900 with a margin: set max_locks_per_transaction to\n'
+                      '   69 or more there, restart PostgreSQL, then run steps 2 and 3 again.\n'
+                      '4. Put the attachments back', (backup / 'restore.txt').read_text())
+
+    def test_a_lock_table_too_small_for_the_way_back_is_refused_before_the_app_stops(self):
+        result = self.upgrade(refuse=LOCKS_REFUSED)
+        self.assert_refused_before_the_stop(result, 'the module upgrade (-u) is refused for the reasons above')
+        self.assertIn('Database preflight: module upgrade refused: ' + LOCKS_REFUSED, result.stdout)
+        self.assertEqual(self.names(), ['pull', 'pull', 'staged preflight upgrade-check'])
+
+    def test_an_unreadable_lock_count_is_refused_before_the_app_stops(self):
+        for locks in ('5246 5440 1000 64 100', '5246 5440 1000 64 x 0', '5246 5440 1000 64 0 0'):
+            with self.subTest(locks=locks):
+                self.log.unlink(missing_ok=True)
+                result = self.upgrade(locks=locks)
+                self.assert_refused_before_the_stop(result, f'Unexpected lock count from the database check: {locks}')
 
     def test_retired_data_needs_drop_retired_data(self):
         retired = 'table perodua_transporter_rate 2|column stock_picking.perodua_dispatch_state 1|attachments perodua.transporter.rate 3'
@@ -583,6 +620,7 @@ class OldServiceShTests(ModuleUpgradeFixture, unittest.TestCase):
     def test_service_sh_is_the_one_of_the_old_releases(self):
         import hashlib
         self.assertEqual(hashlib.sha256((SCRIPTS / 'service.sh').read_bytes()).hexdigest(), OLD_SERVICE_SHA256)
+        self.assertEqual(hashlib.sha256((SCRIPTS / 'reset_database.py').read_bytes()).hexdigest(), OLD_RESET_SHA256)
 
     def test_old_service_sh_refuses_a_marked_database(self):
         # Before the switch: the directory's own preflight.py is the old one.

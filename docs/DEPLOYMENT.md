@@ -631,7 +631,11 @@ modules; a module upgrade adds its steps between 5 and 6.
 3. Check the database with the new image, from a staged copy of the new
    `compose.yml` in a temporary folder of the directory: same project, so the
    same network and attachments volume. The directory's own files are not
-   touched.
+   touched. The check also counts the locks of the way back and shows them
+   with the room of the DB server (`Locks for the way back: ...`); see
+   [The lock table of the way back](#the-lock-table-of-the-way-back). With the
+   same modules, too little room gives a warning: the way back without the
+   data needs no restore.
 4. Check the room for the backup: the size of the database
    (`pg_database_size`) and of `filestore/DB_NAME` together must fit in the free
    space of the backup folder's disk, or it stops and changes nothing. This is
@@ -701,6 +705,18 @@ instead. In short, on the App Server: stop the App
 (`service.sh --role app stop`); empty the database with `reset_database.py`, as
 `service.sh reset` does; restore `database.dump`; put the attachments back and
 delete the Odoo sessions; and deploy the release that the data belongs to.
+`restore.txt` also says how to run its commands: steps 1 to 4 in a `scripts`
+folder of the old or the new release (it names the folder of the upgrade;
+`service.sh` and `reset_database.py` are the same in both, which the tests
+pin), step 5 in a folder of the old release; one command at a time, each
+with exit status 0, and a stop at the first failure; what success looks like
+(`App stopped.`, only the `Container ... Creating`/`Created` lines of Docker,
+`Deployment verified:`); that the `perl: warning: Setting locale failed`
+lines of step 3 are harmless (the Odoo images set `LANG=en_US.UTF-8` and have
+only the `C`, `C.utf8` and `POSIX` locales); the down time (about one minute
+when the old images are on the server: 45 seconds in a test of v1.0.8, more
+when step 5 pulls them); and that the HTTPS front of `https.sh` stays as it
+is.
 After that, every user must sign in again. The restored database has the
 password hashes and the single-session values of the backup, so without the
 deletion a sign-in that ended after the backup (a sign-out, a new sign-in, a
@@ -716,6 +732,51 @@ empty, and you can run it again.
 `uninstall.sh --role app` deletes the directory and the backups in it. Its plan
 names them; copy them elsewhere first, or give `--backup-dir` a folder outside
 the directory.
+
+### The lock table of the way back
+
+Step 3 of `restore.txt` restores the backup in one transaction, so that a
+failure leaves an empty database to restore again, never half a database. Up
+to its commit, PostgreSQL keeps a lock on each object that it creates: each
+relation (table, index, sequence, view, materialized view, TOAST table and
+TOAST index), and, as PostgreSQL 16.15 records dependencies, each constraint,
+type, function, operator class and schema that a new object depends on. The
+REFRESH of a materialized view adds a new heap. All these locks must fit in
+the lock table of the DB server, which is shared by all its sessions. If they
+do not, step 3 stops with `out of shared memory` and the App stays down.
+
+`preflight.py upgrade-check` counts these objects in the database (catalog
+rows with an OID from 16384, without temporary objects) and reads the size of
+the lock table: `max_locks_per_transaction` x (`max_connections` +
+`max_prepared_transactions`), as the PostgreSQL documentation gives it. It
+prints both as `RESTORE_LOCKS`; `deploy-app.sh` shows them as
+`Locks for the way back: ...`. The need is the count plus a margin of 1,000:
+the locks that other sessions on the DB server hold while step 3 runs
+(autovacuum, other databases, monitoring; the App is stopped), about 15
+sessions at the default of 64, and the restore's few locks outside the count.
+
+Measured with PostgreSQL 16.15, the `pg_dump` 18 of the release image and the
+command of step 3, on an Odoo 19 database of this project (888 tables, 5,246
+relations): `pg_locks` at the end of the restore held 10,679 objects in the
+lock table: the 5,246 relations, 4,470 constraints, 917 types, 28 functions
+and 18 other objects. The count gives 10,686. So the restore needs about twice
+as many locks as there are relations. The restore passed with
+`max_locks_per_transaction` 54 and stopped with `out of shared memory` at 52
+(with `max_connections` 100): PostgreSQL 16 also sizes the table for its
+background processes, and a full table takes free shared memory. Nothing
+promises that room, so the check uses the documented size.
+
+With a module upgrade, the backup is the only way back, and too little room
+refuses the upgrade before anything changes. The message gives the two numbers
+and the value of `max_locks_per_transaction` that gives the room. Set it in
+`postgresql.conf` of the DB server (`deploy-db.sh` does not set it; for its
+cluster `main`: `sudo pg_conftool 16 main set max_locks_per_transaction 128`),
+then restart PostgreSQL (`sudo bash service.sh --role db restart`, with the App
+stopped before and started after). PostgreSQL's default of 64 with 100
+connections (room for 6,400) is too small for a UAT database of v1.0.8 (about
+10,500 objects). With the same modules, too little room is a warning: the way
+back without the data needs no restore. `restore.txt` gives the two numbers at
+step 3.
 
 ## Module upgrade (-u)
 
@@ -762,6 +823,7 @@ upgrade-check`) of the new image lists every problem it finds:
 | No sample data | Neither `perodua_demo.seed_mode` nor a `MODULE.sample_data` parameter is set; `perodua_demo.seed_mode` is not `none`; a `MODULE.sample_data` is not `none`; or `perodua_demo.seeded` is set. |
 | Reference codes | The XML ID of a shipped holiday type, order cycle or customer category still exists, its record was deleted, and another record has its code. The upgrade would create the record again and stop on the unique code. (A user's record with the code and no XML ID is adopted by the new release.) |
 | Retired data | The retired modules left data (below), and `--drop-retired-data` is not given. The second count, with the App stopped, also finds the data that users wrote after the first check. |
+| The lock table of the way back | The locks that step 3 of `restore.txt` takes, plus a margin of 1,000, do not fit in `max_locks_per_transaction` x (`max_connections` + `max_prepared_transactions`) of the DB server. See [The lock table of the way back](#the-lock-table-of-the-way-back). |
 | The modules of the upgrade | `uat_guard.py guard`, with the modules that `-u` upgrades, finds that one of them needs `perodua_demo_client`. |
 | The confirmation | You do not type the database name, or `--confirm` names another one. With `--non-interactive`, `--confirm DATABASE` is required. |
 

@@ -148,7 +148,7 @@ docker run --rm -v "$VOL:/var/lib/odoo" --user 0 --entrypoint bash "$IMAGE" -ec 
     # restore_hint of deploy-app.sh, with the variables it reads.
     # shellcheck disable=SC2034
     DEPLOY_DIR=/opt/perodua-app PROJECT_NAME=perodua-client-uiux BACKUP_DIR=$WORK RELEASE=client-stable-uiux-v1.0.5 \
-        OLD_RELEASE=client-stable-uiux-v1.0.4 DB_NAME=perodua DB_HOST=192.0.2.20 DB_PORT=5432
+        OLD_RELEASE=client-stable-uiux-v1.0.4 DB_NAME=perodua DB_HOST=192.0.2.20 DB_PORT=5432 SCRIPT_DIR=$KIT/scripts
     eval "$(sed -n '/^restore_hint() {/,/^}/p; /^go_back_steps() {/,/^}/p' deploy-app.sh)"
     restore_hint
 ) > "$WORK/restore.txt"
@@ -177,6 +177,7 @@ files_after=$(attachments)
 docker run --rm -v "$VOL:/var/lib/odoo" --entrypoint bash "$IMAGE" -c '! test -e /var/lib/odoo/sessions' 2>/dev/null \
     || fail 'the restore left the sessions of the Odoo session store'
 grep -q 'Every user must sign in again' "$WORK/restore.txt" || fail 'restore.txt does not say that every user must sign in again'
+grep -q 'exit status 0' "$WORK/restore.txt" || fail 'restore.txt does not say that each command must end with exit status 0'
 printf 'restored: %s (relations, rows, logins, sequence, extensions, function, view, inherited rows)\n' "$after"
 printf 'restored attachments, owner and content: %s; sessions removed (before: %s)\n' \
     "$(paste -sd ';' - <<< "$files_after")" "$(grep '^sessions/' <<< "$files_before" | paste -sd ';' -)"

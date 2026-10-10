@@ -429,6 +429,31 @@ deploy_ok preflight_fixture
 python3 "$SOURCE_DIR/tests/check_app_preflight.py" "$SOURCE_DIR/scripts" "$TEST_DIR" preflight_fixture app_preflight "$TEST_DIR/app.password"
 pass "deploy-app.sh preflight on a DB_MODE=empty database: EMPTY, SETUP_UNMARKED, persisted SETUP_PENDING marker, post-init assertions, READY stamp, restored-database test unchanged"
 
+# The module upgrade's preflight on real PostgreSQL (test_preflight_module_upgrade.py
+# with PREFLIGHT_TEST_PG), the lock check of the way back included: on this
+# cluster, then on a small one (10 locks x 20 connections) that has no room
+# for the restore of its fixture.
+admin_sql -d postgres -c "CREATE ROLE preflight_pg LOGIN PASSWORD 'preflight-pg-password' NOSUPERUSER NOCREATEDB NOCREATEROLE" \
+    -c 'CREATE DATABASE preflight_pg OWNER preflight_pg'
+PREFLIGHT_TEST_PG='127.0.0.1 5432 preflight_pg preflight-pg-password preflight_pg' \
+    python3 -m unittest discover -s "$SOURCE_DIR/tests" -p test_preflight_module_upgrade.py > "$TEST_DIR/preflight-pg.log" 2>&1 \
+    || { cat "$TEST_DIR/preflight-pg.log" >&2; die 'test_preflight_module_upgrade.py failed on PostgreSQL'; }
+pg_createcluster 16 locks -p 5433 > "$TEST_DIR/locks-cluster.log"
+pg_conftool 16 locks set max_locks_per_transaction 10
+pg_conftool 16 locks set max_connections 20
+pg_ctlcluster 16 locks start
+admin_sql -p 5433 -d postgres -c "CREATE ROLE preflight_pg LOGIN PASSWORD 'preflight-pg-password' NOSUPERUSER NOCREATEDB NOCREATEROLE" \
+    -c 'CREATE DATABASE preflight_pg OWNER preflight_pg'
+[[ $(admin_sql -p 5433 -d postgres -c "SELECT current_setting('max_locks_per_transaction')::int * current_setting('max_connections')::int") == 200 ]] \
+    || die 'the small cluster does not have a lock table of 200'
+PREFLIGHT_TEST_PG='127.0.0.1 5433 preflight_pg preflight-pg-password preflight_pg' \
+    python3 -m unittest discover -s "$SOURCE_DIR/tests" -p test_preflight_module_upgrade.py -k test_the_lock_count_is_what_a_restore_locks \
+    > "$TEST_DIR/preflight-pg-locks.log" 2>&1 \
+    || { cat "$TEST_DIR/preflight-pg-locks.log" >&2; die 'the lock check failed on the small cluster'; }
+grep -q '^Ran 1 test' "$TEST_DIR/preflight-pg-locks.log" || die 'the lock test did not run on the small cluster'
+pg_dropcluster --stop 16 locks
+pass 'deploy-app.sh preflight of the module upgrade on PostgreSQL; the lock count of the way back agrees with pg_locks of a one-transaction restore, and a server without room for it is refused'
+
 python3 "$SOURCE_DIR/tests/check-https-download.py" "$SOURCE_DIR/scripts" "$TEST_DIR"
 assert_sql https_restored 'SELECT count(*) FROM public.res_users' 2
 assert_absent https_refused
