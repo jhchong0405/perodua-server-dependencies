@@ -129,6 +129,7 @@ pass 'check-config validates without creating a database or deployment state'
 pg_ctlcluster 16 main stop
 write_conf restored app_restored
 deploy_ok restored
+cp "$TEST_DIR/restored.log" "$TEST_DIR/restored-first.log"
 assert_sql restored 'SELECT reference || chr(58) || amount FROM public.business_records ORDER BY id' $'ORDER-001:123.45\nORDER-002:500.00'
 assert_sql restored 'SELECT fixture_total()' 623.45
 assert_sql restored 'SELECT count(*) FROM public.active_fixture_users' 2
@@ -146,6 +147,42 @@ deploy_ok restored
 assert_sql restored "SELECT count(*) FROM public.business_records WHERE reference='AFTER-DEPLOY'" 1
 assert_sql postgres "SELECT oid FROM pg_database WHERE datname='restored'" "$restored_oid"
 pass 'same-backup rerun preserves database identity and post-deployment writes'
+
+# The lock table of the way back of deploy-app.sh --upgrade: the first
+# deployment set 128 and restarted PostgreSQL once; a rerun changes nothing, a
+# higher value stays, and a lower one in postgresql.auto.conf is refused with
+# postgresql.conf put back and no restart (the running 256 stays).
+assert_sql postgres 'SHOW max_locks_per_transaction' 128
+[[ $(pg_conftool 16 main show max_locks_per_transaction) == 'max_locks_per_transaction = 128' ]] \
+    || die 'postgresql.conf does not set max_locks_per_transaction 128'
+grep -q 'max_locks_per_transaction set to 128 in /etc/postgresql/16/main/postgresql.conf' "$TEST_DIR/restored-first.log" \
+    || die 'the first deployment did not report max_locks_per_transaction'
+[[ $(grep -c 'Restarting PostgreSQL for the new settings' "$TEST_DIR/restored-first.log") == 1 ]] \
+    || die 'the first deployment did not restart PostgreSQL once'
+started=$(admin_sql -d postgres -c 'SELECT pg_postmaster_start_time()')
+deploy_ok restored
+[[ $(admin_sql -d postgres -c 'SELECT pg_postmaster_start_time()') == "$started" ]] || die 'a rerun restarted PostgreSQL'
+! grep -q 'max_locks_per_transaction set\|Restarting PostgreSQL' "$TEST_DIR/restored.log" || die 'a rerun changed the settings'
+pg_conftool 16 main set max_locks_per_transaction 256
+pg_ctlcluster 16 main restart
+started=$(admin_sql -d postgres -c 'SELECT pg_postmaster_start_time()')
+deploy_ok restored
+assert_sql postgres 'SHOW max_locks_per_transaction' 256
+[[ $(admin_sql -d postgres -c 'SELECT pg_postmaster_start_time()') == "$started" ]] || die 'a higher value restarted PostgreSQL'
+pg_conftool 16 main set max_locks_per_transaction 128
+admin_sql -d postgres -c 'ALTER SYSTEM SET max_locks_per_transaction = 64'
+config_before=$(hash_file /etc/postgresql/16/main/postgresql.conf)
+deploy_fails restored
+grep -q 'max_locks_per_transaction is overridden by another configuration file (such as postgresql.auto.conf) with 64, less than 128' \
+    "$TEST_DIR/restored.log" || die 'the lower value in postgresql.auto.conf was not named'
+[[ $(hash_file /etc/postgresql/16/main/postgresql.conf) == "$config_before" ]] || die 'the refused run did not put postgresql.conf back'
+[[ $(admin_sql -d postgres -c 'SELECT pg_postmaster_start_time()') == "$started" ]] || die 'the refused run restarted PostgreSQL'
+assert_sql postgres 'SHOW max_locks_per_transaction' 256
+admin_sql -d postgres -c 'ALTER SYSTEM RESET max_locks_per_transaction'
+pg_ctlcluster 16 main restart
+assert_sql postgres 'SHOW max_locks_per_transaction' 128
+assert_sql restored "SELECT count(*) FROM public.business_records WHERE reference='AFTER-DEPLOY'" 1
+pass 'max_locks_per_transaction 128 for the way back: set with one restart, unchanged on a rerun, a higher value kept, a lower postgresql.auto.conf value refused with postgresql.conf put back and no restart'
 
 mv /var/lib/perodua-db-deploy/16-main/restored/success /var/lib/perodua-db-deploy/16-main/restored/pending
 deploy_ok restored
@@ -301,14 +338,16 @@ current_listener=$(admin_sql -d postgres -c 'SHOW listen_addresses')
 admin_sql -d postgres -c "ALTER SYSTEM SET listen_addresses = '$current_listener'"
 config_before=$(hash_file /etc/postgresql/16/main/postgresql.conf)
 hba_before=$(hash_file /etc/postgresql/16/main/pg_hba.conf)
+started=$(admin_sql -d postgres -c 'SELECT pg_postmaster_start_time()')
 write_conf overridden_listener app_overridden
 sed -i 's/^DB_LISTEN_IP=.*/DB_LISTEN_IP=127.0.0.3/' "$TEST_DIR/overridden_listener.conf"
 deploy_fails overridden_listener
 assert_absent overridden_listener
 [[ $(hash_file /etc/postgresql/16/main/postgresql.conf) == "$config_before" ]] || die 'failed network setup did not restore postgresql.conf'
 [[ $(hash_file /etc/postgresql/16/main/pg_hba.conf) == "$hba_before" ]] || die 'failed network setup did not restore pg_hba.conf'
+[[ $(admin_sql -d postgres -c 'SELECT pg_postmaster_start_time()') == "$started" ]] || die 'the refused listen address restarted PostgreSQL'
 admin_sql -d postgres -c 'ALTER SYSTEM RESET listen_addresses'
-pass 'auto.conf listener override refused with original PostgreSQL and HBA configuration restored'
+pass 'auto.conf listener override refused with original PostgreSQL and HBA configuration restored, without a restart'
 
 # ── DB_MODE=empty ────────────────────────────────────────────────────────────
 STATE_ROOT=/var/lib/perodua-db-deploy/16-main
@@ -429,6 +468,31 @@ deploy_ok preflight_fixture
 python3 "$SOURCE_DIR/tests/check_app_preflight.py" "$SOURCE_DIR/scripts" "$TEST_DIR" preflight_fixture app_preflight "$TEST_DIR/app.password"
 pass "deploy-app.sh preflight on a DB_MODE=empty database: EMPTY, SETUP_UNMARKED, persisted SETUP_PENDING marker, post-init assertions, READY stamp, restored-database test unchanged"
 
+# The module upgrade's preflight on real PostgreSQL (test_preflight_module_upgrade.py
+# with PREFLIGHT_TEST_PG), the lock check of the way back included: on this
+# cluster, then on a small one (10 locks x 20 connections) that has no room
+# for the restore of its fixture.
+admin_sql -d postgres -c "CREATE ROLE preflight_pg LOGIN PASSWORD 'preflight-pg-password' NOSUPERUSER NOCREATEDB NOCREATEROLE" \
+    -c 'CREATE DATABASE preflight_pg OWNER preflight_pg'
+PREFLIGHT_TEST_PG='127.0.0.1 5432 preflight_pg preflight-pg-password preflight_pg' \
+    python3 -m unittest discover -s "$SOURCE_DIR/tests" -p test_preflight_module_upgrade.py > "$TEST_DIR/preflight-pg.log" 2>&1 \
+    || { cat "$TEST_DIR/preflight-pg.log" >&2; die 'test_preflight_module_upgrade.py failed on PostgreSQL'; }
+pg_createcluster 16 locks -p 5433 > "$TEST_DIR/locks-cluster.log"
+pg_conftool 16 locks set max_locks_per_transaction 10
+pg_conftool 16 locks set max_connections 20
+pg_ctlcluster 16 locks start
+admin_sql -p 5433 -d postgres -c "CREATE ROLE preflight_pg LOGIN PASSWORD 'preflight-pg-password' NOSUPERUSER NOCREATEDB NOCREATEROLE" \
+    -c 'CREATE DATABASE preflight_pg OWNER preflight_pg'
+[[ $(admin_sql -p 5433 -d postgres -c "SELECT current_setting('max_locks_per_transaction')::int * current_setting('max_connections')::int") == 200 ]] \
+    || die 'the small cluster does not have a lock table of 200'
+PREFLIGHT_TEST_PG='127.0.0.1 5433 preflight_pg preflight-pg-password preflight_pg' \
+    python3 -m unittest discover -s "$SOURCE_DIR/tests" -p test_preflight_module_upgrade.py -k test_the_lock_count_is_what_a_restore_locks \
+    > "$TEST_DIR/preflight-pg-locks.log" 2>&1 \
+    || { cat "$TEST_DIR/preflight-pg-locks.log" >&2; die 'the lock check failed on the small cluster'; }
+grep -q '^Ran 1 test' "$TEST_DIR/preflight-pg-locks.log" || die 'the lock test did not run on the small cluster'
+pg_dropcluster --stop 16 locks
+pass 'deploy-app.sh preflight of the module upgrade on PostgreSQL; the lock count of the way back is at least what pg_locks shows before the commit of a one-transaction restore, and a server without room for it is refused'
+
 python3 "$SOURCE_DIR/tests/check-https-download.py" "$SOURCE_DIR/scripts" "$TEST_DIR"
 assert_sql https_restored 'SELECT count(*) FROM public.res_users' 2
 assert_absent https_refused
@@ -512,8 +576,17 @@ SERVICE="$SOURCE_DIR/scripts/service.sh"
 shellcheck "$SERVICE"
 write_empty_conf reset_fixture app_reset
 deploy_ok reset_fixture
+# The control of the check needs a server with PostgreSQL's default lock table
+# (64), as a DB server that deploy-db.sh did not set up has: deploy-db.sh set
+# 128 here. Back to 128 after it.
+admin_sql -d postgres -c 'ALTER SYSTEM SET max_locks_per_transaction = 64'
+pg_ctlcluster 16 main restart
+assert_sql postgres 'SHOW max_locks_per_transaction' 64
 python3 "$SOURCE_DIR/tests/check_reset_database.py" "$SOURCE_DIR/scripts" "$TEST_DIR" reset_fixture app_reset "$TEST_DIR/app.password" \
     > "$TEST_DIR/reset-database.log" 2>&1 || { cat "$TEST_DIR/reset-database.log" >&2; die 'reset_database.py check failed'; }
+admin_sql -d postgres -c 'ALTER SYSTEM RESET max_locks_per_transaction'
+pg_ctlcluster 16 main restart
+assert_sql postgres 'SHOW max_locks_per_transaction' 128
 pass 'reset (reset_database.py) empties an Odoo-shaped database that a one-shot drop cannot, changes nothing on a failed login, keeps the database, its owner and access, and leaves it EMPTY for deploy-app.sh --init-db'
 
 service_ok() {
@@ -537,11 +610,17 @@ service_ok service-status-down status
 grep -q '^16  *main  *5432  *down ' "$TEST_DIR/service-status-down.log" || die 'status does not show the cluster down'
 service_ok service-stop-again stop
 grep -q 'already stopped' "$TEST_DIR/service-stop-again.log" || die 'a second stop did not say the cluster is already stopped'
+# The readiness probe of start logs no failed login (as root it logged
+# 'FATAL:  role "root" does not exist' at each start).
+PG_LOG=/var/log/postgresql/postgresql-16-main.log
+log_lines=$(wc -l < "$PG_LOG")
 service_ok service-start start
 service_ok service-restart restart
+service_ok service-start-running start
+if tail -n +"$((log_lines + 1))" "$PG_LOG" | grep 'FATAL'; then die 'service.sh --role db start or restart left a FATAL line in the PostgreSQL log'; fi
 [[ $(admin_sql -d postgres -c 'SELECT string_agg(datname, $$,$$ ORDER BY datname) FROM pg_database') == "$databases" ]] \
     || die 'the databases changed across stop, start and restart'
-pass 'service.sh --role db: status, stop (closing and reporting an open connection), a repeated stop, start and restart; the databases stay'
+pass 'service.sh --role db: status, stop (closing and reporting an open connection), a repeated stop, start and restart (no FATAL line in the PostgreSQL log); the databases stay'
 
 # ── one server: PostgreSQL on Docker's address starts after Docker ─────────────
 # A stub Docker reports 127.0.0.6 as a Docker network address of this server;

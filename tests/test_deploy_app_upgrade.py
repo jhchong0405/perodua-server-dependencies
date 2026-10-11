@@ -32,7 +32,8 @@ ODOO_IMAGE = re.search(r'^ODOO_IMAGE=(\S+)$', TEXT, re.M).group(1)
 OLD_RELEASE = 'client-stable-uiux-v1.0.3'
 OLD_REVISION = 'a' * 40
 DUMP = b'PGDMP fixture archive\n'
-FINGERPRINT = 'Database preflight: database module fingerprint does not match this release; upgrades require a separate plan'
+FINGERPRINT = ('Database preflight: database module fingerprint does not match this release, '
+               'and is not the fingerprint this release upgrades modules from')
 
 FAKE_DOCKER = r'''#!/usr/bin/env python3
 import io, json, os, sys, tarfile
@@ -65,21 +66,122 @@ if args and args[0] == 'info': reply('linux/x86_64' if '--format' in args else '
 if args and args[0] in ('ps', 'pull'): reply()
 if args[:2] in (['volume', 'ls'], ['network', 'ls']): reply()
 if args[:2] == ['volume', 'inspect']: reply()
+if args[:2] == ['rm', '-f']: reply()
+STAGED = args[:1] == ['compose'] and args[4] != os.path.join(deploy_dir, 'compose.yml')
+def deployed_preflight_is_new():
+    # The directory's preflight.py: the fixture of an earlier release, or the
+    # one this release wrote at the switch.
+    with open(os.path.join(deploy_dir, 'preflight.py')) as f:
+        return 'UPGRADE_PENDING' in f.read()
+def locks():
+    # The RESTORE_LOCKS line of upgrade-check: FAKE_LOCKS, or a database that
+    # fits the lock table of the DB server.
+    return 'RESTORE_LOCKS ' + os.environ.get('FAKE_LOCKS', '120 130 1000 64 100 0') + '\n'
+def module_db(cmd):
+    # FAKE_DB: the database of a module upgrade, as a JSON file. Its modhash
+    # is 'from' (the old modules), 'upgrading' (marked), 'upgraded' (checked
+    # after -u) or 'new' (stamped). Each preflight answers as the real one.
+    mode = cmd[2]
+    with open(os.environ['FAKE_DB']) as f:
+        db = json.load(f)
+    def save():
+        with open(os.environ['FAKE_DB'], 'w') as f:
+            json.dump(db, f)
+    state = db['modhash']
+    if mode in ('check', 'upgrade-check') and not (STAGED or deployed_preflight_is_new()):
+        # The preflight.py of v1.0.5 to v1.0.8: READY for its own modules only.
+        if state == 'from': reply('READY 3')
+        reply(code=1, err='Database preflight: database module fingerprint does not match this release; upgrades require a separate plan')
+    if state == 'upgrading' and mode != 'verify-upgrade':
+        reply(code=1, err='Database preflight: database is marked by a module upgrade that did not finish (perodua.image_modhash upgrading:fixture): no release can run on it.')
+    if mode == 'upgrade-check':
+        # The second check of a run (with the App stopped) answers from the
+        # FAKE_*_AGAIN values when they are set: what users changed in between.
+        with open(os.environ['FAKE_DOCKER_LOG']) as f:
+            second = sum('upgrade-check' in json.loads(line)['args'] for line in f) > 1
+        def value(name, default=''):
+            again = os.environ.get('FAKE_' + name + '_AGAIN') if second else None
+            return again if again is not None else os.environ.get('FAKE_' + name, default)
+        if value('REFUSE'):
+            # A refusal for the lock table comes with its numbers on standard output.
+            reply(locks().strip() if 'the way back can fail' in value('REFUSE') else '', 1,
+                  '\n'.join('Database preflight: module upgrade refused: ' + r for r in value('REFUSE').split('|')))
+        if state == 'from':
+            if os.environ.get('FAKE_OTHER_FINGERPRINT'):
+                reply(code=1, err='Database preflight: database module fingerprint does not match this release, and is not the fingerprint this release upgrades modules from')
+            retired = value('RETIRED', 'table perodua_transporter_rate 0|column stock_picking.perodua_dispatch_state 0')
+            reply(''.join('RETIRED ' + r + '\n' for r in retired.split('|')) + locks()
+                  + 'MODULES ' + value('MODULES', 'perodua_client_stable,perodua_ui') + '\nMODULE_UPGRADE 3')
+        reply('UPGRADE_PENDING 3' if state == 'upgraded' else locks() + 'READY 3')
+    if mode == 'check':
+        if state == 'upgraded':
+            if '--accept-pending' in cmd: reply('UPGRADE_PENDING 3')
+            reply(code=1, err='Database preflight: the module upgrade of this database to this release is checked but not finished')
+        reply('READY 3') if state == 'new' else reply(code=1, err='Database preflight: database module fingerprint does not match this release; upgrades require a separate plan')
+    if mode == 'mark-upgrading':
+        # 3: refused before any write; another code: failed before the write;
+        # FAKE_MARK_LOST: the mark is committed, then the answer is lost.
+        code = int(os.environ.get('FAKE_MARK_EXIT', '0'))
+        if code == 3: reply(code=3, err='Database preflight: module upgrade refused: perodua_demo.seed_mode is full, not none')
+        if code: reply(code=code, err='Database preflight: fixture')
+        db['modhash'] = 'upgrading'; save()
+        if os.environ.get('FAKE_MARK_LOST'): reply(code=1, err='psycopg2.OperationalError: server closed the connection unexpectedly')
+        reply('MARKED')
+    if mode == 'verify-upgrade':
+        if os.environ.get('FAKE_VERIFY_EXIT'): reply(code=1, err='Database preflight: the upgraded database is not right: perodua_ui is to upgrade')
+        db['modhash'] = 'upgraded'; save()
+        reply('Cron jobs: 5 flags put back as before the upgrade.\n'
+              'Cron jobs: perodua_orders_ext.cron_pull_pss_orders stays off: it reads the mock feed while its system resolves to mock.\n'
+              'Mail held (state exception) until deploy-app.sh --release-queued-mail: 2 that the upgrade queued,'
+              ' 1 that waited in the queue before it.\n'
+              + os.environ.get('FAKE_VERIFIED', 'UPGRADE_VERIFIED 2 1'))
+    if mode == 'stamp-upgrade':
+        if state != 'upgraded': reply(code=1, err='Database preflight: stamp-upgrade does not apply')
+        db['modhash'] = 'new'; save(); reply('READY 3')
+    if mode == 'release-mail':
+        reply(os.environ.get('FAKE_RELEASED', 'RELEASED 2 1')) if state == 'new' else reply(code=1, err='Database preflight: fixture')
+    if mode == 'retired-export':
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode='w:gz') as archive:
+            data = b'id,perodua_dispatch_state\n7,packing\n'
+            info = tarfile.TarInfo('retired-data/columns/stock_picking.perodua_dispatch_state.csv')
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
+        sys.stdout.buffer.write(buffer.getvalue())
+        sys.exit(int(os.environ.get('FAKE_EXPORT_EXIT', '0')))
 if args and args[0] == 'compose':
     action = args[5 + 2 * len(overrides):]
     if action[:1] == ['config']: reply()
     if action == ['ps', '--quiet', '--status', 'running']:
         reply('0123456789ab' if os.environ.get('FAKE_RUNNING') == '1' else '')
     if action[:1] == ['stop']: reply()
+    if action == ['rm', '--stop', '--force', 'odoo', 'web']: reply()
     if action[:1] == ['up']: reply(code=int(os.environ.get('FAKE_UP_EXIT', '0')))
     if action[:1] == ['exec']:
         sys.stdin.read()
         reply(code=int(os.environ.get('FAKE_HTTP_EXIT', '0')))
     if action[:1] == ['run']:
         cmd = action[action.index('odoo') + 1:]
+        if cmd[:2] == ['python3', '/opt/deploy/preflight.py'] and os.environ.get('FAKE_DB') and cmd[2] != 'public-urls':
+            module_db(cmd)
+        if cmd[:2] == ['python3', '/opt/deploy/uat_guard.py']:
+            if cmd[2] == 'guard':
+                code = int(os.environ.get('FAKE_GUARD_EXIT', '0'))
+                reply(json.dumps({'verdict': 'refused' if code else 'accepted'}), code,
+                      'UAT guard: REFUSED: fixture' if code else 'UAT guard: accepted: fixture')
+            if cmd[2] == 'demo-flag': reply('--without-demo=True')
+        if cmd[:2] == ['bash', '-c'] and ' -u ' in cmd[2]:
+            if os.environ.get('FAKE_U_HANG'):  # a long -u: say so, then take a while
+                import time
+                open(os.environ['FAKE_U_HANG'], 'w').close()
+                time.sleep(float(os.environ.get('FAKE_U_SECONDS', '30')))
+                open(os.environ['FAKE_U_HANG'] + '.finished', 'w').close()
+            reply('fake odoo -u', int(os.environ.get('FAKE_U_EXIT', '0')))
         if cmd[:2] == ['python3', '/opt/deploy/preflight.py']:
-            if cmd[2] == 'check':
+            if cmd[2] in ('check', 'upgrade-check'):
                 state = os.environ.get('FAKE_CHECK', '')
+                if cmd[2] == 'upgrade-check' and state.startswith('READY'):
+                    state = locks() + state
                 reply(state, 0 if state else 1, '' if state else os.environ.get('FAKE_CHECK_ERR', 'Database preflight: fixture'))
             if cmd[2] == 'public-urls':
                 code = int(os.environ.get('FAKE_PUBLIC_URLS_EXIT', '0'))
@@ -121,7 +223,8 @@ sys.exit(93)
 '''
 
 
-class UpgradeTests(unittest.TestCase):
+class UpgradeHarness:
+    """The directory of an earlier release, the fake Docker and its record."""
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='perodua-upgrade-')
         self.addCleanup(self.temp.cleanup)
@@ -190,7 +293,7 @@ class UpgradeTests(unittest.TestCase):
             if action[:1] == ['run']:
                 cmd = action[action.index('odoo') + 1:]
                 if cmd[:2] == ['python3', '/opt/deploy/preflight.py']:
-                    step = 'preflight ' + cmd[2]
+                    step = 'preflight ' + cmd[2] + (' --accept-pending' if '--accept-pending' in cmd else '')
                 elif cmd[:2] == ['python3', '-c']:
                     step = 'filestore check'
                 elif cmd[:2] == ['bash', '-c'] and 'pg_database_size' in cmd[2]:
@@ -199,12 +302,18 @@ class UpgradeTests(unittest.TestCase):
                     step = 'pg_dump'
                 elif cmd[:2] == ['bash', '-c'] and 'tar -czf' in cmd[2]:
                     step = 'filestore archive'
+                elif cmd[:2] == ['bash', '-c'] and ' -u ' in cmd[2]:
+                    step = 'odoo -u'
+                elif cmd[:2] == ['python3', '/opt/deploy/uat_guard.py']:
+                    step = 'uat_guard ' + cmd[2]
                 else:
                     step = ' '.join(cmd)
             elif action[:1] == ['up']:
                 step = 'up' if '--force-recreate' in action else 'restart'
             elif action[:1] == ['ps']:
                 step = 'running?'
+            elif action == ['rm', '--stop', '--force', 'odoo', 'web']:
+                step = 'remove the containers'
             elif action[:1] == ['exec']:
                 step = 'http verify'
             else:
@@ -235,6 +344,9 @@ class UpgradeTests(unittest.TestCase):
             self.assertNotIn('--update', entry['args'])
             self.assertFalse(any(a == '-i' for a in entry['args']), entry['args'])
 
+
+
+class UpgradeTests(UpgradeHarness, unittest.TestCase):
     # ── refused before anything changes ─────────────────────────────────────
     def test_another_project_database_server_or_user_is_refused(self):
         for key, value in (('PROJECT_NAME', 'perodua-other'), ('DB_NAME', 'perodua_uat'), ('DB_HOST', '192.0.2.99'),
@@ -250,10 +362,10 @@ class UpgradeTests(unittest.TestCase):
 
     def test_a_module_fingerprint_mismatch_is_refused_before_the_app_stops(self):
         result = self.run_script(check='', check_err=FINGERPRINT)
-        self.assert_nothing_changed(result, '--upgrade never upgrades modules (-u); a module upgrade needs its own plan')
+        self.assert_nothing_changed(result, 'It upgrades modules (-u) only from the modules of v1.0.3 to v1.0.8')
         self.assertIn(FINGERPRINT, result.stdout)
         # The new release's image checks the database; the App keeps running.
-        self.assertEqual(self.step_names(), ['pull', 'pull', 'staged preflight check'])
+        self.assertEqual(self.step_names(), ['pull', 'pull', 'staged preflight upgrade-check'])
         self.assert_never_upgrades_modules()
 
     def test_a_database_that_is_not_ready_is_refused(self):
@@ -263,7 +375,7 @@ class UpgradeTests(unittest.TestCase):
                 result = self.run_script(check=check, check_err=err)
                 message = f'the check of perodua reports {check}' if check else 'The database check above failed'
                 self.assert_nothing_changed(result, message)
-                self.assertEqual(self.step_names(), ['pull', 'pull', 'staged preflight check'])
+                self.assertEqual(self.step_names(), ['pull', 'pull', 'staged preflight upgrade-check'])
 
     def test_the_release_the_directory_already_runs_is_refused(self):
         self.deployed(RELEASE, REVISION)
@@ -308,7 +420,7 @@ class UpgradeTests(unittest.TestCase):
         self.assertEqual((self.deploy_dir / '.deployment-identity').read_text(), self.identity)
 
     # ── a backup that fails ─────────────────────────────────────────────────
-    BACKUP_STEPS = ['pull', 'pull', 'staged preflight check', 'staged backup size', 'running?', 'stop web odoo',
+    BACKUP_STEPS = ['pull', 'pull', 'staged preflight upgrade-check', 'staged backup size', 'running?', 'stop web odoo',
                     'staged pg_dump', 'staged pg_restore --list', 'staged filestore archive']
 
     def test_a_failed_backup_stops_before_the_switch_and_starts_the_old_app_again(self):
@@ -394,8 +506,8 @@ class UpgradeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout)
         steps = self.steps()
         self.assertEqual([name for name, _ in steps], self.BACKUP_STEPS + [
-            'preflight check', 'filestore check', 'stop web odoo', 'preflight public-urls', 'up', 'http verify'])
-        switch = [name for name, _ in steps].index('preflight check')
+            'preflight check --accept-pending', 'filestore check', 'stop web odoo', 'preflight public-urls', 'up', 'http verify'])
+        switch = [name for name, _ in steps].index('preflight check --accept-pending')
         # Up to the switch, the directory named the old release and its own
         # compose file was used only to see and stop its App.
         self.assertEqual({release for _, release in steps[:switch]}, {OLD_RELEASE})
@@ -435,6 +547,44 @@ class UpgradeTests(unittest.TestCase):
                       result.stdout)
         hint = (backup / 'restore.txt').read_text()
         self.assertIn(hint, result.stdout)  # printed as well
+        # How to run it: the folder, the exit status, the harmless warnings,
+        # the down time and the HTTPS front.
+        self.assertIn(f'  - Steps 1 to 4 run in a scripts folder of {OLD_RELEASE} or of {RELEASE}, such\n'
+                      f'    as {SCRIPTS} (this upgrade ran there): service.sh and\n'
+                      '    reset_database.py are in it, and do the same in both releases. Step 5\n'
+                      f'    runs in a scripts folder of {OLD_RELEASE}.\n'
+                      '  - Each command must end without an error (exit status 0: echo $? shows 0).\n'
+                      '    If one fails, stop: do not run the next step.', hint)
+        for line in ('step 1 shows\n    "App stopped."', 'steps 2 and 4 show only the "Container ... Creating" and\n'
+                     '    "Created" lines of Docker, step 3 shows these two lines and the perl\n    warnings below',
+                     f'step 5 shows "Deployment verified:" with\n    {OLD_RELEASE}.',
+                     'The App is down from step 1 to the end of step 5. In a test with a\n    database of 112 MB, that was about '
+                     'one minute. The time grows with the\n    size of the database (step 3) and of the attachments (step 4).\n'
+                     '    Before this backup: database perodua 2 MB, attachments 1 MB.\n'
+                     f'    Step 5 takes longer when it must pull the images of\n    {OLD_RELEASE}. Meanwhile',
+                     f'The HTTPS front (https.sh) can stay as it is: {OLD_RELEASE} works behind\n    it, so no nginx step is needed.',
+                     # The room was enough at the backup: no value to set.
+                     '   At the backup, the lock table of the DB server had room for 6400 locks,\n'
+                     '   and this step can need 1250 with a margin: the room was enough. If it\n'
+                     '   stops with "out of shared memory", check on the DB server that\n'
+                     '   max_locks_per_transaction is still 64 or more (this changes nothing):\n'
+                     '     sudo -u postgres psql -X -At -c "SHOW max_locks_per_transaction"\n4. Put the attachments back'):
+            self.assertIn(line, hint)
+        self.assertNotIn('pg_conftool', hint)
+        # The perl warnings of step 3, line by line as the restore of the test
+        # with v1.0.8 printed them two times, with its tabs, after an indent.
+        self.assertIn('  - Step 3 shows these 7 lines two times, for its pg_restore and its psql.\n'
+                      '    They are harmless: the Odoo image has no en_US.UTF-8 locale.\n', hint)
+        shown = hint.split('the Odoo image has no en_US.UTF-8 locale.\n', 1)[1].splitlines()[:7]
+        self.assertEqual([line[:6] for line in shown], ['      '] * 7)
+        self.assertEqual([line[6:] for line in shown], [
+            'perl: warning: Setting locale failed.', 'perl: warning: Please check that your locale settings:',
+            '\tLANGUAGE = (unset),', '\tLC_ALL = (unset),', '\tLANG = "en_US.UTF-8"',
+            '    are supported and installed on your system.', 'perl: warning: Falling back to the standard locale ("C").'])
+        self.assertNotIn('would fail', result.stdout)
+        self.assertLess(hint.index('Run the commands in this order'), hint.index('1. Stop the App'))
+        self.assertIn('Locks for the way back:', result.stdout)
+        self.assertNotIn('Warning: with these settings', result.stdout)  # the default fixture fits
         for line in ('sudo bash service.sh --role app --dir ' + str(self.deploy_dir) + ' stop',
                      'odoo python3 - < reset_database.py',
                      'pg_restore --no-owner --no-acl --file=-',
@@ -451,6 +601,51 @@ class UpgradeTests(unittest.TestCase):
             self.assertIn(line, hint)
         self.assertNotIn('deploy-app.sh --upgrade', hint)
         self.assertNotIn('fixture-password', hint)
+
+    def test_with_the_same_modules_a_lock_table_too_small_for_the_restore_is_a_warning(self):
+        # The way back without the data needs no restore: the upgrade goes on.
+        result = self.run_script(locks='5246 5440 1000 64 100 0')
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn('Locks for the way back: restore.txt step 3 restores database perodua in one transaction and can '
+                      'lock up to 10686 objects', result.stdout)
+        self.assertIn('Warning: with these settings, restore.txt step 3 can stop with "out of shared memory" and leave '
+                      f'database perodua empty. The way back without the data of the backup (the identity and app.env of '
+                      f'{OLD_RELEASE}, then its deploy-app.sh) needs no restore. To keep the way back with the data, set '
+                      'max_locks_per_transaction to 128 on the DB server and restart PostgreSQL there, with the App stopped '
+                      '(README.md, "The lock table of the DB server", gives the steps).', result.stdout)
+        [backup] = self.backups()
+        self.assertIn('room for 6400 locks, and this step can\n   need 11686 with a margin.', (backup / 'restore.txt').read_text())
+        self.assertIn('sudo pg_conftool 16 main set max_locks_per_transaction 128\n', (backup / 'restore.txt').read_text())
+
+    def test_a_db_server_at_256_with_the_room_gets_no_value_to_set(self):
+        # deploy-db.sh keeps a higher value. Room enough at the backup:
+        # restore.txt names no value to set.
+        result = self.run_script(locks='5246 5856 1000 256 100 0')
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertNotIn('Warning: with these settings', result.stdout)
+        [backup] = self.backups()
+        hint = (backup / 'restore.txt').read_text()
+        self.assertIn('room for 25600 locks,\n   and this step can need 12102 with a margin: the room was enough.', hint)
+        self.assertIn('max_locks_per_transaction is still 256 or more (this changes nothing)', hint)
+        self.assertNotIn('pg_conftool', hint)
+
+    def test_a_db_server_at_256_without_the_room_gets_more(self):
+        # 12102 locks over 40 connections: 303 each, more than 256.
+        result = self.run_script(locks='5246 5856 1000 256 40 0')
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn('set max_locks_per_transaction to 303 on the DB server', result.stdout)
+        [backup] = self.backups()
+        hint = (backup / 'restore.txt').read_text()
+        self.assertIn('too small: at the backup it had room for 10240 locks, and this step can\n   need 12102 with a margin.', hint)
+        self.assertIn('     sudo pg_conftool 16 main set max_locks_per_transaction 303\n', hint)
+
+    def test_a_database_that_needs_more_than_128_locks_per_connection_gets_its_own_value(self):
+        # 11686 locks over 50 connections: 234 each.
+        result = self.run_script(locks='5246 5440 1000 64 50 0')
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn('set max_locks_per_transaction to 234 on the DB server', result.stdout)
+        [backup] = self.backups()
+        self.assertIn('sudo pg_conftool 16 main set max_locks_per_transaction 234\n', (backup / 'restore.txt').read_text())
 
     def test_the_backup_runs_keep_no_container_log(self):
         # pg_dump and tar stream the backup to standard output; Docker's json-file
@@ -470,7 +665,7 @@ class UpgradeTests(unittest.TestCase):
         result = self.run_script(db_kb=str(2 ** 50), fs_kb='1024')
         self.assert_nothing_changed(result, 'Not enough room for the backup on the disk of')
         self.assertIn('give --backup-dir on a disk with more room', result.stdout)
-        self.assertEqual(self.step_names(), ['pull', 'pull', 'staged preflight check', 'staged backup size'])
+        self.assertEqual(self.step_names(), ['pull', 'pull', 'staged preflight upgrade-check', 'staged backup size'])
         # a size it cannot read stops it as well
         self.log.unlink()
         result = self.run_script(db_kb='', fs_kb='1024')

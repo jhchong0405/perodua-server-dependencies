@@ -323,11 +323,11 @@ class GuardTests(unittest.TestCase):
         self.assertEqual(report['unused_reviews'],
                          ["perodua_client_stable/hooks.pyc: constant 'perodua_demo_client.loaded'"])
 
-    def test_shipped_review_is_pinned_to_one_file(self):
-        self.assertEqual(len(uat_guard.REVIEWED_REFERENCES), 1)
-        review = uat_guard.REVIEWED_REFERENCES[0]
-        self.assertRegex(review['sha256'], r'^[0-9a-f]{64}$')
-        self.assertEqual(review['file'], 'perodua_demo/hooks.pyc')
+    def test_shipped_reviews_are_pinned_to_two_files(self):
+        self.assertEqual([review['file'] for review in uat_guard.REVIEWED_REFERENCES],
+                         ['perodua_demo/hooks.pyc', 'perodua_demo/supply_seed.pyc'])
+        for review in uat_guard.REVIEWED_REFERENCES:
+            self.assertRegex(review['sha256'], r'^[0-9a-f]{64}$')
 
 
 class NormalizationTests(unittest.TestCase):

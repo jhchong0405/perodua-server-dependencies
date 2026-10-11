@@ -176,7 +176,19 @@ HBA rules are preserved. Existing listener addresses are preserved and the reque
 address is added. Adding a listener may restart this PostgreSQL cluster, briefly
 disconnecting its other sessions; deploy on the intended DB server during its
 setup/maintenance window. Configuration snapshots are retained; failed network
-configuration is rolled back.
+configuration is rolled back (with a restart only when PostgreSQL had already
+restarted with the change).
+
+`max_locks_per_transaction` is set to 128 in `postgresql.conf` when the value
+that PostgreSQL reads at its next start is lower; a higher value stays. It
+takes a restart of the cluster, in the same way (one restart for both). A
+running value below 128 also restarts it. A lower value in another
+configuration file (such as `postgresql.auto.conf` from `ALTER SYSTEM`) is
+refused: `postgresql.conf` is put back, and PostgreSQL is not restarted (the
+running server did not change). The way back of
+`deploy-app.sh --upgrade` needs this room: see
+[The lock table of the way back](#the-lock-table-of-the-way-back). A run on a DB
+server that has 128 or more changes nothing. `uninstall.sh` keeps the value.
 
 **Host and cloud firewalls are not modified.** If `APP_CIDR` is set, allow TCP
 `PG_PORT` from that source using your existing firewall management, then test from
@@ -393,8 +405,9 @@ The App preflight reports the database as `EMPTY`, and the script then:
    that installs it, or its name in code, SQL and data files, including the
    compiled `.pyc` files and spreadsheet files the image ships. Mentions in
    comments and descriptions do not count. One reference in
-   `perodua_demo/hooks.pyc` was reviewed and is accepted only while that file's
-   SHA-256 is unchanged. A file it cannot read also stops the initialization.
+   `perodua_demo/hooks.pyc` and one in `perodua_demo/supply_seed.pyc` were
+   reviewed, and each is accepted only while the SHA-256 of its file is
+   unchanged. A file it cannot read also stops the initialization.
 2. Detects the image's Odoo version and uses the matching option to disable Odoo
    demo data (`--without-demo=True` on Odoo 19), after checking with that
    Odoo's own option parser that it does disable it. An unknown version stops
@@ -444,7 +457,9 @@ campaigns, routes, calendars, forecasts, IDDIs, orders or invoices; the EBS and
 PROMISE registers (Master Integration, Customer Rank, Supplier Classification,
 freight agents) are empty; and so are Holiday Types, Order Cycles, Order Types,
 Customer Type, Payment Method and Retail Price List, which administrators fill
-in on those pages with **+ New**. Currencies lists only MYR: from v1.0.3 the
+in on those pages with **+ New**. From v1.2.0, Order Types starts with two
+rows, Export Order and IHC / Engineering Order, which pages of the workspaces
+use. Currencies lists only MYR: from v1.0.3 the
 other currencies Odoo ships are removed, so any currency can be added there with
 **+ New** (enter its ISO code, symbol and rounding). What is set up:
 
@@ -460,7 +475,8 @@ Two things to know when filling in the lists:
 - Sale orders take their processing method (Part-to-Part, Campaign,
   Special-Monthly) and channel (Stockist, Export) from the order types the
   release used to ship. Order types created in the workbench are not
-  recognized: their orders count as Normal, with no channel.
+  recognized: their orders count as Normal, with no channel. From v1.2.0 the
+  release ships Export Order and IHC / Engineering Order again.
 - Campaigns target customers by customer type code. Give the service-centre
   type the code `CAT-SERVICE` and the body-and-paint type `CAT-BP`.
 
@@ -473,23 +489,27 @@ screens that pick from them (for example an EBS supplier to activate, or an OEM
 material) have nothing to offer.
 
 The integrations run in mock mode (`perodua_integration.mode`). The mock
-PROMISE, PSS and PSOS feeds start empty, and the two scheduled pulls that turn
-the mock PROMISE part feed and the mock PSS order feed into records are switched
-off: *PROMISE: consume Part Master feed* and the PSS order pull. Switch them on
-again under Settings > Technical > Scheduled Actions once real systems are
-connected. Demo Control's Reset & Reseed is refused on such a database, because
-it would load the sample data.
+PROMISE, PSS and PSOS feeds start empty, and the scheduled pulls that turn a
+mock feed into records are switched off: *PROMISE: consume Part Master feed*
+and the PSS order pull, and from v1.2.0 also the PSOS and P-Circle order
+pulls. Switch them on again under Settings > Technical > Scheduled Actions
+once real systems are connected. Up to v1.0.8, Demo Control's Reset & Reseed
+is refused on such a database, because it would load the sample data; from
+v1.2.0 there is no Demo Control.
 
-A database initialized with v1.0.0 to v1.0.2 cannot be used with v1.0.8: its
+A database initialized with v1.0.0 to v1.0.2 cannot be used with v1.2.1: its
 module fingerprint differs and the App refuses it. Run
-`sudo bash service.sh --role app reset` from the v1.0.8 `scripts` folder on the
+`sudo bash service.sh --role app reset` from the v1.2.1 `scripts` folder on the
 App Server (see [Stop, start and reset](#stop-start-and-reset-servicesh); it
-deletes the data), or uninstall both servers and initialize again. v1.0.8 has
-the same Odoo modules as v1.0.7, v1.0.6, v1.0.5, v1.0.4 and v1.0.3, so a directory deployed with
-one of them keeps its data with `sudo bash deploy-app.sh --upgrade` from the
-v1.0.8 `scripts` folder (see [Upgrade to a new release](#upgrade-to-a-new-release-keeping-the-data-deploy-appsh---upgrade),
+deletes the data), or uninstall both servers and initialize again. v1.2.1 has
+other Odoo modules than v1.0.3 to v1.0.8, which have the same modules among
+themselves. A directory deployed with v1.0.5, v1.0.6, v1.0.7 or v1.0.8 keeps
+its data with `sudo bash deploy-app.sh --upgrade` from the v1.2.1 `scripts`
+folder, which runs a module upgrade (see [Module upgrade (-u)](#module-upgrade--u),
 and the steps in the README:
-[Upgrade an App server to v1.0.8](../README.md#upgrade-an-app-server-to-v108)).
+[Upgrade an App server to v1.2.1](../README.md#upgrade-an-app-server-to-v121)).
+A directory of v1.0.3 or v1.0.4 must first move to v1.0.8, with the `scripts`
+folder of kit commit `8867545`, which pins v1.0.8.
 Without `--upgrade` such a directory is refused, because it records its release.
 
 If the initialization stops after the modules are installed, for example on a
@@ -588,9 +608,9 @@ deployment directory (default `/opt/perodua-app`) to that release. The
 database, the attachments volume and the settings in `app.env` stay. A plain
 `deploy-app.sh` refuses a directory that another release deployed and points to
 `--upgrade`. `--upgrade` does not combine with `--init-db` or `--check-config`.
-For the move to v1.0.8 (from v1.0.4 to v1.0.7), the README gives the steps in
-order, HTTPS and the acceptance checks included:
-[Upgrade an App server to v1.0.8](../README.md#upgrade-an-app-server-to-v108).
+For the move to v1.2.1 (from v1.0.5 to v1.0.8, with a module upgrade), the
+README gives the steps in order, HTTPS and the acceptance checks included:
+[Upgrade an App server to v1.2.1](../README.md#upgrade-an-app-server-to-v121).
 
 **What it requires.** Each check below stops the upgrade before anything
 changes:
@@ -600,7 +620,7 @@ changes:
 | The directory is a deployment | It has no `.deployment-identity`, or its first deployment never used its database (`.deployment-unverified`). |
 | The same deployment | `.deployment-identity` differs from the new one in anything but `release=` and `revision=`: the project, the database server (`host=`, `port=`), the database or the user. The message names the values that differ. |
 | Another release | The directory already runs this release: run `deploy-app.sh` without `--upgrade`. |
-| The same Odoo modules | The database check (`preflight.py check`) of the new image does not report `READY`, for example when the module fingerprint differs. |
+| The same Odoo modules | The database check of the new image (`preflight.py upgrade-check`) does not report `READY`, for example when the module fingerprint differs. A release that upgrades the modules of this database reports `MODULE_UPGRADE` instead: see [Module upgrade (-u)](#module-upgrade--u), which adds its own checks. |
 
 The **module fingerprint** is the MD5 of the `__manifest__.py` files of all
 `perodua_*` modules in the image, read in name order. A fresh UAT
@@ -610,8 +630,12 @@ stays the same while no byte of any of these manifests changes and no module
 folder is added or removed. A release that changes only controllers, other
 Python code or the web page has the same fingerprint. A new module version, a
 new data file or a new dependency changes it. Such a release needs a module
-upgrade (`-u`), which `--upgrade` never runs: it stops with "a module upgrade
-needs its own plan" and changes nothing.
+upgrade (`-u`). `--upgrade` runs one only from the fingerprint that
+`MODULE_UPGRADE_FROM` in `deploy-app.sh` names
+(`3b62a97697d2974ef37328de7f3d034d`, the modules of v1.0.3 to v1.0.8); with
+any other fingerprint it stops, says which fingerprint it upgrades from, and
+changes nothing. The steps below are those of an upgrade with the same
+modules; a module upgrade adds its steps between 5 and 6.
 
 **The steps, in order:**
 
@@ -620,7 +644,11 @@ needs its own plan" and changes nothing.
 3. Check the database with the new image, from a staged copy of the new
    `compose.yml` in a temporary folder of the directory: same project, so the
    same network and attachments volume. The directory's own files are not
-   touched.
+   touched. The check also counts the locks that the way back can take and
+   shows them with the room of the DB server (`Locks for the way back: ...`);
+   see [The lock table of the way back](#the-lock-table-of-the-way-back). With
+   the same modules, too little room gives a warning: the way back without the
+   data needs no restore.
 4. Check the room for the backup: the size of the database
    (`pg_database_size`) and of `filestore/DB_NAME` together must fit in the free
    space of the backup folder's disk, or it stops and changes nothing. This is
@@ -681,13 +709,31 @@ The failure message after the switch and step 5 of `restore.txt` print these
 commands with the real paths. This works because both releases have the same
 modules. A `scripts` folder of the old release that has `--upgrade` can also
 run `sudo bash deploy-app.sh --upgrade --dir DIR`, which takes a new backup
-first.
+first. It does not work after a module upgrade, such as the move to v1.2.1:
+from its mark on, the old release refuses the database, and `restore.txt` is
+the only way back (see [Module upgrade (-u)](#module-upgrade--u)).
 
 To also put the data back as it was before the upgrade, follow `restore.txt`
 instead. In short, on the App Server: stop the App
 (`service.sh --role app stop`); empty the database with `reset_database.py`, as
 `service.sh reset` does; restore `database.dump`; put the attachments back and
 delete the Odoo sessions; and deploy the release that the data belongs to.
+`restore.txt` also says how to run its commands: steps 1 to 4 in a `scripts`
+folder of the old or the new release (it names the folder of the upgrade;
+`service.sh` and `reset_database.py` are the same in both, which the tests
+pin), step 5 in a folder of the old release; one command at a time, each
+with exit status 0, and a stop at the first failure; what success looks like
+(`App stopped.`; only the `Container ... Creating`/`Created` lines of Docker
+for steps 2 and 4; these lines and two blocks of 7 `perl: warning` lines for
+step 3; `Deployment verified:`); that the `perl: warning` lines of step 3 are
+harmless (one block for its `pg_restore`, one for its `psql`: the Odoo images
+set `LANG=en_US.UTF-8` and have only the `C`, `C.utf8` and `POSIX` locales),
+with the 7 lines; the down time (about one minute for a database of 112 MB
+when the old images are on the server: 45 seconds in a test of v1.0.8; it
+grows with the size of the database and of the attachments, which
+`restore.txt` gives as they were before the backup, and step 5 takes longer
+when it pulls the images); and that the HTTPS front of `https.sh` stays as it
+is.
 After that, every user must sign in again. The restored database has the
 password hashes and the single-session values of the backup, so without the
 deletion a sign-in that ended after the backup (a sign-out, a new sign-in, a
@@ -703,6 +749,376 @@ empty, and you can run it again.
 `uninstall.sh --role app` deletes the directory and the backups in it. Its plan
 names them; copy them elsewhere first, or give `--backup-dir` a folder outside
 the directory.
+
+### The lock table of the way back
+
+Step 3 of `restore.txt` restores the backup in one transaction, so that a
+failure leaves an empty database to restore again, never half a database (a
+database with large objects is the exception: `pg_restore` writes a `COMMIT`
+for them; Odoo databases of this project have none). Up to its commit,
+PostgreSQL keeps a lock on each relation that the restore creates or reads,
+and, as PostgreSQL 16.15 records dependencies, on each object that a new
+object depends on. All these locks must fit in the lock table of the DB
+server, which is shared by all its sessions. If they do not, step 3 can stop
+with `out of shared memory`; the database is then empty and the App stays
+down.
+
+`preflight.py upgrade-check` counts the objects that the restore can lock and
+reads the size of the lock table: `max_locks_per_transaction` x
+(`max_connections` + `max_prepared_transactions`), as the PostgreSQL
+documentation gives it. It prints both as `RESTORE_LOCKS`; `deploy-app.sh`
+shows them as `Locks for the way back: ...`. The count covers the kinds of
+objects in the list below, more rather than less. It is not a proof for each
+possible database: it is measured and tested on the databases in the table
+below, and the kit's lock test (`tests/test_preflight_module_upgrade.py`,
+on PostgreSQL in each integration run) compares it with the locks of each
+catalog on its own fixture. The margin of 1,000 covers the small rest. For
+the Odoo database of this project, the real restore passes with less than
+half of the counted need. The count has:
+
+- each relation from OID 16384 outside temporary schemas (tables, indexes,
+  sequences, views, materialized views, TOAST tables and their indexes), and
+  each materialized view once more for the new heap of its `REFRESH` (three
+  times when it has TOAST);
+- each object from OID 16384 outside temporary schemas in `pg_constraint`,
+  `pg_type` (an array type only when an object depends on it), `pg_proc`,
+  `pg_operator`, `pg_opclass`, `pg_opfamily`, `pg_collation`,
+  `pg_conversion`, `pg_ts_config`, `pg_ts_dict`, `pg_ts_parser`,
+  `pg_ts_template`, `pg_statistic_ext`, `pg_namespace`, `pg_extension`,
+  `pg_language`, `pg_am`, `pg_cast`, `pg_transform`,
+  `pg_foreign_data_wrapper`, `pg_foreign_server`, `pg_event_trigger`,
+  `pg_publication`, `pg_largeobject_metadata`, `pg_rewrite` (rules, and the
+  rule of each view) and `pg_policy`;
+- each trigger from OID 16384 that is not internal: a trigger of a
+  partitioned table (the restore locks it, because its clone on each
+  partition depends on it) and its clones, constraint triggers and triggers
+  with `DEPENDS ON EXTENSION`; each internal trigger that another object
+  depends on or that has a comment; and each internal trigger of a
+  partitioned table or of a partition. A partition can have its own copy of
+  a foreign key of its table. The restore makes the copy and the key one:
+  PostgreSQL drops the triggers of the copy on the referenced table (and,
+  when that table is partitioned, the constraints and triggers of the copy
+  on its partitions), and keeps a lock on each until the commit. The copy
+  has as many triggers on the partition as it loses on a referenced table
+  that is not partitioned. The other internal triggers, those of foreign
+  keys between tables that are not partitioned, are not locked and not
+  counted (an Odoo database of this project has about 13,000, and no
+  partitioned table);
+- each column with a default of a table that is an `INHERITS` child (not a
+  partition), and each inherited column of such a child whose parent column
+  has a default. `pg_dump` creates the child, which then gets a copy of each
+  default of its parent, and then sets each inherited default apart
+  (`DEFAULT NULL` when the child has none): PostgreSQL deletes the copy and
+  keeps a lock on it until the commit. A partition gets its defaults in its
+  own `CREATE TABLE`, so it has no such lock. An Odoo database of this
+  project has 5 `INHERITS` children (those of `ir_actions`), each with the
+  default of its `id`: they count 5, and the restore locks none of them,
+  because `pg_dump` sets the `serial` default of `ir_actions` after it
+  creates the children;
+- each object below OID 16384 that such an object depends on (such as the
+  schema `public` and `plpgsql`), and each system relation (413 in
+  PostgreSQL 16: `CREATE COLLATION` and views can keep a lock on one);
+- each role and tablespace from OID 16384, two types for each materialized
+  view (the row type of the new heap and its array type), and the
+  transaction ID.
+
+The need is the count plus a margin of 1,000 for the locks that other
+sessions on the DB server hold while step 3 runs (autovacuum, other
+databases, monitoring; the App is stopped): about 15 sessions at the default
+of 64. The margin also covers the small rest that the count does not have,
+such as the objects that the install script of an extension makes and drops
+in step 3: their locks stay until the commit, but no catalog shows them
+afterwards. Measured, for one extension each: `cube` 14, `seg` 14,
+`intarray` 12, `hstore` 4, all the other trusted extensions 0 (`pg_trgm` and
+`unaccent`, which this project uses, included).
+
+Measured with PostgreSQL 16.15, the `pg_dump` 18 of the release image and the
+command of step 3, with `pg_locks` before the commit (the locks in the lock
+table, not the 16 fast-path slots of the session):
+
+| Database | Locks held | Count |
+| --- | --- | --- |
+| Odoo 19 database of this project (888 tables, 5,246 relations) | 10,677 | 11,141 |
+| Odoo-shaped fixture (700 models, 150 many2many tables, `CHECK` constraints) | 12,489 | 13,645 |
+| Each kind of object above (20 trusted extensions, collations, text search, user array columns, enum, composite, domain and range types, populated materialized views, functions, operators, casts, partitions with foreign keys, rules, policies, a constraint trigger, a trigger with `DEPENDS ON EXTENSION`), made by the owner | 1,456 | 2,186 |
+| 400 populated materialized views, 300 enum array columns, 300 row-type array columns, 20 text search configurations, 20 collations | 7,457 | 8,269 |
+| A partitioned table with 2 partitions and 32,000 row triggers, made by the owner | 32,022 | 96,434 |
+| A table with 20 partitions and 50 foreign keys to a table with 30 partitions, and a copy of each key on each partition (1,000), made by the owner | 94,861 | 103,374 |
+| A table with 100 partitions and 200 foreign keys to a table that is not partitioned, and a copy of each key on each partition (20,000), made by the owner | 61,011 | 121,424 |
+| A table with 40 columns with a default and 200 `INHERITS` children, made by the owner | 8,804 | 9,219 |
+| The same, with the 40 defaults dropped on each child, made by the owner | 8,804 | 9,219 |
+
+The rows from the second to the seventh were measured before the inherited
+defaults came into the count, which can only make their count larger.
+
+The trigger database shows why each trigger counts: before, only a trigger
+with a comment counted, so the check gave 1,434 with the margin and found
+room with 128 x 100 (12,800), and step 3 then stopped with
+`out of shared memory` and left the database empty. Now it refuses there and
+names 975, and step 3 passes with 975. The two databases with copies of
+foreign keys show why the internal triggers of partitions count: without
+them, the count of the first was 34,174, the check found room from 352
+(with 100 connections), and step 3 stopped with `out of shared memory` at
+352, 455, 506 and 507 (it passed from 508). Now the check finds room from
+1,044, and step 3 passes there. The two databases with `INHERITS` children
+show why the inherited defaults count: without them, the count of each was
+1,219, the check found room from 23, and step 3 stopped with
+`out of shared memory` at 23 (the first database also at 33 and 41; it
+passed from 42). The children of the second database have no default of
+their own, so a count of the defaults of the children gives 0 there. Now
+the check finds room from 103 for each.
+
+The Odoo database needs about twice as many locks as it has relations: each
+constraint and each row type is also locked. The restore of the Odoo database
+passed with `max_locks_per_transaction` 54 (room for 5,400, less than half of
+the counted need of 12,141) and stopped with `out of shared memory` at 53
+(with `max_connections` 100): PostgreSQL 16 also sizes the table for its
+background processes, and a full table takes free shared memory. Nothing
+promises that room, so the check uses the documented size.
+
+With a module upgrade, the backup is the only way back, and too little room
+refuses the upgrade before anything changes (and at the second check, with the
+App stopped, with the same reason). The refusal gives the two numbers and the
+value to set: 128, the value of the DB servers of this project, or more when
+the database needs more. `deploy-app.sh` then prints the steps. PostgreSQL's
+default of 64 with 100 connections (room for 6,400) is too small for an Odoo
+database of this project (about 12,100 with the margin). With the same
+modules, too little room is a warning: the way back without the data needs no
+restore. `restore.txt` gives the two numbers at step 3, and the command
+that sets the value only when the room at the backup was too small; else it
+says that the room was enough. The value to set is never lower than the value
+that the DB server has.
+
+`deploy-db.sh` sets 128 on a new DB server. On a DB server that it set up
+earlier, show the value and the room (this changes nothing):
+
+```bash
+sudo -u postgres psql -X -At -c "SELECT current_setting('max_locks_per_transaction'), current_setting('max_connections'), current_setting('max_prepared_transactions'), current_setting('max_locks_per_transaction')::int * (current_setting('max_connections')::int + current_setting('max_prepared_transactions')::int)"
+```
+
+It shows `max_locks_per_transaction|max_connections|max_prepared_transactions|room`,
+such as `64|100|0|6400`. Set 128 only when the first number is lower than
+128. When a refusal names another value, set that value only when the first
+number is lower than it. Never lower a higher value. Do it when nobody works
+in the system:
+
+1. On the App server, stop the App:
+   `sudo bash service.sh --role app --dir /opt/perodua-app stop`
+2. On the DB server, set the value for the PostgreSQL 16 cluster `main` of
+   `deploy-db.sh` (for another `PG_CLUSTER` in its `deploy.conf`, use that
+   name): `sudo pg_conftool 16 main set max_locks_per_transaction 128`
+   (or the value that the refusal names)
+3. On the DB server, in the `scripts` folder of `deploy-db.sh`, restart
+   PostgreSQL: `sudo bash service.sh --role db restart`
+4. On the DB server, run the query above again: it shows `128|100|0|12800`
+   (with 100 connections and 128).
+5. On the App server, start the App:
+   `sudo bash service.sh --role app --dir /opt/perodua-app start`
+
+A run of `deploy-db.sh` of this kit on that DB server does steps 2 and 3 too
+when the value is lower than 128 (a higher value stays), but stop the App
+before it.
+
+## Module upgrade (-u)
+
+`sudo bash deploy-app.sh --upgrade [--dir PATH] [--backup-dir PATH] [--confirm DATABASE] [--drop-retired-data]`
+
+A release whose Odoo modules differ from those of the database (from v1.2.0)
+upgrades them in the same `--upgrade`: one run of Odoo with `-u`, between the
+backup and the switch. A release with the same modules (v1.0.3 to v1.0.8
+among themselves) never does: its database check reports `READY`, and the
+upgrade goes on as in the chapter above. `deploy-app.sh` pins this:
+
+| Setting | Value |
+| --- | --- |
+| `MODULE_UPGRADE_FROM` | `3b62a97697d2974ef37328de7f3d034d`: the module fingerprint of v1.0.3 to v1.0.8. The only fingerprint a module upgrade starts from. |
+| `OLD_RELEASES_ACCEPTED` | `client-stable-uiux-v1.0.5` to `client-stable-uiux-v1.0.8`: the releases the directory may run. |
+
+The pinned release, v1.2.1, has the fingerprint
+`d7335a5c60803bc8be0f227d80c21639` (33 `perodua_*` modules in its image). After
+the upgrade, `perodua.image_modhash` holds this value. A database that v1.2.0
+upgraded has `c4b1b3383aa17134cdd42b3cee9dbf55`: no module upgrade starts from
+it.
+
+**Point of no return.** After the backup, the upgrade marks the database and
+removes the containers of the old release. From then on the old release cannot
+run on it, and the only way back is to restore the backup (`restore.txt`, all
+of its steps). Do that only before users write data with the new release: the
+restore loses all data written after the backup. After that point, fix forward.
+
+**What it requires.** Each check below stops the upgrade before the App stops,
+and nothing changes. The App runs during these checks, so users can still
+write. For this reason the database checks run again after the backup, with
+the App stopped: `upgrade-check` (step 5) and `mark-upgrading` (step 6). If
+one of them refuses, nothing was written to the database, the old App starts
+again and the backup stays. The database check (`preflight.py
+upgrade-check`) of the new image lists every problem it finds:
+
+| Check | Refused when |
+| --- | --- |
+| The fingerprint | The database has another fingerprint than `MODULE_UPGRADE_FROM` (and than the new release). |
+| The old release | The directory runs a release that is not in `OLD_RELEASES_ACCEPTED`. Upgrade it to one of them first. |
+| A UAT database | `perodua.uat_init` is not `complete`. A restored database (set up without `--init-db`) is out of scope. |
+| Modules that must not be there | `perodua_demo_client`, `perodua_reporting` or `perodua_e2e` is installed, or `ir_model_data` has rows of `perodua_demo_client`. |
+| Known modules | An installed `perodua_*` module is not in the new release, other than the retired `perodua_hw_sim`, `perodua_supplier_transport_ext` and `perodua_warehouse_ext` (the upgrade uninstalls them) and `perodua_demo_client_ui`. |
+| No version goes down | An installed module has a higher version than the new release has. |
+| The host table | `perodua_client_stable.hosts` is not a host table, or names workspace codes other than `rp`, `sp` and `cp`. |
+| No sample data | Neither `perodua_demo.seed_mode` nor a `MODULE.sample_data` parameter is set; `perodua_demo.seed_mode` is not `none`; a `MODULE.sample_data` is not `none`; or `perodua_demo.seeded` is set. |
+| Reference codes | The XML ID of a shipped holiday type, order cycle or customer category still exists, its record was deleted, and another record has its code. The upgrade would create the record again and stop on the unique code. (A user's record with the code and no XML ID is adopted by the new release.) |
+| Retired data | The retired modules left data (below), and `--drop-retired-data` is not given. The second count, with the App stopped, also finds the data that users wrote after the first check. |
+| The lock table of the way back | The locks that step 3 of `restore.txt` takes, plus a margin of 1,000, do not fit in `max_locks_per_transaction` x (`max_connections` + `max_prepared_transactions`) of the DB server. See [The lock table of the way back](#the-lock-table-of-the-way-back). |
+| The modules of the upgrade | `uat_guard.py guard`, with the modules that `-u` upgrades, finds that one of them needs `perodua_demo_client`. |
+| The confirmation | You do not type the database name, or `--confirm` names another one. With `--non-interactive`, `--confirm DATABASE` is required. |
+
+**Retired data.** The upgrade deletes the data of the retired modules. The
+check counts it and prints the counts that are not 0:
+
+- the tables `perodua_transporter_rate`, `perodua_transporter_process`,
+  `perodua_supplier_process`, the 5 wizard tables of `perodua_ui`
+  (`perodua_trip_volume_wizard`, `perodua_supplier_delivery_report_wizard`,
+  `perodua_po_invoice_report_wizard`, `perodua_import_receipt_wizard`,
+  `perodua_overflow_move_wizard`), the 4 wizard tables of `perodua_warehouse`
+  (`perodua_warehouse_dispatch_wizard`, `_line`, `perodua_warehouse_putaway_wizard`,
+  `perodua_warehouse_stock_count_wizard`), `perodua_demo_control`,
+  `perodua_outbound_route`, `perodua_outbound_route_stop` and
+  `perodua_driver_checkin`;
+- the columns `stock_location.perodua_is_overflow` (rows with true),
+  `stock_picking.perodua_wcs_pick_instruction_id` (not empty),
+  `stock_picking.perodua_dispatch_state` (not `none`) and
+  `stock_picking.perodua_outbound_route_id` (set);
+- the attachments of the retired models.
+
+When a count is not 0, get the owner's agreement, then run `--upgrade` again
+with `--drop-retired-data`. After the backup, the data is counted again with
+the App stopped, and the rows are saved as CSV in
+`BACKUP/retired-data.tar.gz`: one file per table, one per column (the record
+`id` and its value, so the pairs of picking and route are kept), and
+`attachments.csv` (their files are in `filestore.tar.gz`).
+
+**The steps, in order.** Steps 1 to 5 are those of every upgrade (above):
+
+1. Compare the identities. Pull the new images. The App keeps running.
+2. `upgrade-check` (above) prints the modules to upgrade and the retired data.
+3. `uat_guard.py guard` and `demo-flag` of the new image check the modules of
+   the upgrade. The plan is printed, with the point of no return; type the
+   database name (or give `--confirm`).
+4. Check the room for the backup, then stop the App.
+5. Back up into `BACKUP` (as above). `restore.txt` also says that this is a
+   module upgrade. Then `upgrade-check` runs again: until the App stopped,
+   users could write. It stops the upgrade when it refuses, when the modules
+   to upgrade changed, or when it counts retired data and `--drop-retired-data`
+   is not given. With `--drop-retired-data`, save `retired-data.tar.gz` with
+   the rows of this second count. If anything fails up to here, the old App
+   starts again, as above, and the backup stays.
+6. `mark-upgrading`: check the database once more (the problems of
+   `upgrade-check`). A refusal exits with code 3 and writes nothing: the old
+   App starts again, and the backup stays. Then save the cron flags, the last
+   `mail_mail` id and the modules in `perodua.kit_upgrade`, and set
+   `perodua.image_modhash` to `upgrading:FINGERPRINT`. The database check of
+   every release refuses this value: `service.sh start` of the old release
+   (v1.0.5 to v1.0.8) stops with "the database check failed".
+7. **Remove the containers of the old release** (`docker compose rm --stop
+   --force odoo web` with the directory's own `compose.yml`; the file and the
+   images stay). Its `restart: unless-stopped` can no longer start it. A
+   failure of step 6 that is not its refusal also removes them: the mark may
+   be written before such a failure (for example, a lost connection after the
+   commit).
+8. One run of Odoo in a one-off container of the new image (named
+   `PROJECT-module-upgrade`), through `bash -c` so that the image's entrypoint
+   starts no initialization and the password stays off the command line:
+   `odoo -c /etc/odoo/odoo.conf -d DB -u MODULES DEMO_FLAG --max-cron-threads=0
+   --stop-after-init --log-handler=odoo.modules.migration:INFO`, with no `-i`.
+   `MODULES` are the installed `perodua_*` modules of the new release; the
+   retired modules are left out, and the new `perodua_ui` uninstalls them in
+   the same run. The log is `BACKUP/module-upgrade.log`. The run has
+   `INIT_TIMEOUT` seconds (default 3600).
+9. `verify-upgrade`, first what keeps the App safe, then the checks:
+   - **cron flags:** each scheduled action gets the flag it had before the
+     upgrade. One that the upgrade created keeps the flag the upgrade gave it.
+     The four mock intake pulls (`perodua_integration.cron_consume_promise_feed`,
+     `perodua_orders_ext.cron_pull_pss_orders`, `cron_pull_psos_orders`,
+     `cron_pull_pcircle_orders`) are never switched on while their system
+     resolves to mock (`perodua_integration.mode.PROMISE`, `.PSS`, `.PSOS`,
+     `.PCircle`, else `perodua_integration.mode`, else mock): such a pull
+     stays off. A pull whose system is `live` gets its flag back;
+   - **mail hold:** every `mail_mail` row in state `outgoing` goes to state
+     `exception` with the reason "Held by deploy-app.sh --upgrade (module
+     upgrade) ...". Odoo's mail queue does not send it. This holds the mail
+     that the upgrade queued (an id above the one that step 6 saved) and the
+     mail that waited in the queue before the upgrade, which the upgrade can
+     change: v1.2.1 gives a waiting IDDI release mail without an address the
+     address of its supplier. A row in another state (`sent`, `cancel`,
+     `exception` with another reason) is not changed. The output gives the
+     two counts, and `perodua.kit_upgrade` keeps the ids of the held rows
+     (`held_mail`) next to the saved id (`mail_max_id`). A second run of
+     `verify-upgrade` on the same database finds no row in state `outgoing`:
+     it changes no held row and prints the same counts;
+   - **checks:** no module is in a `to ...` state; the retired modules and
+     `perodua_demo_client`, `perodua_reporting` and `perodua_e2e` are not
+     installed; every installed `perodua_*` module has the version of the new
+     release, and every upgraded module is still installed;
+     `perodua_demo.seeded` is not set; the release stamps did not change; no
+     user `agent` was created.
+
+   When the checks pass, `perodua.image_modhash` becomes
+   `upgraded:FINGERPRINT`.
+10. The switch, as above. Then the usual deployment: the database check (with
+    `--accept-pending` it reports `UPGRADE_PENDING`; every other caller, such
+    as `service.sh`, is refused), the attachments check, `report.url` and
+    `PUBLIC_BASE_URL`, `up --force-recreate`, the HTTP check, and
+    `stamp-upgrade`, which stores the new fingerprint: from then on the check
+    reports `READY`.
+
+**When a step fails:**
+
+| Failed step | State of the server | What to do |
+| --- | --- | --- |
+| 1 to 3 | Nothing changed. | Solve the cause and run `--upgrade` again. |
+| 4 or 5, also a refusal of the second `upgrade-check` | As in the chapter above: the old App starts again. The backup stays. | Solve the cause (for retired data: get the owner's agreement and add `--drop-retired-data`), then run `--upgrade` again. |
+| 6, a refusal (exit 3) | Nothing was written to the database. The old App starts again, and the backup stays. | Solve the cause and run `--upgrade` again. |
+| 6 (another failure) to 9, also a timeout or a lost SSH session (SIGHUP) | The old containers are gone, and the old App is **not** started again. The one-off container of `-u` is stopped and removed. The database is marked (`upgrading:`), or may be marked after a failure in 6: partly upgraded after a failure in 8, upgraded but not right after a failure in 9. The message prints `restore.txt`. | Follow `restore.txt`, all of its steps: the old release then runs with the data of the backup. Solve the cause and run `--upgrade` again. A rerun of `--upgrade` before the restore stops at step 2 and says so. |
+| 10 | The directory names the new release; the database is upgraded and checked (`UPGRADE_PENDING`). | To finish: solve the cause, then run `sudo bash deploy-app.sh --dir DIR` from the new `scripts` folder, without `--upgrade`. It runs no module upgrade again. To go back: `restore.txt`, before the point of no return. |
+
+If a run stops between the end of step 9 and the switch, a rerun of
+`--upgrade` finds `UPGRADE_PENDING`: it makes the switch and the deployment
+with no new backup and no module upgrade. The backup of the first run holds
+the data from before.
+
+**The held mail.** Step 9 holds every mail that waits in the mail queue: the
+mail that the upgrade queued, and the mail that waited before it. Between the
+stop of the App (step 4) and the hold, Odoo's mail queue does not run on the
+database: the containers of the old release are stopped and then removed
+(step 7), the run of `-u` has no cron thread (`--max-cron-threads=0`) and
+stops after the upgrade, and the new release starts only in step 10. When the
+upgrade stops after the mark (step 6) and before the end of step 9, the
+database keeps the mark, and neither `deploy-app.sh` nor `service.sh` starts
+a release on it.
+
+Step 13 of [Upgrade an App server to v1.2.1](../README.md#upgrade-an-app-server-to-v121)
+lists the held mail with `psql`, and tells which mail the upgrade queued and
+which mail waited before it. In Odoo the mail is in Settings > Technical >
+Emails, with the status Delivery Failed (state `exception`); with
+`PUBLIC_ROOT` set, the public host names do not open that page. After the
+review, send it:
+
+```bash
+sudo bash deploy-app.sh --release-queued-mail --dir DIR    # from the new scripts folder
+```
+
+It sets the held rows back to `outgoing`, only those that the upgrade held and
+that are still held (a row deleted or changed since stays as it is), and only
+after the deployment finished (`READY`). It prints the two counts. It does not
+pull, stop or start anything.
+
+The hold is a state of the mail, not a lock. After the start, a user can
+queue a held mail again in Odoo (Retry on the mail). v1.2.1 also shows the
+Release Email of an IDDI as Failed while its mail is held, and Retry Supplier
+Email on that IDDI queues a new mail, which is not held.
+
+**Not done by the kit.** Odoo modules other than `perodua_*` are not part of
+the fingerprint and are not upgraded. A release whose `uat_guard.py` has no
+review of its images (`REVIEWED_REFERENCES`) for a changed file stops at step
+3; its review is added together with the pin of its images.
 
 ## Uninstall (`uninstall.sh`)
 
@@ -858,7 +1274,7 @@ server's private address when F5 connects to the web ports directly.
    `DB_USER` with the same password, or a user each. Each database is recorded
    separately.
 2. On the App server, keep one `scripts` folder per release, for example
-   `/root/perodua-v1.0.8/scripts`. Write one configuration file per environment
+   `/root/perodua-v1.2.1/scripts`. Write one configuration file per environment
    (see `app.env.example`), for example `/root/perodua-dev.env`:
 
    ```
@@ -987,12 +1403,18 @@ changes the host names without a new release.
 | Host name | Role | Shows |
 | --- | --- | --- |
 | `stgiss.perodua.com.my` | sign-in host (hub) | no module; after the sign-in, links to the modules the user may open |
-| `stgissrp.perodua.com.my` | module host | Perodua SPD |
+| `stgissrp.perodua.com.my` | module host | Perodua SPD; from v1.2.0 the workspaces RESOURCES PLANNING (MASTER) and RESOURCES PLANNING (OPERATION) |
 | `stgisssp.perodua.com.my` | module host | Supplier Portal |
 | `stgisscp.perodua.com.my` | module host | Customer Portal |
-| any other name: `localhost` (SSH tunnel), `127.0.0.1`, the self-check of `deploy-app.sh` | local | all three, with password sign-in as in v1.0.4 |
+| any other name: `localhost` (SSH tunnel), `127.0.0.1`, the self-check of `deploy-app.sh` | local | all of them (three; from v1.2.0 the four workspaces), with password sign-in as in v1.0.4 |
 
 Each name shows only its own module, whether the hand-over below is on or not.
+From v1.2.0 the code `rp` of the host table names two workspaces, so stgiss
+shows four cards, and `stgissrp` opens on a "Workspaces" page with its two
+cards. `stgisssp` and `stgisscp` open their one workspace directly. From
+v1.2.1 each card of stgiss opens its own workspace: the cards RESOURCES
+PLANNING (MASTER) and RESOURCES PLANNING (OPERATION) open `stgissrp` on a page
+of that workspace, not on its "Workspaces" page.
 
 **The hand-over.** A user signs in one time, on stgiss. A module host without
 a sign-in sends the browser to stgiss. stgiss asks for the password if needed
@@ -1040,7 +1462,7 @@ than 443. `deploy-app.sh` writes it from `PUBLIC_BASE_URL`, so:
 - **Support** signs in at stgiss, or through the SSH tunnel
   (`ssh -N -L 8110:127.0.0.1:8110 USER@APP_SERVER`, then
   `http://localhost:8110/dev/app/`). The tunnel is a local name: it keeps the
-  password sign-in and shows all three modules.
+  password sign-in and shows all modules (from v1.2.0 the four workspaces).
 
 With `BIND_IP=0.0.0.0`, port 8110 also answers plain HTTP on the server's own
 addresses, where the session cookies travel unencrypted. Prefer

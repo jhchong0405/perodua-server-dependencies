@@ -131,8 +131,9 @@ directory's own, or the staged one of the new release) and the release that
   `--check-config` and a relative `--backup-dir` with `--upgrade`, and
   `--backup-dir` without it. Each time the identity, `compose.yml` and
   `app.env` stay as they were, and the message says that nothing was changed;
-- a module fingerprint that differs is refused after the new image's database
-  check, with "a module upgrade needs its own plan", and so is a database that
+- a module fingerprint that differs (and is not the one a module upgrade
+  starts from) is refused after the new image's database check
+  (`upgrade-check`), with the fingerprint it upgrades from, and so is a database that
   is not `READY` or cannot be checked: the App is not stopped and no backup
   folder is made;
 - a plain run in a directory of another release points to `--upgrade`;
@@ -166,7 +167,24 @@ directory's own, or the staged one of the new release) and the release that
   `restore.txt`, which is printed as well and names each restore command: step
   4 also deletes the Odoo sessions and says that every user signs in again;
   step 5 copies the old identity and `app.env` back and deploys without
-  `--upgrade`;
+  `--upgrade`. Before step 1 it names the scripts folder of the upgrade for
+  steps 1 to 4, says that each command must end with exit status 0 and that
+  the next step waits for it, what success looks like (step 3 with its
+  Docker lines and the perl warnings), that the 7 `perl: warning` lines of
+  step 3, shown two times, are harmless (the test compares them with the
+  output of a restore with v1.0.8), the down time with the size of the
+  database and of the attachments before the backup, and that the HTTPS
+  front stays; the 7 lines are compared byte for byte, with their tabs; step
+  3 gives the lock numbers of the check and, when the room at the backup was
+  too small, the commands that set 128 or more on the DB server; else it says
+  that the room was enough and names no value. A DB server at 256 gets no
+  value to set when it has the room, and 303 when 40 connections need it:
+  never a value lower than it has;
+- the check prints `Locks for the way back:` with the numbers of
+  `RESTORE_LOCKS`; with the same modules, a lock table too small for
+  `restore.txt` step 3 is a warning with the value to set (128, or 234 for a
+  database that needs 234 locks per connection), and the upgrade goes on;
+  nothing says that step 3 "would fail";
 - a failure after the switch (recording the addresses, the HTTP check) says
   that the directory names the new release, whether the App is stopped or the
   containers were recreated, and how to finish, go back and restore; the
@@ -175,6 +193,159 @@ directory's own, or the staged one of the new release) and the release that
   `--upgrade` and refuses the directory before the copies);
 - `--upgrade` from a folder of another release with the same modules moves the
   directory there again, with a second backup.
+
+`test_deploy_app_module_upgrade.py` runs `deploy-app.sh --upgrade` with a module
+upgrade (`-u`) against the same fake Docker, in a directory of v1.0.6. The fake
+keeps the database's module fingerprint in a file (`from`, `upgrading`,
+`upgraded`, `new`) and answers each preflight mode as the real one does; the
+directory's `preflight.py` is the old release's until the switch, and accepts
+only `from`. It checks:
+- the order: the pulls, `upgrade-check`, `uat_guard.py guard` and `demo-flag`,
+  the backup, `upgrade-check` again, `mark-upgrading`, the removal of the old
+  containers (`rm --stop --force odoo web`, the directory's own compose
+  file), `docker rm -f` of the
+  one-off container, one `-u` run, `verify-upgrade`, then the switch and the
+  deployment with `check --accept-pending` and `stamp-upgrade` at the end;
+- the `-u` run: `bash -c`, `--name PROJECT-module-upgrade`, the modules and the
+  demo flag as `-e` values, `--max-cron-threads=0`, `--stop-after-init`, the
+  migration log handler, no `-i`, the new compose file, and its log in the
+  backup folder; no argument holds the password;
+- the cron and mail lines of `verify-upgrade` come before `up`. Between the
+  stop of the App and `verify-upgrade` there are only one-off runs, the
+  removal of the old containers and the one `-u` run (no cron thread, stops
+  after the upgrade), so no mail queue runs before the hold. The final message
+  gives the held mail as two numbers (the mail that the upgrade queued, and
+  the mail that waited in the queue before it), names `--release-queued-mail`
+  and names the README step that lists the held mail with `psql`: the test
+  reads `README.md` and checks that this section and step exist, that its
+  list selects by the state and the reason of the hold, and that the lines it
+  quotes are those of the script. An answer of `verify-upgrade` or
+  `release-mail` without the two numbers is refused. `restore.txt` names
+  the module upgrade and the point of no return;
+- each accepted old release (v1.0.5 to v1.0.8) goes
+  through; v1.0.4, another fingerprint, every refusal of `upgrade-check` (the
+  lock table of the way back included), a lock count that cannot be read,
+  retired data without `--drop-retired-data`, a refusal of the guard and a
+  missing or wrong confirmation stop before the App stops, and nothing changes;
+  the lock numbers are in the output and in step 3 of `restore.txt`. A
+  refusal for the lock table is followed by the numbers and the five steps
+  that set 128 on a DB server below it (with the `--dir` of the upgrade, the
+  `pg_conftool` command, `service.sh --role db restart` and the read-only
+  query of README.md), then the error; another refusal prints no steps. On a
+  DB server at 256 with 40 connections, the steps name 303.
+  `deploy-app.sh` (bash and `preflight.py`), `deploy-db.sh` and README.md
+  agree on 128;
+  `--confirm`, `--drop-retired-data` and `--release-queued-mail` are refused
+  where they do not apply;
+- after the backup, `upgrade-check` runs again with the App stopped. Retired
+  data that it counts when the first check counted none needs
+  `--drop-retired-data` (without it: refused, and the old App starts again
+  with the backup kept; with it: `retired-data.tar.gz` is made). A refusal or
+  other modules to upgrade at this second check also start the old App again.
+  A refusal for the lock table alone names the lock table (not "changed while
+  the App ran") and prints the steps;
+- with `--drop-retired-data`, `retired-export` runs after the second check and
+  before the mark, into `retired-data.tar.gz`; a failed export starts the old
+  App again;
+- `mark-upgrading` runs before the containers go: its refusal (exit 3, nothing
+  written) starts the old App again and keeps the backup, without the text of
+  `restore.txt`;
+- a mark that failed otherwise (also one committed before its answer was lost)
+  removes the containers, a failed `-u`, a `-u` past `INIT_TIMEOUT`, a lost SSH session
+  during `-u` (SIGHUP to the process group or to the script only) and a failed
+  `verify-upgrade` never start the old App: no `up`, the one-off container is
+  removed with `docker rm -f`, the `-u` process does not go on, and the message
+  prints `restore.txt` as the only way back. A rerun of `--upgrade` before the
+  restore stops at `upgrade-check` and says that the database carries the mark;
+- a failure after the switch says that the database is upgraded and checked
+  (`UPGRADE_PENDING`) and that a plain rerun finishes it; that rerun deploys
+  with no `-u`; a rerun of `--upgrade` that finds `UPGRADE_PENDING` (a stop
+  between the check and the switch) switches with no backup and no `-u`;
+- `--release-queued-mail` runs only `preflight.py release-mail` with the
+  directory's compose file, and only from the folder of the release the
+  directory runs; it prints the two numbers of the released mail;
+- as root on Linux: the `service.sh` of v1.0.5 to v1.0.8
+  (`fixtures/service-v1.0.5-v1.0.8.sh`, pinned by its sha256) refuses `start`
+  and `restart` on a marked database, before and after the switch, without
+  `up` and without its advice to reset. The `service.sh` of this kit differs
+  from it only in `db_start` (its readiness probe runs as the OS user
+  `postgres`), and `reset_database.py` is pinned by its sha256: `restore.txt`
+  says that both do the same in the folders of the old and the new release.
+
+`test_preflight_module_upgrade.py` runs the exact `preflight.py` that
+`deploy-app.sh` writes, and the one of v1.0.5 to v1.0.8
+(`fixtures/preflight-v1.0.5-v1.0.8.py`, identical in kit 4198af8 to 8867545),
+against a database: SQLite behind a small stand-in for `psycopg2` by default,
+or real PostgreSQL 16 with `PREFLIGHT_TEST_PG='HOST PORT USER PASSWORD DATABASE'`
+(the user owns the database; each test drops and creates its `public` schema).
+It checks the report of `upgrade-check` (retired tables, columns, attachments,
+the modules to upgrade), each of its refusals, what it leaves to the new
+release (an adoptable reference code, the default host table, one
+`sample_data` parameter), that a refusal of `mark-upgrading` exits 3 and
+writes nothing while its other failures exit 1, that from `mark-upgrading`
+on no release accepts the
+database (the old preflight included), the cron rule (flags back as before,
+new crons as the upgrade set them, the four mock intake pulls kept off while
+their system resolves to mock, a live one restored), the mail hold (every row
+in state `outgoing` is held: the rows `-u` created, an older row that waited
+in the queue, and an older row that `-u` gave an address; rows in the states
+`sent`, `cancel` and `exception` with another reason stay as they are, also
+those `-u` created; the output and the record give the two counts), the
+release after `stamp-upgrade` only (exactly the held rows that are still
+held: not a held row that was cancelled or deleted since, and not a row with
+the same reason that this upgrade did not hold), a second `verify-upgrade` on
+the same database (after a first one that held the mail and refused the
+result: the held rows and the counts stay the same, and a row that entered
+the queue in between is counted once), the refusals of `verify-upgrade`
+(which still writes the cron flags and the hold), and the CSV files of
+`retired-export`.
+
+The lock check of the way back: `upgrade-check` prints `RESTORE_LOCKS` before
+`READY` and before `MODULES`. With SQLite the lock table comes from
+`FAKE_PG_LOCK_TABLE`: exactly enough room passes (also with a prepared
+transaction), one lock more refuses the module upgrade ("the way back can
+fail") with `RESTORE_LOCKS` on standard output, both numbers and the value to
+set (128, or more when the database needs more, never less than the value of
+the server: 276 for a server at 256 with 4 connections), `mark-upgrading`
+then exits 3 and writes nothing, and the same modules are not refused. On PostgreSQL,
+with `pg_dump`, `pg_restore` and `psql` on the PATH, a database with each
+kind of object that the count covers is made a few objects per
+transaction: 150 Odoo-shaped tables, the extensions `pg_trgm` and `unaccent`,
+enum, domain, composite and range types, a collation, a text search
+dictionary and configuration, a conversion, columns of user array types,
+functions (one with a `BEGIN ATOMIC` body), an operator and a cast, a
+generated column, statistics, a trigger, a rule and a policy with comments, a
+publication, a partitioned, an inheriting, a typed and an unlogged table, 20
+triggers without a comment on the partitioned table (one with `DEPENDS ON
+EXTENSION`), a foreign key of it and a default, a constraint trigger, a table
+with 3 defaults and 3 `INHERITS` children of it and a grandchild (one child
+without these defaults, one with its own; the restore deletes the copies of
+12 defaults and keeps a lock on each), 5 foreign keys of the partitioned table
+to a partitioned table with 3 partitions and, on each partition, a copy of
+these keys and of its key to `res_users` (12, which the restore makes one
+with the keys of the table), a view, two populated materialized views (one
+with TOAST) and one without data, and a second schema. It is dumped, emptied
+a few objects per transaction and restored in one transaction, as
+`restore.txt` step 3 does. Before the commit, the transaction reads `pg_locks`: the count
+is at least the locks that the restore holds in the lock table (not those in
+the fast-path slots of the session, and not the lock of the probe on
+`pg_locks`), and so is the count of each catalog (with the two types of each
+`REFRESH` for `pg_type`, and the inherited defaults for `pg_attrdef`); the
+restored relations are in the count, and the restored database counts the
+same, less what the restore dropped: no copy of a key is left (with
+PostgreSQL 16.15: 2,414 counted, 1,834 held; triggers 242 counted, 118 held;
+inherited defaults 13 counted, 12 held). The test names each catalog with
+more locks than its count. With the count of 7666b07, which left out the
+inherited defaults, it fails with `pg_attrdef: counted 0, locked 12`; with a
+count of only the defaults that the children have, with
+`pg_attrdef: counted 10, locked 12`. With the count of 3044160, which also
+left out the internal triggers of partitions, it fails with these two:
+`pg_attrdef: counted 0, locked 12` and `pg_trigger: counted 62, locked 118`;
+with the count of 3902553, which counted only triggers with a comment, with
+`pg_attrdef: counted 0, locked 12` and `pg_trigger: counted 1, locked 118`.
+When the server has no room for
+the count, the check refuses, and a restore that fails stops with
+`out of shared memory`.
 
 `test_uninstall_app.py` runs `uninstall.sh --role app` against a fake Docker CLI.
 The fake keeps containers, volumes and networks in a file, including those of
@@ -731,8 +902,10 @@ on the host, such as the pinned release image:
 bash tests/check-upgrade-backup.sh IMAGE
 ```
 
-It takes the command lines from `deploy-app.sh`, and checks that the dump and
-the archive are the two runs with the no-log compose file. A database shaped as Odoo
+It takes the command lines from `deploy-app.sh` (and `restore.txt` must say
+that each command ends with exit status 0), and checks that the dump and
+the archive are the two runs with the no-log compose file, and that a module
+upgrade's `retired-export` uses that file too. A database shaped as Odoo
 leaves it (900 tables with foreign keys to `res_users`, inheriting tables, an
 `api` schema with a view, a sequence, a function, the trusted extensions
 `pg_trgm` and `unaccent`) and an attachments volume are saved. It checks that
@@ -801,7 +974,11 @@ invalid archives and corrupt compressed payloads; failure before publication and
 backup; missing expected tables; configuration injection rejection; secret-file
 permissions; literal SQL/HBA keyword names and access isolation; nonlocal listener
 refusal; a real listener update and restart; configuration rollback on a conflicting
-`postgresql.auto.conf`; password absence in output logs; interactive database
+`postgresql.auto.conf`, without a restart; `max_locks_per_transaction` 128 in
+`postgresql.conf` and in force after the first deployment (with one restart),
+no restart on a rerun, a higher value kept, and a lower value in
+`postgresql.auto.conf` refused with `postgresql.conf` put back and no restart
+(the running value stays); password absence in output logs; interactive database
 password entry on a pseudo-terminal that asks again after a too-short password
 or two different entries and never echoes it; and real HTTPS Basic-auth downloads
 with correct and incorrect passwords supplied through a pseudo-terminal. The
@@ -831,6 +1008,14 @@ refuses an empty database, writes only `report.url` without a base URL, commits
 refuses an invalid base URL without changing anything, and leaves the database
 `READY`.
 
+`test_preflight_module_upgrade.py` then runs with `PREFLIGHT_TEST_PG` on a
+database of its own role (the main cluster has `max_locks_per_transaction`
+128 from `deploy-db.sh`), and its lock test again on a second cluster with
+`max_locks_per_transaction` 10 and `max_connections` 20 (room for 200 locks):
+there the module upgrade is refused, and a restore of the fixture that fails
+must stop with `out of shared memory` (it did in the test runs). The second
+cluster is removed after it.
+
 `uninstall.sh --role db` coverage:
 - removing a deployment only after an exact confirmation and with no open
   connection: the database, the role and its password, the access rules
@@ -844,8 +1029,10 @@ refuses an invalid base URL without changing anything, and leaves the database
 - `check_reset_database.py` fills an empty-mode database as the App role the way
   Odoo does (900 tables with `create_uid`/`write_uid` foreign keys to
   `res_users`, tables that inherit another, an `api` schema with views, a free
-  sequence, a function). As a control, dropping it in one transaction fails with
-  "out of shared memory". `reset_database.py` exits 3 on a wrong password and
+  sequence, a function). As a control, on the server with PostgreSQL's default
+  `max_locks_per_transaction` of 64 (set for this check only, with
+  `ALTER SYSTEM`; `deploy-db.sh` sets 128), dropping it in one transaction fails
+  with "out of shared memory". `reset_database.py` exits 3 on a wrong password and
   changes nothing; with the right one it empties the database, `public` is as in
   a new database (owner `pg_database_owner`, `USAGE` for everyone, the standard
   comment), the database, its owner and who may connect are unchanged, the role
@@ -853,7 +1040,10 @@ refuses an invalid base URL without changing anything, and leaves the database
   reports `EMPTY`;
 - `--role db`: `status` shows the cluster online; `stop` closes an open
   connection and says so, the cluster is down and a second `stop` says it
-  already is; `start` and `restart` bring it back with the same databases.
+  already is; `start` and `restart` bring it back with the same databases,
+  and `start`, `restart` and a `start` of a running cluster leave no `FATAL`
+  line in the PostgreSQL log (the readiness probe runs as the OS user
+  `postgres`; as root it logged `role "root" does not exist`).
 
 One server: with a stub Docker that reports the listen address as Docker's,
 `deploy-db.sh` writes the setting that starts PostgreSQL after Docker, and a
