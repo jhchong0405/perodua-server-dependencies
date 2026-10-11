@@ -129,6 +129,7 @@ pass 'check-config validates without creating a database or deployment state'
 pg_ctlcluster 16 main stop
 write_conf restored app_restored
 deploy_ok restored
+cp "$TEST_DIR/restored.log" "$TEST_DIR/restored-first.log"
 assert_sql restored 'SELECT reference || chr(58) || amount FROM public.business_records ORDER BY id' $'ORDER-001:123.45\nORDER-002:500.00'
 assert_sql restored 'SELECT fixture_total()' 623.45
 assert_sql restored 'SELECT count(*) FROM public.active_fixture_users' 2
@@ -146,6 +147,40 @@ deploy_ok restored
 assert_sql restored "SELECT count(*) FROM public.business_records WHERE reference='AFTER-DEPLOY'" 1
 assert_sql postgres "SELECT oid FROM pg_database WHERE datname='restored'" "$restored_oid"
 pass 'same-backup rerun preserves database identity and post-deployment writes'
+
+# The lock table of the way back of deploy-app.sh --upgrade: the first
+# deployment set 128 and restarted PostgreSQL once; a rerun changes nothing, a
+# higher value stays, and a lower one in postgresql.auto.conf is refused with
+# postgresql.conf put back.
+assert_sql postgres 'SHOW max_locks_per_transaction' 128
+[[ $(pg_conftool 16 main show max_locks_per_transaction) == 'max_locks_per_transaction = 128' ]] \
+    || die 'postgresql.conf does not set max_locks_per_transaction 128'
+grep -q 'max_locks_per_transaction set to 128 in /etc/postgresql/16/main/postgresql.conf' "$TEST_DIR/restored-first.log" \
+    || die 'the first deployment did not report max_locks_per_transaction'
+[[ $(grep -c 'Restarting PostgreSQL for the new settings' "$TEST_DIR/restored-first.log") == 1 ]] \
+    || die 'the first deployment did not restart PostgreSQL once'
+started=$(admin_sql -d postgres -c 'SELECT pg_postmaster_start_time()')
+deploy_ok restored
+[[ $(admin_sql -d postgres -c 'SELECT pg_postmaster_start_time()') == "$started" ]] || die 'a rerun restarted PostgreSQL'
+! grep -q 'max_locks_per_transaction set\|Restarting PostgreSQL' "$TEST_DIR/restored.log" || die 'a rerun changed the settings'
+pg_conftool 16 main set max_locks_per_transaction 256
+pg_ctlcluster 16 main restart
+started=$(admin_sql -d postgres -c 'SELECT pg_postmaster_start_time()')
+deploy_ok restored
+assert_sql postgres 'SHOW max_locks_per_transaction' 256
+[[ $(admin_sql -d postgres -c 'SELECT pg_postmaster_start_time()') == "$started" ]] || die 'a higher value restarted PostgreSQL'
+pg_conftool 16 main set max_locks_per_transaction 128
+admin_sql -d postgres -c 'ALTER SYSTEM SET max_locks_per_transaction = 64'
+config_before=$(hash_file /etc/postgresql/16/main/postgresql.conf)
+deploy_fails restored
+grep -q 'max_locks_per_transaction is overridden by another configuration file (such as postgresql.auto.conf) with 64, less than 128' \
+    "$TEST_DIR/restored.log" || die 'the lower value in postgresql.auto.conf was not named'
+[[ $(hash_file /etc/postgresql/16/main/postgresql.conf) == "$config_before" ]] || die 'the refused run did not put postgresql.conf back'
+admin_sql -d postgres -c 'ALTER SYSTEM RESET max_locks_per_transaction'
+pg_ctlcluster 16 main restart
+assert_sql postgres 'SHOW max_locks_per_transaction' 128
+assert_sql restored "SELECT count(*) FROM public.business_records WHERE reference='AFTER-DEPLOY'" 1
+pass 'max_locks_per_transaction 128 for the way back: set with one restart, unchanged on a rerun, a higher value kept, a lower postgresql.auto.conf value refused and postgresql.conf put back'
 
 mv /var/lib/perodua-db-deploy/16-main/restored/success /var/lib/perodua-db-deploy/16-main/restored/pending
 deploy_ok restored
@@ -452,7 +487,7 @@ PREFLIGHT_TEST_PG='127.0.0.1 5433 preflight_pg preflight-pg-password preflight_p
     || { cat "$TEST_DIR/preflight-pg-locks.log" >&2; die 'the lock check failed on the small cluster'; }
 grep -q '^Ran 1 test' "$TEST_DIR/preflight-pg-locks.log" || die 'the lock test did not run on the small cluster'
 pg_dropcluster --stop 16 locks
-pass 'deploy-app.sh preflight of the module upgrade on PostgreSQL; the lock count of the way back agrees with pg_locks of a one-transaction restore, and a server without room for it is refused'
+pass 'deploy-app.sh preflight of the module upgrade on PostgreSQL; the lock count of the way back is at least what pg_locks shows before the commit of a one-transaction restore, and a server without room for it is refused'
 
 python3 "$SOURCE_DIR/tests/check-https-download.py" "$SOURCE_DIR/scripts" "$TEST_DIR"
 assert_sql https_restored 'SELECT count(*) FROM public.res_users' 2
@@ -537,8 +572,17 @@ SERVICE="$SOURCE_DIR/scripts/service.sh"
 shellcheck "$SERVICE"
 write_empty_conf reset_fixture app_reset
 deploy_ok reset_fixture
+# The control of the check needs a server with PostgreSQL's default lock table
+# (64), as a DB server that deploy-db.sh did not set up has: deploy-db.sh set
+# 128 here. Back to 128 after it.
+admin_sql -d postgres -c 'ALTER SYSTEM SET max_locks_per_transaction = 64'
+pg_ctlcluster 16 main restart
+assert_sql postgres 'SHOW max_locks_per_transaction' 64
 python3 "$SOURCE_DIR/tests/check_reset_database.py" "$SOURCE_DIR/scripts" "$TEST_DIR" reset_fixture app_reset "$TEST_DIR/app.password" \
     > "$TEST_DIR/reset-database.log" 2>&1 || { cat "$TEST_DIR/reset-database.log" >&2; die 'reset_database.py check failed'; }
+admin_sql -d postgres -c 'ALTER SYSTEM RESET max_locks_per_transaction'
+pg_ctlcluster 16 main restart
+assert_sql postgres 'SHOW max_locks_per_transaction' 128
 pass 'reset (reset_database.py) empties an Odoo-shaped database that a one-shot drop cannot, changes nothing on a failed login, keeps the database, its owner and access, and leaves it EMPTY for deploy-app.sh --init-db'
 
 service_ok() {

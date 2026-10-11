@@ -42,12 +42,19 @@ OLD_SERVICE_SHA256 = 'b3c2533b5f2f7b78c6e2b2c036ce215dc8e306f56b96058ef8a4ddb13f
 # reset_database.py of the same kit versions. restore.txt runs both in a
 # scripts folder of the old or the new release, and says that they are the same.
 OLD_RESET_SHA256 = 'c752cb12030caf3928c66475640fb8803983dd2815e3c10230691f7e340f05c4'
-# The refusal of preflight.py when the backup does not fit the lock table.
-LOCKS_REFUSED = ('the way back would fail. restore.txt step 3 restores the backup of database perodua in one transaction, '
-                 'which locks about 10686 objects (5246 tables, indexes, sequences, views and TOAST tables, and 5440 '
-                 'constraints, types and other objects). With a margin of 1000 for the other sessions on the DB server, it '
-                 'needs 11686 locks, and the DB server has room for 6400: max_locks_per_transaction 64 x (max_connections 100 '
-                 '+ max_prepared_transactions 0)')
+# The refusal of preflight.py when the backup does not fit the lock table
+# (its numbers, 5246 5440 1000 64 100 0, come on standard output).
+LOCKS_REFUSED = ('the way back can fail. restore.txt step 3 restores the backup of database perodua in one transaction, '
+                 'which can lock up to 10686 objects (5246 tables, indexes, sequences, views and TOAST tables, and 5440 '
+                 'constraints, types, system tables and other objects). With a margin of 1000 for the other sessions on the DB '
+                 'server, it can need 11686 locks, and the DB server has room for 6400: max_locks_per_transaction 64 x '
+                 '(max_connections 100 + max_prepared_transactions 0). With too few, step 3 can stop with "out of shared '
+                 'memory", leave the database empty and the App down. Set max_locks_per_transaction to 128 on the DB server '
+                 'and restart PostgreSQL there, with the App stopped (README.md, "The lock table of the DB server", gives '
+                 'the steps). Then run --upgrade again')
+# The query that shows the lock table of the DB server; it changes nothing.
+LOCKS_QUERY = re.search(r'^LOCKS_QUERY="(.*)"$', TEXT, re.M).group(1)
+
 
 BACKUP = ['staged backup size', 'running?', 'stop web odoo', 'staged pg_dump', 'staged pg_restore --list',
           'staged filestore archive']
@@ -292,22 +299,63 @@ class ModuleUpgradeTests(ModuleUpgradeFixture, unittest.TestCase):
         # The numbers are in the output of the check, and in restore.txt step 3.
         result = self.upgrade(locks='5000 900 1000 64 100 0')
         self.assertEqual(result.returncode, 0, result.stdout)
-        self.assertIn('Locks for the way back: restore.txt step 3 restores database perodua in one transaction and locks '
-                      'about 5900 objects (5000 tables, indexes, sequences, views and TOAST tables, 900 constraints, types '
-                      'and other objects). With a margin of 1000 it needs 6900. The DB server has room for 6400: '
-                      'max_locks_per_transaction 64 x (max_connections 100 + max_prepared_transactions 0).', result.stdout)
+        self.assertIn('Locks for the way back: restore.txt step 3 restores database perodua in one transaction and can lock '
+                      'up to 5900 objects (5000 tables, indexes, sequences, views and TOAST tables, 900 constraints, types, '
+                      'system tables and other objects). With a margin of 1000 it can need 6900. The DB server has room for '
+                      '6400: max_locks_per_transaction 64 x (max_connections 100 + max_prepared_transactions 0).', result.stdout)
         [backup] = self.backups()
         self.assertIn('   If it stops with "out of shared memory", the lock table of the DB server is\n'
-                      '   too small. At the backup it had room for 6400 locks, and this step\n'
-                      '   needed 6900 with a margin: set max_locks_per_transaction to\n'
-                      '   69 or more there, restart PostgreSQL, then run steps 2 and 3 again.\n'
+                      '   too small: at the backup it had room for 6400 locks, and this step can\n'
+                      '   need 6900 with a margin. The App is stopped (step 1). On the DB server,\n'
+                      '   for the PostgreSQL 16 cluster main of deploy-db.sh, run:\n'
+                      '     sudo pg_conftool 16 main set max_locks_per_transaction 128\n'
+                      '   and, in the scripts folder of deploy-db.sh: sudo bash service.sh --role db restart\n'
+                      '   Then run steps 2 and 3 again.\n'
                       '4. Put the attachments back', (backup / 'restore.txt').read_text())
 
+    def lock_table_steps(self, need=11686):
+        return ('To give the DB server the room, set max_locks_per_transaction to 128 there, with the App stopped:\n'
+                f'  1. On this App server, in {SCRIPTS}, stop the App:\n'
+                f'     sudo bash service.sh --role app --dir {self.deploy_dir} stop\n'
+                '  2. On the DB server, set the value for the PostgreSQL 16 cluster main of deploy-db.sh (for another\n'
+                '     PG_CLUSTER in its deploy.conf, use that name):\n'
+                '     sudo pg_conftool 16 main set max_locks_per_transaction 128\n'
+                '  3. On the DB server, in the scripts folder of deploy-db.sh, restart PostgreSQL:\n'
+                '     sudo bash service.sh --role db restart\n'
+                '  4. On the DB server, show the value and the room (this changes nothing): the first number must be\n'
+                f'     128 and the last one {need} or more:\n'
+                f'     sudo -u postgres psql -X -At -c "{LOCKS_QUERY}"\n'
+                '  5. On this App server, start the App:\n'
+                f'     sudo bash service.sh --role app --dir {self.deploy_dir} start\n'
+                'Then run --upgrade again.\n')
+
     def test_a_lock_table_too_small_for_the_way_back_is_refused_before_the_app_stops(self):
-        result = self.upgrade(refuse=LOCKS_REFUSED)
+        result = self.upgrade(refuse=LOCKS_REFUSED, locks='5246 5440 1000 64 100 0')
         self.assert_refused_before_the_stop(result, 'the module upgrade (-u) is refused for the reasons above')
         self.assertIn('Database preflight: module upgrade refused: ' + LOCKS_REFUSED, result.stdout)
         self.assertEqual(self.names(), ['pull', 'pull', 'staged preflight upgrade-check'])
+        # The numbers and the steps, after the reason and before the error.
+        steps = 'Locks for the way back: restore.txt step 3 restores database perodua in one transaction and can lock ' \
+                'up to 10686 objects'
+        self.assertLess(result.stdout.index(LOCKS_REFUSED), result.stdout.index(steps))
+        self.assertIn('max_prepared_transactions 0).\n' + self.lock_table_steps() + 'Error: ', result.stdout)
+        self.assertNotIn('would fail', result.stdout)
+        # The query of step 4 gives the value and the room, as README.md shows it.
+        self.assertIn(f'sudo -u postgres psql -X -At -c "{LOCKS_QUERY}"', README)
+        # Another refusal prints no lock steps.
+        self.log.unlink()
+        result = self.upgrade(refuse='perodua_e2e is installed')
+        self.assertNotIn('To give the DB server the room', result.stdout)
+
+    def test_the_value_of_the_lock_table_is_128_in_each_script(self):
+        # deploy-app.sh (bash and preflight.py) and deploy-db.sh agree on the
+        # value of the DB servers of this project, and README.md names it.
+        deploy_db = (SCRIPTS / 'deploy-db.sh').read_text(encoding='utf-8')
+        self.assertEqual({re.search(r'\bLOCKS_STANDARD=(\d+)\b', TEXT).group(1),
+                          re.search(r'^RESTORE_LOCK_SETTING = (\d+)$', TEXT, re.M).group(1),
+                          re.search(r'^LOCKS_PER_TRANSACTION=(\d+)$', deploy_db, re.M).group(1)}, {'128'})
+        self.assertIn('sudo pg_conftool 16 main set max_locks_per_transaction 128', README)
+        self.assertIn('**The lock table of the DB server.**', README)
 
     def test_an_unreadable_lock_count_is_refused_before_the_app_stops(self):
         for locks in ('5246 5440 1000 64 100', '5246 5440 1000 64 x 0', '5246 5440 1000 64 0 0'):
@@ -378,6 +426,25 @@ class ModuleUpgradeTests(ModuleUpgradeFixture, unittest.TestCase):
         self.assert_old_app_started_again_after_the_recheck(
             result, 'Database perodua changed while the App ran: the module upgrade (-u) is now refused for the reasons above')
         self.assertIn('module upgrade refused: perodua_demo.seed_mode is full, not none', result.stdout)
+        self.assertNotIn('To give the DB server the room', result.stdout)
+
+    def test_a_lock_refusal_of_the_second_check_names_the_lock_table(self):
+        # Not "changed while the App ran": the reason is the lock table.
+        result = self.upgrade(refuse_again=LOCKS_REFUSED)
+        self.assert_old_app_started_again_after_the_recheck(
+            result, 'The lock table of the DB server has too little room for the way back of database perodua, counted '
+                    'again with the App stopped (above): the module upgrade (-u) is refused')
+        self.assertNotIn('changed while the App ran', result.stdout)
+        self.assertIn('module upgrade refused: ' + LOCKS_REFUSED, result.stdout)
+        self.assertIn(self.lock_table_steps(need=1250), result.stdout)
+        # With another reason as well: the message of a change, and the steps.
+        self.log.unlink()
+        for backup in self.backups():
+            shutil.rmtree(backup)
+        result = self.upgrade(refuse_again=LOCKS_REFUSED + '|perodua_demo.seed_mode is full, not none')
+        self.assert_old_app_started_again_after_the_recheck(
+            result, 'Database perodua changed while the App ran: the module upgrade (-u) is now refused for the reasons above')
+        self.assertIn(self.lock_table_steps(need=1250), result.stdout)
 
     def test_other_modules_at_the_second_check_start_the_old_app_again(self):
         result = self.upgrade(modules_again='perodua_client_stable,perodua_rp,perodua_ui')

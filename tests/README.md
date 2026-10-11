@@ -169,13 +169,18 @@ directory's own, or the staged one of the new release) and the release that
   step 5 copies the old identity and `app.env` back and deploys without
   `--upgrade`. Before step 1 it names the scripts folder of the upgrade for
   steps 1 to 4, says that each command must end with exit status 0 and that
-  the next step waits for it, what success looks like, that the
-  `perl: warning` lines of step 3 are harmless, the down time and that the
-  HTTPS front stays; step 3 gives the lock numbers of the check;
+  the next step waits for it, what success looks like (step 3 with its
+  Docker lines and the perl warnings), that the 7 `perl: warning` lines of
+  step 3, shown two times, are harmless (the test compares them with the
+  output of a restore with v1.0.8), the down time with the size of the
+  database and of the attachments before the backup, and that the HTTPS
+  front stays; step 3 gives the lock numbers of the check and the commands
+  that set 128 on the DB server;
 - the check prints `Locks for the way back:` with the numbers of
   `RESTORE_LOCKS`; with the same modules, a lock table too small for
-  `restore.txt` step 3 is a warning with the value to set, and the upgrade
-  goes on;
+  `restore.txt` step 3 is a warning with the value to set (128, or 234 for a
+  database that needs 234 locks per connection), and the upgrade goes on;
+  nothing says that step 3 "would fail";
 - a failure after the switch (recording the addresses, the HTTP check) says
   that the directory names the new release, whether the App is stopped or the
   containers were recreated, and how to finish, go back and restore; the
@@ -218,14 +223,22 @@ only `from`. It checks:
   lock table of the way back included), a lock count that cannot be read,
   retired data without `--drop-retired-data`, a refusal of the guard and a
   missing or wrong confirmation stop before the App stops, and nothing changes;
-  the lock numbers are in the output and in step 3 of `restore.txt`;
+  the lock numbers are in the output and in step 3 of `restore.txt`. A
+  refusal for the lock table is followed by the numbers and the five steps
+  that set 128 on the DB server (with the `--dir` of the upgrade, the
+  `pg_conftool` command, `service.sh --role db restart` and the read-only
+  query of README.md), then the error; another refusal prints no steps.
+  `deploy-app.sh` (bash and `preflight.py`), `deploy-db.sh` and README.md
+  agree on 128;
   `--confirm`, `--drop-retired-data` and `--release-queued-mail` are refused
   where they do not apply;
 - after the backup, `upgrade-check` runs again with the App stopped. Retired
   data that it counts when the first check counted none needs
   `--drop-retired-data` (without it: refused, and the old App starts again
   with the backup kept; with it: `retired-data.tar.gz` is made). A refusal or
-  other modules to upgrade at this second check also start the old App again;
+  other modules to upgrade at this second check also start the old App again.
+  A refusal for the lock table alone names the lock table (not "changed while
+  the App ran") and prints the steps;
 - with `--drop-retired-data`, `retired-export` runs after the second check and
   before the mark, into `retired-data.tar.gz`; a failed export starts the old
   App again;
@@ -283,20 +296,27 @@ the queue in between is counted once), the refusals of `verify-upgrade`
 The lock check of the way back: `upgrade-check` prints `RESTORE_LOCKS` before
 `READY` and before `MODULES`. With SQLite the lock table comes from
 `FAKE_PG_LOCK_TABLE`: exactly enough room passes (also with a prepared
-transaction), one lock more refuses the module upgrade with both numbers and
-the value to set, `mark-upgrading` then exits 3 and writes nothing, and the
-same modules are not refused. On PostgreSQL, with `pg_dump`, `pg_restore` and
-`psql` on the PATH, a database with every kind of object (150 Odoo-shaped
-tables, an extension, enum, domain and composite types, a function and a
-trigger, a partitioned, an inheriting and an unlogged table, a view, a
-materialized view and a second schema) is dumped, emptied a few tables per
-transaction and restored in one transaction, as `restore.txt` step 3 does.
-Before the commit, the transaction reads `pg_locks`: each relation is locked,
-the other objects are at most the count and more than nine tenths of it (as
-PostgreSQL 16.15 locks dependencies), the lock table holds at most 20 more,
-and the restored database counts the same. When the server has no room for
-the count, the check refuses, and a restore that fails stops with
-`out of shared memory`.
+transaction), one lock more refuses the module upgrade ("the way back can
+fail") with `RESTORE_LOCKS` on standard output, both numbers and the value to
+set (128, or more when the database needs more), `mark-upgrading` then exits
+3 and writes nothing, and the same modules are not refused. On PostgreSQL,
+with `pg_dump`, `pg_restore` and `psql` on the PATH, a database with every
+kind of object that a restore can create and lock is made a few objects per
+transaction: 150 Odoo-shaped tables, the extensions `pg_trgm` and `unaccent`,
+enum, domain, composite and range types, a collation, a text search
+dictionary and configuration, a conversion, columns of user array types,
+functions (one with a `BEGIN ATOMIC` body), an operator and a cast, a
+generated column, statistics, a trigger, a rule and a policy with comments, a
+publication, a partitioned, an inheriting, a typed and an unlogged table, a
+view, two populated materialized views (one with TOAST) and one without data,
+and a second schema. It is dumped, emptied a few objects per transaction and
+restored in one transaction, as `restore.txt` step 3 does. Before the commit,
+the transaction reads `pg_locks`: the count is at least the locks that the
+restore holds in the lock table (not those in the fast-path slots of the
+session, and not the lock of the probe on `pg_locks`), the restored relations
+are in the count, and the restored database counts the same (with PostgreSQL
+16.15: 2,041 counted, 1,605 held). When the server has no room for the count,
+the check refuses, and a restore that fails stops with `out of shared memory`.
 
 `test_uninstall_app.py` runs `uninstall.sh --role app` against a fake Docker CLI.
 The fake keeps containers, volumes and networks in a file, including those of
@@ -925,7 +945,10 @@ invalid archives and corrupt compressed payloads; failure before publication and
 backup; missing expected tables; configuration injection rejection; secret-file
 permissions; literal SQL/HBA keyword names and access isolation; nonlocal listener
 refusal; a real listener update and restart; configuration rollback on a conflicting
-`postgresql.auto.conf`; password absence in output logs; interactive database
+`postgresql.auto.conf`; `max_locks_per_transaction` 128 in `postgresql.conf` and
+in force after the first deployment (with one restart), no restart on a rerun,
+a higher value kept, and a lower value in `postgresql.auto.conf` refused with
+`postgresql.conf` put back; password absence in output logs; interactive database
 password entry on a pseudo-terminal that asks again after a too-short password
 or two different entries and never echoes it; and real HTTPS Basic-auth downloads
 with correct and incorrect passwords supplied through a pseudo-terminal. The
@@ -956,7 +979,8 @@ refuses an invalid base URL without changing anything, and leaves the database
 `READY`.
 
 `test_preflight_module_upgrade.py` then runs with `PREFLIGHT_TEST_PG` on a
-database of its own role, and its lock test again on a second cluster with
+database of its own role (the main cluster has `max_locks_per_transaction`
+128 from `deploy-db.sh`), and its lock test again on a second cluster with
 `max_locks_per_transaction` 10 and `max_connections` 20 (room for 200 locks):
 there the module upgrade is refused, and a restore of the fixture that fails
 must stop with `out of shared memory` (it did in the test runs). The second
@@ -975,8 +999,10 @@ cluster is removed after it.
 - `check_reset_database.py` fills an empty-mode database as the App role the way
   Odoo does (900 tables with `create_uid`/`write_uid` foreign keys to
   `res_users`, tables that inherit another, an `api` schema with views, a free
-  sequence, a function). As a control, dropping it in one transaction fails with
-  "out of shared memory". `reset_database.py` exits 3 on a wrong password and
+  sequence, a function). As a control, on the server with PostgreSQL's default
+  `max_locks_per_transaction` of 64 (set for this check only, with
+  `ALTER SYSTEM`; `deploy-db.sh` sets 128), dropping it in one transaction fails
+  with "out of shared memory". `reset_database.py` exits 3 on a wrong password and
   changes nothing; with the right one it empties the database, `public` is as in
   a new database (owner `pg_database_owner`, `USAGE` for everyone, the standard
   comment), the database, its owner and who may connect are unchanged, the role

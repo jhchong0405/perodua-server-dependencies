@@ -178,6 +178,16 @@ disconnecting its other sessions; deploy on the intended DB server during its
 setup/maintenance window. Configuration snapshots are retained; failed network
 configuration is rolled back.
 
+`max_locks_per_transaction` is set to 128 in `postgresql.conf` when the value
+that PostgreSQL reads at its next start is lower; a higher value stays. It
+takes a restart of the cluster, in the same way (one restart for both). A
+running value below 128 also restarts it. A lower value in another
+configuration file (such as `postgresql.auto.conf` from `ALTER SYSTEM`) is
+refused, and `postgresql.conf` is put back. The way back of
+`deploy-app.sh --upgrade` needs this room: see
+[The lock table of the way back](#the-lock-table-of-the-way-back). A run on a DB
+server that has 128 or more changes nothing. `uninstall.sh` keeps the value.
+
 **Host and cloud firewalls are not modified.** If `APP_CIDR` is set, allow TCP
 `PG_PORT` from that source using your existing firewall management, then test from
 the App Server. Local verification does not prove the remote network path. TLS
@@ -631,10 +641,10 @@ modules; a module upgrade adds its steps between 5 and 6.
 3. Check the database with the new image, from a staged copy of the new
    `compose.yml` in a temporary folder of the directory: same project, so the
    same network and attachments volume. The directory's own files are not
-   touched. The check also counts the locks of the way back and shows them
-   with the room of the DB server (`Locks for the way back: ...`); see
-   [The lock table of the way back](#the-lock-table-of-the-way-back). With the
-   same modules, too little room gives a warning: the way back without the
+   touched. The check also counts the locks that the way back can take and
+   shows them with the room of the DB server (`Locks for the way back: ...`);
+   see [The lock table of the way back](#the-lock-table-of-the-way-back). With
+   the same modules, too little room gives a warning: the way back without the
    data needs no restore.
 4. Check the room for the backup: the size of the database
    (`pg_database_size`) and of `filestore/DB_NAME` together must fit in the free
@@ -710,12 +720,16 @@ folder of the old or the new release (it names the folder of the upgrade;
 `service.sh` and `reset_database.py` are the same in both, which the tests
 pin), step 5 in a folder of the old release; one command at a time, each
 with exit status 0, and a stop at the first failure; what success looks like
-(`App stopped.`, only the `Container ... Creating`/`Created` lines of Docker,
-`Deployment verified:`); that the `perl: warning: Setting locale failed`
-lines of step 3 are harmless (the Odoo images set `LANG=en_US.UTF-8` and have
-only the `C`, `C.utf8` and `POSIX` locales); the down time (about one minute
-when the old images are on the server: 45 seconds in a test of v1.0.8, more
-when step 5 pulls them); and that the HTTPS front of `https.sh` stays as it
+(`App stopped.`; only the `Container ... Creating`/`Created` lines of Docker
+for steps 2 and 4; these lines and two blocks of 7 `perl: warning` lines for
+step 3; `Deployment verified:`); that the `perl: warning` lines of step 3 are
+harmless (one block for its `pg_restore`, one for its `psql`: the Odoo images
+set `LANG=en_US.UTF-8` and have only the `C`, `C.utf8` and `POSIX` locales),
+with the 7 lines; the down time (about one minute for a database of 112 MB
+when the old images are on the server: 45 seconds in a test of v1.0.8; it
+grows with the size of the database and of the attachments, which
+`restore.txt` gives as they were before the backup, and step 5 takes longer
+when it pulls the images); and that the HTTPS front of `https.sh` stays as it
 is.
 After that, every user must sign in again. The restored database has the
 password hashes and the single-session values of the backup, so without the
@@ -736,47 +750,100 @@ the directory.
 ### The lock table of the way back
 
 Step 3 of `restore.txt` restores the backup in one transaction, so that a
-failure leaves an empty database to restore again, never half a database. Up
-to its commit, PostgreSQL keeps a lock on each object that it creates: each
-relation (table, index, sequence, view, materialized view, TOAST table and
-TOAST index), and, as PostgreSQL 16.15 records dependencies, each constraint,
-type, function, operator class and schema that a new object depends on. The
-REFRESH of a materialized view adds a new heap. All these locks must fit in
-the lock table of the DB server, which is shared by all its sessions. If they
-do not, step 3 stops with `out of shared memory` and the App stays down.
+failure leaves an empty database to restore again, never half a database (a
+database with large objects is the exception: `pg_restore` writes a `COMMIT`
+for them; Odoo databases of this project have none). Up to its commit,
+PostgreSQL keeps a lock on each relation that the restore creates or reads,
+and, as PostgreSQL 16.15 records dependencies, on each object that a new
+object depends on. All these locks must fit in the lock table of the DB
+server, which is shared by all its sessions. If they do not, step 3 can stop
+with `out of shared memory`; the database is then empty and the App stays
+down.
 
-`preflight.py upgrade-check` counts these objects in the database (catalog
-rows with an OID from 16384, without temporary objects) and reads the size of
-the lock table: `max_locks_per_transaction` x (`max_connections` +
-`max_prepared_transactions`), as the PostgreSQL documentation gives it. It
-prints both as `RESTORE_LOCKS`; `deploy-app.sh` shows them as
-`Locks for the way back: ...`. The need is the count plus a margin of 1,000:
-the locks that other sessions on the DB server hold while step 3 runs
-(autovacuum, other databases, monitoring; the App is stopped), about 15
-sessions at the default of 64, and the restore's few locks outside the count.
+`preflight.py upgrade-check` counts what the restore can lock, more rather
+than less, and reads the size of the lock table: `max_locks_per_transaction`
+x (`max_connections` + `max_prepared_transactions`), as the PostgreSQL
+documentation gives it. It prints both as `RESTORE_LOCKS`; `deploy-app.sh`
+shows them as `Locks for the way back: ...`. The count has:
+
+- each relation from OID 16384 outside temporary schemas (tables, indexes,
+  sequences, views, materialized views, TOAST tables and their indexes), and
+  each materialized view once more for the new heap of its `REFRESH` (three
+  times when it has TOAST);
+- each object from OID 16384 outside temporary schemas in `pg_constraint`,
+  `pg_type` (an array type only when an object depends on it), `pg_proc`,
+  `pg_operator`, `pg_opclass`, `pg_opfamily`, `pg_collation`,
+  `pg_conversion`, `pg_ts_config`, `pg_ts_dict`, `pg_ts_parser`,
+  `pg_ts_template`, `pg_statistic_ext`, `pg_namespace`, `pg_extension`,
+  `pg_language`, `pg_am`, `pg_cast`, `pg_transform`,
+  `pg_foreign_data_wrapper`, `pg_foreign_server`, `pg_event_trigger`,
+  `pg_publication` and `pg_largeobject_metadata`, and each trigger, rule and
+  policy with a comment (`COMMENT ON` locks it);
+- each object below OID 16384 that such an object depends on (such as the
+  schema `public` and `plpgsql`), and each system relation (413 in
+  PostgreSQL 16: `CREATE COLLATION` and views can keep a lock on one);
+- each role and tablespace from OID 16384, two types for each materialized
+  view (the row type of the new heap and its array type), and the
+  transaction ID.
+
+The need is the count plus a margin of 1,000 for the locks that other
+sessions on the DB server hold while step 3 runs (autovacuum, other
+databases, monitoring; the App is stopped): about 15 sessions at the default
+of 64.
 
 Measured with PostgreSQL 16.15, the `pg_dump` 18 of the release image and the
-command of step 3, on an Odoo 19 database of this project (888 tables, 5,246
-relations): `pg_locks` at the end of the restore held 10,679 objects in the
-lock table: the 5,246 relations, 4,470 constraints, 917 types, 28 functions
-and 18 other objects. The count gives 10,686. So the restore needs about twice
-as many locks as there are relations. The restore passed with
-`max_locks_per_transaction` 54 and stopped with `out of shared memory` at 52
-(with `max_connections` 100): PostgreSQL 16 also sizes the table for its
-background processes, and a full table takes free shared memory. Nothing
-promises that room, so the check uses the documented size.
+command of step 3, with `pg_locks` before the commit (the locks in the lock
+table, not the 16 fast-path slots of the session):
+
+| Database | Locks held | Count |
+| --- | --- | --- |
+| Odoo 19 database of this project (888 tables, 5,246 relations) | 10,678 | 11,103 |
+| Odoo-shaped fixture (700 models, 150 many2many tables, `CHECK` constraints) | 12,489 | 13,615 |
+| Each kind of object above (collations, text search, user array columns, enum, composite, domain and range types, populated materialized views, extensions, functions, operators) and 150 Odoo-shaped tables | 1,510 | 1,946 |
+| 400 populated materialized views, 300 enum array columns, 300 row-type array columns, 20 text search configurations, 20 collations | 7,457 | 7,869 |
+
+The Odoo database needs about twice as many locks as it has relations: each
+constraint and each row type is also locked. The restore of the Odoo database
+passed with `max_locks_per_transaction` 54 and stopped with
+`out of shared memory` at 52 (with `max_connections` 100): PostgreSQL 16 also
+sizes the table for its background processes, and a full table takes free
+shared memory. Nothing promises that room, so the check uses the documented
+size.
 
 With a module upgrade, the backup is the only way back, and too little room
-refuses the upgrade before anything changes. The message gives the two numbers
-and the value of `max_locks_per_transaction` that gives the room. Set it in
-`postgresql.conf` of the DB server (`deploy-db.sh` does not set it; for its
-cluster `main`: `sudo pg_conftool 16 main set max_locks_per_transaction 128`),
-then restart PostgreSQL (`sudo bash service.sh --role db restart`, with the App
-stopped before and started after). PostgreSQL's default of 64 with 100
-connections (room for 6,400) is too small for a UAT database of v1.0.8 (about
-10,500 objects). With the same modules, too little room is a warning: the way
-back without the data needs no restore. `restore.txt` gives the two numbers at
-step 3.
+refuses the upgrade before anything changes (and at the second check, with the
+App stopped, with the same reason). The refusal gives the two numbers and the
+value to set: 128, the value of the DB servers of this project, or more when
+the database needs more. `deploy-app.sh` then prints the steps. PostgreSQL's
+default of 64 with 100 connections (room for 6,400) is too small for an Odoo
+database of this project (about 12,100 with the margin). With the same
+modules, too little room is a warning: the way back without the data needs no
+restore. `restore.txt` gives the two numbers and the command at step 3.
+
+`deploy-db.sh` sets 128 on a new DB server. On a DB server that it set up
+earlier, show the value and the room (this changes nothing):
+
+```bash
+sudo -u postgres psql -X -At -c "SELECT current_setting('max_locks_per_transaction'), current_setting('max_connections'), current_setting('max_prepared_transactions'), current_setting('max_locks_per_transaction')::int * (current_setting('max_connections')::int + current_setting('max_prepared_transactions')::int)"
+```
+
+It shows `max_locks_per_transaction|max_connections|max_prepared_transactions|room`,
+such as `64|100|0|6400`. To set 128, when nobody works in the system:
+
+1. On the App server, stop the App:
+   `sudo bash service.sh --role app --dir /opt/perodua-app stop`
+2. On the DB server, set the value for the PostgreSQL 16 cluster `main` of
+   `deploy-db.sh` (for another `PG_CLUSTER` in its `deploy.conf`, use that
+   name): `sudo pg_conftool 16 main set max_locks_per_transaction 128`
+3. On the DB server, in the `scripts` folder of `deploy-db.sh`, restart
+   PostgreSQL: `sudo bash service.sh --role db restart`
+4. On the DB server, run the query above again: it shows `128|100|0|12800`
+   (with 100 connections).
+5. On the App server, start the App:
+   `sudo bash service.sh --role app --dir /opt/perodua-app start`
+
+A run of `deploy-db.sh` of this kit on that DB server does steps 2 and 3 too,
+but stop the App before it.
 
 ## Module upgrade (-u)
 

@@ -103,7 +103,9 @@ def module_db(cmd):
             again = os.environ.get('FAKE_' + name + '_AGAIN') if second else None
             return again if again is not None else os.environ.get('FAKE_' + name, default)
         if value('REFUSE'):
-            reply(code=1, err='\n'.join('Database preflight: module upgrade refused: ' + r for r in value('REFUSE').split('|')))
+            # A refusal for the lock table comes with its numbers on standard output.
+            reply(locks().strip() if 'the way back can fail' in value('REFUSE') else '', 1,
+                  '\n'.join('Database preflight: module upgrade refused: ' + r for r in value('REFUSE').split('|')))
         if state == 'from':
             if os.environ.get('FAKE_OTHER_FINGERPRINT'):
                 reply(code=1, err='Database preflight: database module fingerprint does not match this release, and is not the fingerprint this release upgrades modules from')
@@ -553,13 +555,29 @@ class UpgradeTests(UpgradeHarness, unittest.TestCase):
                       f'    scripts folder of {OLD_RELEASE}.\n'
                       '  - Each command must end without an error (exit status 0: echo $? shows 0).\n'
                       '    If one fails, stop: do not run the next step.', hint)
-        for line in ('step 1 shows\n    "App stopped."', 'step 5 shows "Deployment verified:"\n    with',
-                     'lines that start with "perl: warning: Setting locale\n    failed"', 'They\n    are harmless',
-                     f'The App is down from step 1 to the end of step 5: about one minute when\n    the images of {OLD_RELEASE} '
-                     'are still on this server, longer when step 5\n    must pull them.',
+        for line in ('step 1 shows\n    "App stopped."', 'steps 2 and 4 show only the "Container ... Creating" and\n'
+                     '    "Created" lines of Docker, step 3 shows these two lines and the perl\n    warnings below',
+                     f'step 5 shows "Deployment verified:" with\n    {OLD_RELEASE}.',
+                     'The App is down from step 1 to the end of step 5. In a test with a\n    database of 112 MB, that was about '
+                     'one minute. The time grows with the\n    size of the database (step 3) and of the attachments (step 4).\n'
+                     '    Before this backup: database perodua 2 MB, attachments 1 MB.\n'
+                     f'    Step 5 takes longer when it must pull the images of\n    {OLD_RELEASE}. Meanwhile',
                      f'The HTTPS front (https.sh) can stay as it is: {OLD_RELEASE} works behind\n    it, so no nginx step is needed.',
-                     'At the backup it had room for 6400 locks, and this step\n   needed 1250 with a margin'):
+                     'too small: at the backup it had room for 6400 locks, and this step can\n   need 1250 with a margin.',
+                     '     sudo pg_conftool 16 main set max_locks_per_transaction 128\n'
+                     '   and, in the scripts folder of deploy-db.sh: sudo bash service.sh --role db restart\n'
+                     '   Then run steps 2 and 3 again.'):
             self.assertIn(line, hint)
+        # The perl warnings of step 3, line by line as the restore of the test
+        # with v1.0.8 printed them two times (three of them start with a tab).
+        self.assertIn('  - Step 3 shows these 7 lines two times, for its pg_restore and its psql.\n'
+                      '    They are harmless: the Odoo image has no en_US.UTF-8 locale.\n', hint)
+        shown = hint.split('the Odoo image has no en_US.UTF-8 locale.\n', 1)[1].splitlines()[:7]
+        self.assertEqual([line.strip() for line in shown], [
+            'perl: warning: Setting locale failed.', 'perl: warning: Please check that your locale settings:',
+            'LANGUAGE = (unset),', 'LC_ALL = (unset),', 'LANG = "en_US.UTF-8"', 'are supported and installed on your system.',
+            'perl: warning: Falling back to the standard locale ("C").'])
+        self.assertNotIn('would fail', result.stdout)
         self.assertLess(hint.index('Run the commands in this order'), hint.index('1. Stop the App'))
         self.assertIn('Locks for the way back:', result.stdout)
         self.assertNotIn('Warning: with these settings', result.stdout)  # the default fixture fits
@@ -584,15 +602,24 @@ class UpgradeTests(UpgradeHarness, unittest.TestCase):
         # The way back without the data needs no restore: the upgrade goes on.
         result = self.run_script(locks='5246 5440 1000 64 100 0')
         self.assertEqual(result.returncode, 0, result.stdout)
-        self.assertIn('Locks for the way back: restore.txt step 3 restores database perodua in one transaction and locks '
-                      'about 10686 objects', result.stdout)
-        self.assertIn('Warning: with these settings, restore.txt step 3 stops with "out of shared memory" and leaves '
+        self.assertIn('Locks for the way back: restore.txt step 3 restores database perodua in one transaction and can '
+                      'lock up to 10686 objects', result.stdout)
+        self.assertIn('Warning: with these settings, restore.txt step 3 can stop with "out of shared memory" and leave '
                       f'database perodua empty. The way back without the data of the backup (the identity and app.env of '
                       f'{OLD_RELEASE}, then its deploy-app.sh) needs no restore. To keep the way back with the data, set '
-                      'max_locks_per_transaction to 117 or more on the DB server and restart PostgreSQL.', result.stdout)
+                      'max_locks_per_transaction to 128 on the DB server and restart PostgreSQL there, with the App stopped '
+                      '(README.md, "The lock table of the DB server", gives the steps).', result.stdout)
         [backup] = self.backups()
-        self.assertIn('room for 6400 locks, and this step\n   needed 11686 with a margin: set max_locks_per_transaction to\n'
-                      '   117 or more there', (backup / 'restore.txt').read_text())
+        self.assertIn('room for 6400 locks, and this step can\n   need 11686 with a margin.', (backup / 'restore.txt').read_text())
+        self.assertIn('sudo pg_conftool 16 main set max_locks_per_transaction 128\n', (backup / 'restore.txt').read_text())
+
+    def test_a_database_that_needs_more_than_128_locks_per_connection_gets_its_own_value(self):
+        # 11686 locks over 50 connections: 234 each.
+        result = self.run_script(locks='5246 5440 1000 64 50 0')
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn('set max_locks_per_transaction to 234 on the DB server', result.stdout)
+        [backup] = self.backups()
+        self.assertIn('sudo pg_conftool 16 main set max_locks_per_transaction 234\n', (backup / 'restore.txt').read_text())
 
     def test_the_backup_runs_keep_no_container_log(self):
         # pg_dump and tar stream the backup to standard output; Docker's json-file

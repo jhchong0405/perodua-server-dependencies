@@ -138,33 +138,74 @@ CREATE TABLE stock_picking (id {pk}, name varchar, perodua_wcs_pick_instruction_
                             perodua_dispatch_state varchar, perodua_outbound_route_id integer);
 '''
 
-# For the lock test on PostgreSQL: each kind of object a restore creates.
-# pg_trgm is a trusted extension: the owner of the database may create it.
-RESTORE_FIXTURE = """
-CREATE EXTENSION IF NOT EXISTS pg_trgm;
-CREATE TYPE fixture_state AS ENUM ('draft', 'done');
-CREATE DOMAIN fixture_code AS varchar(8) CHECK (VALUE <> '');
-CREATE TYPE fixture_pair AS (a int, b text);
-CREATE FUNCTION fixture_trim() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN NEW.name := trim(NEW.name); RETURN NEW; END';
-CREATE TABLE fixture_order (id serial PRIMARY KEY, name text NOT NULL, code fixture_code UNIQUE, state fixture_state,
-                            pair fixture_pair, user_id int REFERENCES res_users ON DELETE SET NULL, CHECK (id > 0));
-COMMENT ON CONSTRAINT fixture_order_user_id_fkey ON fixture_order IS 'who ordered';
-CREATE INDEX fixture_order_name_trgm ON fixture_order USING gin (name gin_trgm_ops);
-CREATE TRIGGER fixture_order_trim BEFORE INSERT ON fixture_order FOR EACH ROW EXECUTE FUNCTION fixture_trim();
-INSERT INTO fixture_order (name, code, state) VALUES (' first ', 'A1', 'draft');
-CREATE TABLE fixture_line (id serial PRIMARY KEY, order_id int NOT NULL REFERENCES fixture_order ON DELETE CASCADE, note text);
-CREATE TABLE fixture_line_extra (extra text) INHERITS (fixture_line);
-CREATE TABLE fixture_event (id int, at date NOT NULL, note text) PARTITION BY RANGE (at);
-CREATE TABLE fixture_event_2026 PARTITION OF fixture_event FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');
-CREATE TABLE fixture_event_2027 PARTITION OF fixture_event FOR VALUES FROM ('2027-01-01') TO ('2028-01-01');
-CREATE INDEX fixture_event_at ON fixture_event (at);
-CREATE UNLOGGED TABLE fixture_cache (key text PRIMARY KEY, value jsonb);
-CREATE SEQUENCE fixture_number;
-CREATE VIEW fixture_open AS SELECT id, name FROM fixture_order WHERE state = 'draft';
-CREATE MATERIALIZED VIEW fixture_totals AS SELECT state, count(*) AS n FROM fixture_order GROUP BY state;
-CREATE SCHEMA fixture_api;
-CREATE VIEW fixture_api.orders_v1 AS SELECT id, name FROM public.fixture_order;
-"""
+# For the lock test on PostgreSQL: each kind of object that a restore creates
+# and can lock, as the owner of the database can create it (pg_trgm and
+# unaccent are trusted extensions), one transaction at a time.
+RESTORE_FIXTURE = [
+    """CREATE EXTENSION IF NOT EXISTS pg_trgm;
+       CREATE EXTENSION IF NOT EXISTS unaccent;
+       CREATE TYPE fixture_state AS ENUM ('draft', 'done');
+       CREATE DOMAIN fixture_code AS varchar(8) CHECK (VALUE <> '');
+       CREATE TYPE fixture_pair AS (a int, b text);
+       CREATE TYPE fixture_span AS RANGE (subtype = int4);
+       CREATE COLLATION fixture_c FROM "C";
+       COMMENT ON COLLATION fixture_c IS 'byte order';
+       CREATE TEXT SEARCH DICTIONARY fixture_dict (TEMPLATE = simple);
+       CREATE TEXT SEARCH CONFIGURATION fixture_ts (COPY = simple);
+       ALTER TEXT SEARCH CONFIGURATION fixture_ts ALTER MAPPING FOR asciiword WITH unaccent, fixture_dict;
+       CREATE CONVERSION fixture_conv FOR 'LATIN1' TO 'UTF8' FROM iso8859_1_to_utf8;
+       COMMENT ON CONVERSION fixture_conv IS 'latin1'""",
+    """CREATE FUNCTION fixture_trim() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN NEW.name := trim(NEW.name); RETURN NEW; END';
+       CREATE FUNCTION fixture_pair_eq(fixture_pair, fixture_pair) RETURNS boolean LANGUAGE sql IMMUTABLE AS 'SELECT $1.a = $2.a';
+       CREATE OPERATOR === (LEFTARG = fixture_pair, RIGHTARG = fixture_pair, FUNCTION = fixture_pair_eq);
+       COMMENT ON OPERATOR === (fixture_pair, fixture_pair) IS 'the same a';
+       CREATE FUNCTION fixture_pair_text(fixture_pair) RETURNS text LANGUAGE sql IMMUTABLE AS 'SELECT $1.b';
+       CREATE CAST (fixture_pair AS text) WITH FUNCTION fixture_pair_text(fixture_pair);
+       COMMENT ON CAST (fixture_pair AS text) IS 'b';
+       CREATE FUNCTION fixture_states(fixture_state[]) RETURNS int LANGUAGE sql IMMUTABLE AS 'SELECT cardinality($1)'""",
+    """CREATE TABLE fixture_order (id serial PRIMARY KEY, name text NOT NULL COLLATE fixture_c, code fixture_code UNIQUE,
+                                  state fixture_state, states fixture_state[] DEFAULT '{}', pair fixture_pair,
+                                  pairs fixture_pair[], codes fixture_code[], spans fixture_span[], body text,
+                                  user_id int REFERENCES res_users ON DELETE SET NULL,
+                                  double int GENERATED ALWAYS AS (id * 2) STORED, CHECK (id > 0));
+       COMMENT ON CONSTRAINT fixture_order_user_id_fkey ON fixture_order IS 'who ordered';
+       CREATE INDEX fixture_order_name_trgm ON fixture_order USING gin (name gin_trgm_ops);
+       CREATE INDEX fixture_order_body ON fixture_order USING gin (to_tsvector('fixture_ts'::regconfig, body));
+       CREATE TRIGGER fixture_order_trim BEFORE INSERT ON fixture_order FOR EACH ROW EXECUTE FUNCTION fixture_trim();
+       COMMENT ON TRIGGER fixture_order_trim ON fixture_order IS 'trims the name';
+       CREATE STATISTICS fixture_order_stats ON id, user_id FROM fixture_order;
+       COMMENT ON STATISTICS fixture_order_stats IS 'together';
+       INSERT INTO fixture_order (name, code, state, states, pairs, codes, spans, body)
+            VALUES (' first ', 'A1', 'draft', '{draft}', ARRAY[(1, 'x')::fixture_pair], '{A1}', '{"[1,5)"}', 'a long note')""",
+    """CREATE FUNCTION fixture_done() RETURNS bigint LANGUAGE sql STABLE
+           BEGIN ATOMIC SELECT count(*) FROM fixture_order WHERE state = 'done'::fixture_state; END""",
+    """CREATE TABLE fixture_line (id serial PRIMARY KEY, order_id int NOT NULL REFERENCES fixture_order ON DELETE CASCADE,
+                                 history fixture_order[], note text);
+       CREATE TABLE fixture_line_extra (extra text) INHERITS (fixture_line);
+       CREATE TABLE fixture_typed OF fixture_pair;
+       CREATE TABLE fixture_event (id int, at date NOT NULL, note text) PARTITION BY RANGE (at);
+       CREATE TABLE fixture_event_2026 PARTITION OF fixture_event FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');
+       CREATE TABLE fixture_event_2027 PARTITION OF fixture_event FOR VALUES FROM ('2027-01-01') TO ('2028-01-01');
+       CREATE INDEX fixture_event_at ON fixture_event (at);
+       CREATE UNLOGGED TABLE fixture_cache (key text PRIMARY KEY, value jsonb);
+       CREATE SEQUENCE fixture_number""",
+    """CREATE TABLE fixture_log (id int, note text);
+       CREATE RULE fixture_log_notify AS ON INSERT TO fixture_log DO ALSO NOTIFY fixture_log;
+       COMMENT ON RULE fixture_log_notify ON fixture_log IS 'tells listeners';
+       ALTER TABLE fixture_log ENABLE ROW LEVEL SECURITY;
+       CREATE POLICY fixture_log_all ON fixture_log USING (true);
+       COMMENT ON POLICY fixture_log_all ON fixture_log IS 'everyone';
+       CREATE PUBLICATION fixture_pub FOR TABLE fixture_log;
+       COMMENT ON PUBLICATION fixture_pub IS 'the log'""",
+    """CREATE VIEW fixture_open AS SELECT id, name, states FROM fixture_order WHERE state = 'draft';
+       CREATE MATERIALIZED VIEW fixture_totals AS SELECT state, count(*) AS n, string_agg(body, ',') AS bodies
+                                                    FROM fixture_order GROUP BY state;
+       CREATE INDEX fixture_totals_state ON fixture_totals (state);
+       CREATE MATERIALIZED VIEW fixture_ids AS SELECT id, user_id FROM fixture_order;
+       CREATE MATERIALIZED VIEW fixture_later AS SELECT id FROM fixture_order WITH NO DATA;
+       CREATE SCHEMA fixture_api;
+       CREATE VIEW fixture_api.orders_v1 AS SELECT id, name FROM public.fixture_order""",
+]
 
 
 def fingerprint(addons):
@@ -399,33 +440,43 @@ class PreflightModuleUpgradeTests(unittest.TestCase):
         self.env['FAKE_PG_LOCK_TABLE'] = '11 90 10'  # a prepared transaction has room too
         self.assertTrue(self.check().endswith('MODULE_UPGRADE 1'))
         # One lock more than the room: refused before anything is written.
+        # The numbers come first on standard output, for the steps that
+        # deploy-app.sh prints.
         self.env.update(FAKE_PG_LOCK_TABLE='11 100 0', FAKE_PG_OBJECTS=str(101 - relations))
-        error = self.check(ok=False)
-        self.assertIn('Database preflight: module upgrade refused: the way back would fail. restore.txt step 3 '
-                      'restores the backup of database perodua in one transaction, which locks about 101 objects '
+        result = self.process('upgrade-check', self.from_fp)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertEqual(result.stdout, f'RESTORE_LOCKS {relations} {101 - relations} 1000 11 100 0\n')
+        self.assertIn('Database preflight: module upgrade refused: the way back can fail. restore.txt step 3 '
+                      'restores the backup of database perodua in one transaction, which can lock up to 101 objects '
                       f'({relations} tables, indexes, sequences, views and TOAST tables, and {101 - relations} constraints, '
-                      'types and other objects). With a margin of 1000 for the other sessions on the DB server, it needs '
-                      '1101 locks, and the DB server has room for 1100: max_locks_per_transaction 11 x (max_connections 100 '
-                      '+ max_prepared_transactions 0). With too few, step 3 stops with "out of shared memory", leaves the '
-                      'database empty and the App stays down.', error)
-        self.assertIn('set max_locks_per_transaction to 12 or more in postgresql.conf (/etc/postgresql/16/main/postgresql.conf',
-                      error)
-        self.assertIn('sudo bash service.sh --role db restart', error)
+                      'types, system tables and other objects). With a margin of 1000 for the other sessions on the DB '
+                      'server, it can need 1101 locks, and the DB server has room for 1100: max_locks_per_transaction 11 x '
+                      '(max_connections 100 + max_prepared_transactions 0). With too few, step 3 can stop with "out of '
+                      'shared memory", leave the database empty and the App down. Set max_locks_per_transaction to 128 on '
+                      'the DB server and restart PostgreSQL there, with the App stopped (README.md, "The lock table of the '
+                      'DB server", gives the steps). Then run --upgrade again', result.stderr)
+        self.assertNotIn('would fail', result.stderr)
+        # 128, the value of the DB servers of this project, or more when the
+        # database needs more: 1101 locks over 5 connections is 221 each.
+        self.env['FAKE_PG_LOCK_TABLE'] = '11 5 0'
+        self.assertIn('Set max_locks_per_transaction to 221 on the DB server', self.check(ok=False))
+        self.env['FAKE_PG_LOCK_TABLE'] = '11 100 0'
         result = self.process('mark-upgrading', self.from_fp, 'client-stable-uiux-v1.0.6', 'client-stable-uiux-v1.2.0')
         self.assertEqual(result.returncode, 3, result.stderr)  # deploy-app.sh starts the old App again
-        self.assertIn('the way back would fail', result.stderr)
+        self.assertIn('the way back can fail', result.stderr)
         self.assertEqual(self.params()['perodua.image_modhash'], self.from_fp)
         self.assertNotIn('perodua.kit_upgrade', self.params())
         # The same modules: no module upgrade and no refusal. The line is
-        # there; deploy-app.sh warns that restore.txt step 3 would fail.
+        # there; deploy-app.sh warns that restore.txt step 3 can fail.
         self.param('perodua.image_modhash', self.new_fp)
         self.assertEqual(self.check().splitlines(), [f'RESTORE_LOCKS {relations} {101 - relations} 1000 11 100 0', 'READY 1'])
 
     @unittest.skipUnless(PG and all(shutil.which(tool) for tool in ('pg_dump', 'pg_restore', 'psql')),
                          'needs PREFLIGHT_TEST_PG, and pg_dump, pg_restore and psql on the PATH')
     def test_the_lock_count_is_what_a_restore_locks(self):
-        self.addCleanup(lambda: self.sql('DROP SCHEMA IF EXISTS fixture_api CASCADE'))
-        self.sql(RESTORE_FIXTURE)
+        self.addCleanup(lambda: self.sql('DROP PUBLICATION IF EXISTS fixture_pub; DROP SCHEMA IF EXISTS fixture_api CASCADE'))
+        for transaction in RESTORE_FIXTURE:
+            self.sql(transaction)
         # Odoo models, each with TOAST, a sequence and foreign keys. A few per
         # transaction, as a server with a small lock table has room for.
         for first in range(0, 150, 10):
@@ -436,15 +487,17 @@ class PreflightModuleUpgradeTests(unittest.TestCase):
         relations, others, per_transaction, connections, prepared = count
         need, room = relations + others + 1000, per_transaction * (connections + prepared)
         result = self.process('upgrade-check', self.from_fp)
+        self.assertEqual(self.locks(result.stdout), [relations, others, 1000, per_transaction, connections, prepared])
         if need <= room:
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(self.locks(result.stdout), [relations, others, 1000, per_transaction, connections, prepared])
         else:
             self.assertEqual(result.returncode, 1, result.stdout)
-            self.assertIn(f'it needs {need} locks, and the DB server has room for {room}', result.stderr)
-        # restore.txt steps 2 and 3: the database is emptied, a few tables per
+            self.assertIn(f'it can need {need} locks, and the DB server has room for {room}', result.stderr)
+        # restore.txt steps 2 and 3: the database is emptied, a few objects per
         # transaction as reset_database.py does it, then a dump is restored in
-        # one transaction. Before its commit, the transaction reads its own locks.
+        # one transaction. Before its commit, the transaction reads its own
+        # locks in the lock table of the server: not those in the 16 fast-path
+        # slots of the session, and not the lock of this query on pg_locks.
         env = dict(os.environ, PGPASSWORD=PG[3])
         server = ['--host', PG[0], '--port', PG[1], '--username', PG[2], '--no-password']
         dump = self.base / 'database.dump'
@@ -453,11 +506,15 @@ class PreflightModuleUpgradeTests(unittest.TestCase):
                                 capture_output=True, text=True).stdout.replace('\nSET transaction_timeout = 0;\n', '\n', 1)
         for first in range(0, 150, 10):
             self.sql('DROP TABLE ' + ', '.join(f'model_{n}' for n in range(first, first + 10)))
-        self.sql('DROP SCHEMA public CASCADE; DROP SCHEMA fixture_api CASCADE; CREATE SCHEMA public')
-        probe = ('\\o\nSELECT count(DISTINCT relation) FILTER (WHERE locktype = \'relation\' AND relation >= 16384),'
-                 ' count(DISTINCT (classid, objid)) FILTER (WHERE locktype = \'object\' AND objid >= 16384 AND database <> 0),'
-                 ' count(DISTINCT (locktype, database, relation, classid, objid, objsubid, virtualxid, transactionid::text))'
-                 ' FILTER (WHERE NOT fastpath) FROM pg_locks WHERE pid = pg_backend_pid();\n')
+        for statement in ('DROP PUBLICATION fixture_pub', 'DROP SCHEMA fixture_api CASCADE',
+                          'DROP MATERIALIZED VIEW fixture_totals, fixture_ids, fixture_later',
+                          'DROP TABLE fixture_log, fixture_cache, fixture_event, fixture_typed, fixture_line CASCADE',
+                          'DROP SCHEMA public CASCADE; CREATE SCHEMA public'):
+            self.sql(statement)
+        probe = ("\\o\nSELECT count(DISTINCT relation) FILTER (WHERE locktype = 'relation' AND relation >= 16384),"
+                 " count(DISTINCT (locktype, database, relation, classid, objid, objsubid, virtualxid, transactionid::text))"
+                 " FILTER (WHERE NOT fastpath AND relation IS DISTINCT FROM 'pg_locks'::regclass)"
+                 " FROM pg_locks WHERE pid = pg_backend_pid();\n")
         restore = subprocess.run(['psql', '-X', '-q', '-A', '-t', '-F', ' ', '-v', 'ON_ERROR_STOP=1', '--single-transaction', *server,
                                   '--dbname', PG[4]], input='\\o /dev/null\n' + script + probe, env=env,
                                  capture_output=True, text=True, timeout=600)
@@ -466,16 +523,14 @@ class PreflightModuleUpgradeTests(unittest.TestCase):
             self.assertIn('out of shared memory', restore.stderr)
             self.assertGreater(need, room)
             return
-        locked_relations, locked_others, locked = (int(value) for value in restore.stdout.split())
-        self.assertEqual(locked_relations, relations)  # each relation of the dump
-        # The other objects: the count may be a little above. PostgreSQL
-        # 16.15 locks what a new object depends on; a release that locks
-        # less or more than that makes the count wrong, and this says so.
-        self.assertLessEqual(locked_others, others)
-        self.assertGreater(locked_others, others * 9 // 10)
-        # In the lock table of the server (not in the 16 fast-path slots of
-        # the session): only a few more, which the margin covers.
-        self.assertLessEqual(locked, relations + others + 20, restore.stdout)
+        locked_relations, locked = (int(value) for value in restore.stdout.split())
+        # Each relation of the dump, and the new heaps of the REFRESH of the
+        # materialized views (no longer in pg_class), are in the count.
+        self.assertLessEqual(locked_relations, relations)
+        # The count is an upper bound of what the restore holds in the lock
+        # table: collations, text search objects, user array types and the
+        # types of the new heaps of REFRESH included.
+        self.assertGreaterEqual(relations + others, locked, f'count {relations} + {others}, locked {locked}')
         self.assertEqual(self.sql(RESTORE_LOCKS_SQL), [count])  # the restored database counts the same
 
     # ── the mark ────────────────────────────────────────────────────────────

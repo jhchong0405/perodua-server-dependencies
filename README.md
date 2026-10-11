@@ -209,6 +209,15 @@ If an answer cannot be used, the script says why and asks again. Wait for
 system needs no backup settings. The answers are saved in `scripts/deploy.conf`
 and reused by later runs.
 
+`deploy-db.sh` also sets `max_locks_per_transaction` to 128 in
+`postgresql.conf` when it is lower (a higher value stays), and restarts
+PostgreSQL for it: the way back of an upgrade restores the database in one
+transaction, which needs this room (see
+[The lock table of the way back](docs/DEPLOYMENT.md#the-lock-table-of-the-way-back)).
+A later run changes nothing. On a DB server whose App already runs, a run that
+raises the value closes the App's connections for a moment: stop the App
+first.
+
 ## 3. App server
 
 ```bash
@@ -467,8 +476,8 @@ that you give with `--backup-dir PATH`). If the backup fails, it starts the old
 App again and stops. Then it deploys the new release with the usual checks.
 `restore.txt` in the backup folder gives the commands that put the data back.
 Before the App stops, the check also counts the locks that the restore of
-this database takes (`Locks for the way back: ...`), with the room that the DB
-server has for them.
+this database can take (`Locks for the way back: ...`), with the room that the
+DB server has for them.
 
 If it stops before the switch, the directory and its App stay as they were. If
 it stops later, it tells you the state of the server and the ways back:
@@ -594,33 +603,41 @@ name `perodua`: if yours are others, use them in their place.
 - **The way back is the backup.** After the upgrade, the release that ran
   before cannot run on the database. See "The way back" at the end.
 - **The lock table of the DB server.** The way back restores the database in
-  one transaction. Until it ends, it holds a lock on each table, index,
-  sequence, constraint and type that it creates: about 10,500 for a UAT
-  database of v1.0.8. With a margin of 1,000, `max_locks_per_transaction` x
-  (`max_connections` + `max_prepared_transactions`) must be about 11,500 or
-  more. Step 11 counts it and refuses the upgrade before anything changes when
-  the room is too small. Show the settings, on the DB server:
+  one transaction. Until it ends, it can hold a lock on each table, index,
+  sequence, constraint and type of the database, and on some system tables:
+  about 11,100 for an Odoo database of this project. With a margin of 1,000
+  for the other sessions, `max_locks_per_transaction` x (`max_connections` +
+  `max_prepared_transactions`) must be about 12,100 or more. Step 11 counts it
+  and refuses the upgrade before anything changes when the room is too small.
+  PostgreSQL's defaults (64 and 100) give room for 6,400: too few. The DB
+  servers of this project use 128 (room for 12,800 with 100 connections);
+  `deploy-db.sh` sets it on a new DB server. Show the value and the room, on
+  the DB server (this changes nothing):
 
   ```bash
-  sudo -u postgres psql -X -At -c "SELECT current_setting('max_locks_per_transaction'), current_setting('max_connections'), current_setting('max_prepared_transactions')"
+  sudo -u postgres psql -X -At -c "SELECT current_setting('max_locks_per_transaction'), current_setting('max_connections'), current_setting('max_prepared_transactions'), current_setting('max_locks_per_transaction')::int * (current_setting('max_connections')::int + current_setting('max_prepared_transactions')::int)"
   ```
 
-  PostgreSQL's defaults (`64|100|0`) give room for 6,400 locks: too few. To set
-  128 (room for 12,800), when nobody works in the system:
+  It shows `max_locks_per_transaction|max_connections|max_prepared_transactions|room`,
+  such as `64|100|0|6400`. When the first number is less than 128, set 128,
+  when nobody works in the system:
 
-  1. On the App server, from a `scripts` folder, stop the App:
+  1. On the App server, in the `scripts` folder of the release that runs,
+     stop the App:
      `sudo bash service.sh --role app --dir /opt/perodua-app stop`
-  2. On the DB server, set the value for the cluster `main` of `deploy-db.sh`
-     (it writes `/etc/postgresql/16/main/postgresql.conf`):
+  2. On the DB server, set the value for the PostgreSQL 16 cluster `main` of
+     `deploy-db.sh` (it writes `/etc/postgresql/16/main/postgresql.conf`; for
+     another `PG_CLUSTER` in its `deploy.conf`, use that name):
      `sudo pg_conftool 16 main set max_locks_per_transaction 128`
-  3. On the DB server, from its `scripts` folder, restart PostgreSQL:
-     `sudo bash service.sh --role db restart`. Then the command above shows
-     `128` first.
-  4. On the App server, from the same folder, start the App:
+  3. On the DB server, in the `scripts` folder of `deploy-db.sh`, restart
+     PostgreSQL: `sudo bash service.sh --role db restart`
+  4. On the DB server, run the query above again. It shows `128|100|0|12800`
+     (with 100 connections).
+  5. On the App server, start the App:
      `sudo bash service.sh --role app --dir /opt/perodua-app start`
 
-  With another `max_connections`, use the value that the refusal of step 11
-  names.
+  When the refusal of step 11 names another value (a database that needs
+  more, or fewer connections), set that value instead.
 
 **The new `scripts` folder.** Start in the folder that holds the old `setup`
 folders. Keep them: the way back uses the folder of the release that runs now.
@@ -748,11 +765,11 @@ of v1.0.5 to v1.0.8. These steps make sure that they are still correct.
       The release is the one that runs now. A database that `--init-db` set
       up has 30 modules to upgrade;
     - counts the locks of the way back. It shows
-      `Locks for the way back: restore.txt step 3 restores database perodua in one transaction and locks about N objects (...). With a margin of 1000 it needs M. The DB server has room for R: max_locks_per_transaction ...`.
+      `Locks for the way back: restore.txt step 3 restores database perodua in one transaction and can lock up to N objects (...). With a margin of 1000 it can need M. The DB server has room for R: max_locks_per_transaction ...`.
       When R is less than M, it stops with
-      `Database preflight: module upgrade refused: the way back would fail. ...`:
-      set the value that the line names (see "Before you start"), then do
-      step 11 again;
+      `Database preflight: module upgrade refused: the way back can fail. ...`,
+      followed by the steps that set the value it names on the DB server (as
+      in "Before you start"). Do them, then do step 11 again;
     - counts the data of the retired modules. `Retired data: none.` is the
       usual answer. If it lists tables, columns or attachments with a count,
       it stops with `The module upgrade deletes the retired data above`: get
@@ -940,12 +957,15 @@ step 3, for example, leaves the database empty.
    `Created` lines of Docker.
 3. Restore `database.dump`, with the tools of the Odoo image as the command
    does. The `pg_restore` of the DB server cannot read the file. It shows the
-   same Docker lines, and can also show lines that start with
-   `perl: warning: Setting locale failed` and
-   `perl: warning: Falling back to the standard locale`. They are harmless:
-   the Odoo image has no `en_US.UTF-8` locale. If it stops with
-   `out of shared memory`, raise `max_locks_per_transaction` on the DB server
-   as `restore.txt` says, then run steps 2 and 3 again.
+   same Docker lines and two blocks of 7 `perl: warning` lines, one for its
+   `pg_restore` and one for its `psql`. Each block starts with
+   `perl: warning: Setting locale failed.`, names `LANGUAGE`, `LC_ALL` and
+   `LANG`, and ends with
+   `perl: warning: Falling back to the standard locale ("C").`. They are
+   harmless: the Odoo image has no `en_US.UTF-8` locale. If it stops with
+   `out of shared memory`, set `max_locks_per_transaction` on the DB server
+   as `restore.txt` says (the App is already stopped), then run steps 2 and 3
+   again.
 4. Put the attachments back. This also ends every sign-in: all users must
    sign in again. It shows only the Docker lines.
 5. Copy `deployment-identity` and `app.env` from the backup folder back into
@@ -959,11 +979,13 @@ step 3, for example, leaves the database empty.
 
    It shows `Deployment verified:` with the old release.
 
-The App is down from step 1 to the end of step 5: about one minute when the
-images of the old release are still on the server (a test with v1.0.8: 50
-seconds for the commands, 45 seconds without the App), longer when step 5
-must pull them. Meanwhile the HTTPS names show an error such as
-`502 Bad Gateway`.
+The App is down from step 1 to the end of step 5: about one minute for a
+database of 112 MB, when the images of the old release are still on the server
+(a test with v1.0.8: 50 seconds for the commands, 45 seconds without the App).
+The time grows with the size of the database (step 3) and of the attachments
+(step 4); `restore.txt` gives both sizes before the backup. Step 5 takes
+longer when it must pull the images. Meanwhile the HTTPS names show an error
+such as `502 Bad Gateway`.
 
 The HTTPS configuration of step 10 can stay: v1.0.5 to v1.0.8 work with it,
 and no nginx step is needed. nginx keeps closing port 443 for a host name that

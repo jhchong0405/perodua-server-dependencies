@@ -53,9 +53,12 @@ UPGRADE=0 BACKUP_BASE='' BACKUP_DIR='' OLD_RELEASE='' OLD_REVISION='' WAS_RUNNIN
 # that waited in the queue before it), and whether the containers of the old
 # release are removed.
 MODULE_UPGRADE=0 UPGRADE_MODULES='' DEMO_FLAG='' RETIRED_TOTAL=0 RETIRED_LINES=() DROP_RETIRED=0 CONFIRM=''
-# The locks restore.txt step 3 needs (with the margin), the room for locks on
-# the DB server, and the max_locks_per_transaction that gives the room.
-LOCKS_NEED='' LOCKS_ROOM='' LOCKS_SETTING=''
+# The locks restore.txt step 3 can need (with the margin), the room for locks
+# on the DB server, and the max_locks_per_transaction to set there: 128, the
+# value of the DB servers of this project (deploy-db.sh sets it), or more when
+# the database needs more. The size of the database and of its attachments
+# before the backup, in KB, for the down time in restore.txt.
+LOCKS_NEED='' LOCKS_ROOM='' LOCKS_SETTING='' LOCKS_STANDARD=128 LOCKS_LINE='' DB_SIZE_KB='' FILES_SIZE_KB=''
 UPGRADE_CONTAINER='' UPGRADE_PID='' PENDING_ONLY=0 PENDING_STAMP=0 HELD_MAIL='' HELD_MAIL_BEFORE='' RELEASE_MAIL=0 DB_MARKED=0 OLD_REMOVED=0
 DB_HOST='' DB_PORT=5432 DB_NAME=perodua DB_USER=odoo DB_PASSWORD_FILE=''
 PROJECT_NAME=perodua-client-uiux HTTP_PORT=8110 BIND_IP=0.0.0.0
@@ -685,7 +688,9 @@ cat > "$TEMP_DIR/preflight.py" <<'PY'
 #                        RESTORE_LOCKS <relations> <other objects> <margin>
 #                        <max_locks_per_transaction> <max_connections>
 #                        <max_prepared_transactions>: the locks restore.txt
-#                        step 3 needs, and the lock table of the DB server
+#                        step 3 can need, and the lock table of the DB server.
+#                        When they do not fit, the line comes before the
+#                        refusal (also of mark-upgrading)
 #   retired-export       the rows the upgrade deletes, as CSV in a tar.gz
 #   mark-upgrading FROM OLD NEW
 #                        saves the cron flags and the last mail id, and sets
@@ -920,35 +925,83 @@ def module_upgrade_problems(cur, modules, installed, uat, excluded_rows):
                             % (module, name, other[0], table, code))
     return problems
 # The way back, restore.txt step 3, restores the backup in one transaction. Up
-# to its commit it holds a lock on each object that it creates: each relation
-# (table, index, sequence, view, materialized view, TOAST table and TOAST
-# index) and, as PostgreSQL 16.15 records dependencies, each constraint, type,
-# function, operator class and schema that a new object depends on. The
-# REFRESH of a materialized view adds a new heap, with its TOAST table and
-# index. On a dump of an Odoo 19 database of this project (888 tables, 5246
-# relations), pg_locks at the end of the restore showed 10679 locks, and this
-# count gives 10686. Temporary objects of other sessions are not in a dump.
-RESTORE_LOCKS = """SELECT count(*) FILTER (WHERE o.kind = 'relation'), count(*) FILTER (WHERE o.kind = 'other'),
+# to its commit it keeps a lock on each relation that it creates or reads and,
+# as PostgreSQL 16.15 records dependencies, on each object that a new object
+# depends on. RESTORE_LOCKS counts all that it can lock, more rather than
+# less:
+#   - each relation from OID 16384 outside temporary schemas, and each
+#     materialized view once more for the new heap of its REFRESH (three
+#     times with its TOAST table and index);
+#   - each object from OID 16384 outside temporary schemas in pg_constraint,
+#     pg_type (an array type only when an object depends on it), pg_proc,
+#     pg_operator, pg_opclass, pg_opfamily, pg_collation, pg_conversion,
+#     pg_ts_config, pg_ts_dict, pg_ts_parser, pg_ts_template,
+#     pg_statistic_ext, pg_namespace, pg_extension, pg_language, pg_am,
+#     pg_cast, pg_transform, pg_foreign_data_wrapper, pg_foreign_server,
+#     pg_event_trigger, pg_publication and pg_largeobject_metadata, and each
+#     trigger, rule and policy with a comment (COMMENT ON locks it);
+#   - each object below OID 16384 that such an object depends on (such as the
+#     schema public and plpgsql), and each system relation (CREATE COLLATION
+#     and views can keep a lock on one);
+#   - each role and tablespace from OID 16384, two types for each
+#     materialized view (the row type of the new heap and its array type),
+#     and the transaction ID.
+# Measured with PostgreSQL 16.15 before the commit (the locks in the lock
+# table): an Odoo 19 database of this project (888 tables, 5246 relations)
+# held 10678, and this count gives 11103 (413 of them system relations); a
+# database with each kind of object above held 1510, and the count gives 1946.
+RESTORE_LOCKS = """WITH relation AS (
+        SELECT c.relkind, c.reltoastrelid FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE c.oid >= 16384 AND n.nspname !~ '^pg_(toast_)?temp_'),
+     object (catalog, oid, ns) AS (
+        SELECT 'pg_constraint'::regclass, oid, connamespace FROM pg_constraint
+        UNION ALL SELECT 'pg_type'::regclass, oid, typnamespace FROM pg_type t
+                   WHERE typcategory <> 'A' OR EXISTS (SELECT FROM pg_depend WHERE refclassid = 'pg_type'::regclass AND refobjid = t.oid)
+        UNION ALL SELECT 'pg_proc'::regclass, oid, pronamespace FROM pg_proc
+        UNION ALL SELECT 'pg_operator'::regclass, oid, oprnamespace FROM pg_operator
+        UNION ALL SELECT 'pg_opclass'::regclass, oid, opcnamespace FROM pg_opclass
+        UNION ALL SELECT 'pg_opfamily'::regclass, oid, opfnamespace FROM pg_opfamily
+        UNION ALL SELECT 'pg_collation'::regclass, oid, collnamespace FROM pg_collation
+        UNION ALL SELECT 'pg_conversion'::regclass, oid, connamespace FROM pg_conversion
+        UNION ALL SELECT 'pg_ts_config'::regclass, oid, cfgnamespace FROM pg_ts_config
+        UNION ALL SELECT 'pg_ts_dict'::regclass, oid, dictnamespace FROM pg_ts_dict
+        UNION ALL SELECT 'pg_ts_parser'::regclass, oid, prsnamespace FROM pg_ts_parser
+        UNION ALL SELECT 'pg_ts_template'::regclass, oid, tmplnamespace FROM pg_ts_template
+        UNION ALL SELECT 'pg_statistic_ext'::regclass, oid, stxnamespace FROM pg_statistic_ext
+        UNION ALL SELECT 'pg_namespace'::regclass, oid, oid FROM pg_namespace
+        UNION ALL SELECT 'pg_extension'::regclass, oid, NULL FROM pg_extension
+        UNION ALL SELECT 'pg_language'::regclass, oid, NULL FROM pg_language
+        UNION ALL SELECT 'pg_am'::regclass, oid, NULL FROM pg_am
+        UNION ALL SELECT 'pg_cast'::regclass, oid, NULL FROM pg_cast
+        UNION ALL SELECT 'pg_transform'::regclass, oid, NULL FROM pg_transform
+        UNION ALL SELECT 'pg_foreign_data_wrapper'::regclass, oid, NULL FROM pg_foreign_data_wrapper
+        UNION ALL SELECT 'pg_foreign_server'::regclass, oid, NULL FROM pg_foreign_server
+        UNION ALL SELECT 'pg_event_trigger'::regclass, oid, NULL FROM pg_event_trigger
+        UNION ALL SELECT 'pg_publication'::regclass, oid, NULL FROM pg_publication
+        UNION ALL SELECT 'pg_largeobject_metadata'::regclass, oid, NULL FROM pg_largeobject_metadata
+        UNION ALL SELECT classoid, objoid, NULL FROM pg_description
+                   WHERE classoid IN ('pg_trigger'::regclass, 'pg_rewrite'::regclass, 'pg_policy'::regclass)),
+     other AS (
+        SELECT o.catalog, o.oid FROM object o LEFT JOIN pg_namespace n ON n.oid = o.ns
+         WHERE o.oid >= 16384 AND coalesce(n.nspname !~ '^pg_(toast_)?temp_', true)
+        UNION SELECT refclassid, refobjid FROM pg_depend WHERE objid >= 16384 AND refobjid < 16384
+        UNION SELECT 'pg_class'::regclass, oid FROM pg_class WHERE oid < 16384
+        UNION SELECT 'pg_namespace'::regclass, oid FROM pg_namespace WHERE nspname = 'public'
+        UNION SELECT 'pg_authid'::regclass, oid FROM pg_roles WHERE oid >= 16384
+        UNION SELECT 'pg_tablespace'::regclass, oid FROM pg_tablespace WHERE oid >= 16384)
+SELECT (SELECT count(*) + count(*) FILTER (WHERE relkind = 'm') + 2 * count(*) FILTER (WHERE relkind = 'm' AND reltoastrelid <> 0)
+          FROM relation),
+       (SELECT count(*) FROM other) + 2 * (SELECT count(*) FROM relation WHERE relkind = 'm') + 1,
        current_setting('max_locks_per_transaction')::int, current_setting('max_connections')::int,
-       current_setting('max_prepared_transactions')::int
-  FROM (SELECT 'relation' AS kind, oid, relnamespace AS ns FROM pg_class
-        UNION ALL SELECT 'relation', oid, relnamespace FROM pg_class,
-                         generate_series(1, CASE WHEN reltoastrelid <> 0 THEN 3 ELSE 1 END) WHERE relkind = 'm'
-        UNION ALL SELECT 'other', oid, connamespace FROM pg_constraint
-        UNION ALL SELECT 'other', oid, typnamespace FROM pg_type WHERE typcategory <> 'A'
-        UNION ALL SELECT 'other', oid, pronamespace FROM pg_proc
-        UNION ALL SELECT 'other', oid, oprnamespace FROM pg_operator
-        UNION ALL SELECT 'other', oid, opcnamespace FROM pg_opclass
-        UNION ALL SELECT 'other', oid, opfnamespace FROM pg_opfamily
-        UNION ALL SELECT 'other', oid, extnamespace FROM pg_extension
-        UNION ALL SELECT 'other', oid, oid FROM pg_namespace) o
-  JOIN pg_namespace n ON n.oid = o.ns
- WHERE o.oid >= 16384 AND n.nspname !~ '^pg_(toast_)?temp_'"""
+       current_setting('max_prepared_transactions')::int"""
 # Room for the locks that other sessions on the DB server hold while step 3
-# runs (autovacuum, other databases, monitoring; the App is stopped), about 15
-# sessions at the default of 64, and for the restore's few locks outside the
-# count (4 measured).
+# runs (autovacuum, other databases, monitoring; the App is stopped): about 15
+# sessions at the default of 64.
 RESTORE_LOCK_MARGIN = 1000
+# The max_locks_per_transaction of the DB servers of this project, which
+# deploy-db.sh sets: with 100 connections, room for 12800 locks. A database
+# that needs more gets its own value.
+RESTORE_LOCK_SETTING = 128
 def restore_locks(cur):
     cur.execute(RESTORE_LOCKS)
     return tuple(int(value) for value in cur.fetchone())
@@ -958,24 +1011,22 @@ def restore_locks_line(locks):
 def restore_locks_problem(locks):
     # The size of the lock table as the PostgreSQL documentation gives it.
     # PostgreSQL 16 also counts its background processes, and a full table
-    # can take free shared memory, so a restore can pass with more (twice as
-    # many in a test), but nothing promises that.
+    # can take free shared memory, so a restore can pass with less room (half
+    # in a test), but nothing promises that.
     relations, others, per_transaction, connections, prepared = locks
     need = relations + others + RESTORE_LOCK_MARGIN
     room = per_transaction * (connections + prepared)
     if need <= room:
         return None
-    return ('the way back would fail. restore.txt step 3 restores the backup of database %s in one transaction, which locks'
-            ' about %d objects (%d tables, indexes, sequences, views and TOAST tables, and %d constraints, types and other'
-            ' objects). With a margin of %d for the other sessions on the DB server, it needs %d locks, and the DB server has'
-            ' room for %d: max_locks_per_transaction %d x (max_connections %d + max_prepared_transactions %d). With too few,'
-            ' step 3 stops with "out of shared memory", leaves the database empty and the App stays down. On the DB server,'
-            ' set max_locks_per_transaction to %d or more in postgresql.conf (/etc/postgresql/16/main/postgresql.conf for the'
-            ' cluster main of deploy-db.sh, which does not set it) and restart PostgreSQL there with sudo bash service.sh'
-            ' --role db restart (stop the App before it and start it after, with service.sh --role app). Then run --upgrade'
-            ' again'
+    return ('the way back can fail. restore.txt step 3 restores the backup of database %s in one transaction, which can lock'
+            ' up to %d objects (%d tables, indexes, sequences, views and TOAST tables, and %d constraints, types, system tables'
+            ' and other objects). With a margin of %d for the other sessions on the DB server, it can need %d locks, and the DB'
+            ' server has room for %d: max_locks_per_transaction %d x (max_connections %d + max_prepared_transactions %d). With'
+            ' too few, step 3 can stop with "out of shared memory", leave the database empty and the App down. Set'
+            ' max_locks_per_transaction to %d on the DB server and restart PostgreSQL there, with the App stopped (README.md,'
+            ' "The lock table of the DB server", gives the steps). Then run --upgrade again'
             % (db, relations + others, relations, others, RESTORE_LOCK_MARGIN, need, room, per_transaction, connections,
-               prepared, -(-need // (connections + prepared))))
+               prepared, max(RESTORE_LOCK_SETTING, -(-need // (connections + prepared)))))
 def refuse(problems, code=1):
     for problem in problems:
         print('Database preflight: module upgrade refused: ' + problem, file=sys.stderr)
@@ -1248,7 +1299,11 @@ with connect(db) as cn:
             problems = module_upgrade_problems(cur, modules, installed, uat, excluded_records())
             # From the mark on, the backup is the only way back: it must fit.
             locks = restore_locks(cur)
-            problems += [problem for problem in (restore_locks_problem(locks),) if problem]
+            lock_problem = restore_locks_problem(locks)
+            if lock_problem:
+                # deploy-app.sh reads the numbers for the steps it prints.
+                print(restore_locks_line(locks))
+                problems.append(lock_problem)
             if problems:
                 # mark-upgrading: exit 3 says that nothing was written, so
                 # deploy-app.sh starts the old App again. Every other failure
@@ -1370,6 +1425,7 @@ upgrade_check_database() {
             fail "An earlier module upgrade of database $DB_NAME stopped part-way. Restore its backup first (above)"
         fi
         if grep -q 'module upgrade refused' "$TEMP_DIR/check.log"; then
+            lock_table_steps "$report"
             fail "$RELEASE has other Odoo modules than database $DB_NAME, and the module upgrade (-u) is refused for the reasons above"
         fi
         fail 'The database check above failed'
@@ -1380,7 +1436,7 @@ upgrade_check_database() {
             printf 'Database %s fits %s: the same Odoo modules, %s attachments.\n' "$DB_NAME" "$RELEASE" "${state#READY }"
             way_back_locks "$report"
             if ((LOCKS_NEED > LOCKS_ROOM)); then
-                printf 'Warning: with these settings, restore.txt step 3 stops with "out of shared memory" and leaves database %s empty. The way back without the data of the backup (the identity and app.env of %s, then its deploy-app.sh) needs no restore. To keep the way back with the data, set max_locks_per_transaction to %s or more on the DB server and restart PostgreSQL.\n' \
+                printf 'Warning: with these settings, restore.txt step 3 can stop with "out of shared memory" and leave database %s empty. The way back without the data of the backup (the identity and app.env of %s, then its deploy-app.sh) needs no restore. To keep the way back with the data, set max_locks_per_transaction to %s on the DB server and restart PostgreSQL there, with the App stopped (README.md, "The lock table of the DB server", gives the steps).\n' \
                     "$DB_NAME" "$OLD_RELEASE" "$LOCKS_SETTING" >&2
             fi
             return ;;
@@ -1414,18 +1470,43 @@ upgrade_check_database() {
         || fail "The module upgrade deletes the retired data above. Once its owner agreed, run --upgrade again with --drop-retired-data: the rows are saved as CSV in the backup folder (retired-data.tar.gz) before the upgrade"
     printf 'With --drop-retired-data: the rows above are saved as CSV in the backup folder, then deleted by the upgrade.\n'
 }
-way_back_locks() {  # the RESTORE_LOCKS line of an upgrade-check report: LOCKS_NEED, LOCKS_ROOM, LOCKS_SETTING
+locks_numbers() {  # the RESTORE_LOCKS line of an upgrade-check report: LOCKS_NEED, LOCKS_ROOM, LOCKS_SETTING and LOCKS_LINE
     local line relations others margin per_transaction connections prepared
     line=$(sed -n 's/^RESTORE_LOCKS //p' <<< "$1")
-    [[ $line =~ ^([0-9]+)\ ([0-9]+)\ ([0-9]+)\ ([0-9]+)\ ([0-9]+)\ ([0-9]+)$ ]] \
-        || fail "Unexpected lock count from the database check: ${line:-none}"
+    LOCKS_LINE=${line:-none}
+    [[ $line =~ ^([0-9]+)\ ([0-9]+)\ ([0-9]+)\ ([0-9]+)\ ([0-9]+)\ ([0-9]+)$ ]] || return 1
     relations=${BASH_REMATCH[1]} others=${BASH_REMATCH[2]} margin=${BASH_REMATCH[3]}
     per_transaction=${BASH_REMATCH[4]} connections=${BASH_REMATCH[5]} prepared=${BASH_REMATCH[6]}
-    ((connections + prepared > 0)) || fail "Unexpected lock count from the database check: $line"
+    ((connections + prepared > 0)) || return 1
     LOCKS_NEED=$((relations + others + margin)) LOCKS_ROOM=$((per_transaction * (connections + prepared)))
     LOCKS_SETTING=$(((LOCKS_NEED + connections + prepared - 1) / (connections + prepared)))
-    printf 'Locks for the way back: restore.txt step 3 restores database %s in one transaction and locks about %s objects (%s tables, indexes, sequences, views and TOAST tables, %s constraints, types and other objects). With a margin of %s it needs %s. The DB server has room for %s: max_locks_per_transaction %s x (max_connections %s + max_prepared_transactions %s).\n' \
-        "$DB_NAME" "$((relations + others))" "$relations" "$others" "$margin" "$LOCKS_NEED" "$LOCKS_ROOM" "$per_transaction" "$connections" "$prepared"
+    ((LOCKS_SETTING >= LOCKS_STANDARD)) || LOCKS_SETTING=$LOCKS_STANDARD
+    LOCKS_LINE=$(printf 'Locks for the way back: restore.txt step 3 restores database %s in one transaction and can lock up to %s objects (%s tables, indexes, sequences, views and TOAST tables, %s constraints, types, system tables and other objects). With a margin of %s it can need %s. The DB server has room for %s: max_locks_per_transaction %s x (max_connections %s + max_prepared_transactions %s).' \
+        "$DB_NAME" "$((relations + others))" "$relations" "$others" "$margin" "$LOCKS_NEED" "$LOCKS_ROOM" "$per_transaction" "$connections" "$prepared")
+}
+way_back_locks() {  # locks_numbers, and its line in the output
+    locks_numbers "$1" || fail "Unexpected lock count from the database check: $LOCKS_LINE"
+    printf '%s\n' "$LOCKS_LINE"
+}
+# Shows the value and the room of the lock table; it changes nothing.
+LOCKS_QUERY="SELECT current_setting('max_locks_per_transaction'), current_setting('max_connections'), current_setting('max_prepared_transactions'), current_setting('max_locks_per_transaction')::int * (current_setting('max_connections')::int + current_setting('max_prepared_transactions')::int)"
+lock_table_steps() {  # after a refusal of preflight.py for the lock table (its report in $1): how to give the DB server the room
+    if ! grep -q 'module upgrade refused: the way back can fail' "$TEMP_DIR/check.log" || ! locks_numbers "$1"; then return 0; fi
+    printf '%s\n' "$LOCKS_LINE" \
+        "To give the DB server the room, set max_locks_per_transaction to $LOCKS_SETTING there, with the App stopped:" \
+        "  1. On this App server, in $SCRIPT_DIR, stop the App:" \
+        "     sudo bash service.sh --role app --dir $(printf '%q' "$DEPLOY_DIR") stop" \
+        '  2. On the DB server, set the value for the PostgreSQL 16 cluster main of deploy-db.sh (for another' \
+        '     PG_CLUSTER in its deploy.conf, use that name):' \
+        "     sudo pg_conftool 16 main set max_locks_per_transaction $LOCKS_SETTING" \
+        '  3. On the DB server, in the scripts folder of deploy-db.sh, restart PostgreSQL:' \
+        '     sudo bash service.sh --role db restart' \
+        "  4. On the DB server, show the value and the room (this changes nothing): the first number must be" \
+        "     $LOCKS_SETTING and the last one $LOCKS_NEED or more:" \
+        "     sudo -u postgres psql -X -At -c \"$LOCKS_QUERY\"" \
+        '  5. On this App server, start the App:' \
+        "     sudo bash service.sh --role app --dir $(printf '%q' "$DEPLOY_DIR") start" \
+        'Then run --upgrade again.' >&2
 }
 retired_counts() {  # the RETIRED lines of an upgrade-check report: their total, and the lines that are not 0
     local kind name count
@@ -1446,6 +1527,11 @@ upgrade_recheck_database() {
     if ! report=$(staged run --rm --no-deps -T odoo python3 /opt/deploy/preflight.py upgrade-check "$MODULE_UPGRADE_FROM" \
             </dev/null 2> "$TEMP_DIR/check.log"); then
         cat "$TEMP_DIR/check.log" >&2
+        lock_table_steps "$report"
+        if [[ $(grep -c 'module upgrade refused' "$TEMP_DIR/check.log") == 1 ]] \
+                && grep -q 'module upgrade refused: the way back can fail' "$TEMP_DIR/check.log"; then
+            fail "The lock table of the DB server has too little room for the way back of database $DB_NAME, counted again with the App stopped (above): the module upgrade (-u) is refused"
+        fi
         if grep -q 'module upgrade refused' "$TEMP_DIR/check.log"; then
             fail "Database $DB_NAME changed while the App ran: the module upgrade (-u) is now refused for the reasons above"
         fi
@@ -1578,6 +1664,7 @@ upgrade_space() {  # the backup must fit, before the App stops
         </dev/null) || fail "Cannot read the size of database $DB_NAME and of its attachments (above)"
     [[ $sizes =~ ^([0-9]+)$'\n'([0-9]+)$ ]] || fail "Cannot read the size of database $DB_NAME and of its attachments: $sizes"
     database=${BASH_REMATCH[1]} attachments=${BASH_REMATCH[2]}
+    DB_SIZE_KB=$database FILES_SIZE_KB=$attachments  # for the down time in restore.txt
     base=${BACKUP_BASE:-$DEPLOY_DIR/backups}
     while [[ ! -d $base ]]; do base=${base%/*}; base=${base:-/}; done
     free=$(df -Pk -- "$base" | awk 'NR == 2 { print $4 }')
@@ -1630,18 +1717,26 @@ upgrade_backup() {
     cat "$BACKUP_DIR/restore.txt"
 }
 restore_hint() {  # how to put the backup back, saved next to it as restore.txt
-    local compose dump archive folder locks=''
+    local compose dump archive folder locks='' sizes=''
     compose=$(printf 'sudo docker compose --project-name %q --file %q' "$PROJECT_NAME" "$DEPLOY_DIR/compose.yml")
     dump=$(printf '%q' "$BACKUP_DIR/database.dump")
     archive=$(printf '%q' "$BACKUP_DIR/filestore.tar.gz:/restore.tar.gz:ro")
     folder=$(printf '%q' "$SCRIPT_DIR")
-    # The lock check of the upgrade (check-upgrade-backup.sh reads this function without it).
+    # The lock check and the sizes of the upgrade (check-upgrade-backup.sh
+    # reads this function without them).
     if [[ -n ${LOCKS_NEED:-} ]]; then
-        printf -v locks '\n%s\n%s\n%s\n%s' \
+        printf -v locks '\n%s\n%s\n%s\n%s\n%s\n%s\n%s' \
             '   If it stops with "out of shared memory", the lock table of the DB server is' \
-            "   too small. At the backup it had room for $LOCKS_ROOM locks, and this step" \
-            "   needed $LOCKS_NEED with a margin: set max_locks_per_transaction to" \
-            "   $LOCKS_SETTING or more there, restart PostgreSQL, then run steps 2 and 3 again."
+            "   too small: at the backup it had room for $LOCKS_ROOM locks, and this step can" \
+            "   need $LOCKS_NEED with a margin. The App is stopped (step 1). On the DB server," \
+            '   for the PostgreSQL 16 cluster main of deploy-db.sh, run:' \
+            "     sudo pg_conftool 16 main set max_locks_per_transaction $LOCKS_SETTING" \
+            '   and, in the scripts folder of deploy-db.sh: sudo bash service.sh --role db restart' \
+            '   Then run steps 2 and 3 again.'
+    fi
+    if [[ -n ${DB_SIZE_KB:-} && -n ${FILES_SIZE_KB:-} ]]; then
+        printf -v sizes '\n    Before this backup: database %s %s MB, attachments %s MB.' \
+            "$DB_NAME" "$(((DB_SIZE_KB + 1023) / 1024))" "$(((FILES_SIZE_KB + 1023) / 1024))"
     fi
     cat <<HINT
 Backup of $DEPLOY_DIR before the upgrade from $OLD_RELEASE to $RELEASE:
@@ -1660,15 +1755,24 @@ Run the commands in this order, one at a time:
     scripts folder of $OLD_RELEASE.
   - Each command must end without an error (exit status 0: echo \$? shows 0).
     If one fails, stop: do not run the next step. On success, step 1 shows
-    "App stopped.", steps 2, 3 and 4 show only the "Container ... Creating"
-    and "Created" lines of Docker, and step 5 shows "Deployment verified:"
-    with $OLD_RELEASE.
-  - Step 3 can also show lines that start with "perl: warning: Setting locale
-    failed" and "perl: warning: Falling back to the standard locale". They
-    are harmless: the Odoo image has no en_US.UTF-8 locale.
-  - The App is down from step 1 to the end of step 5: about one minute when
-    the images of $OLD_RELEASE are still on this server, longer when step 5
-    must pull them. Meanwhile the page shows an error such as 502 Bad Gateway.
+    "App stopped.", steps 2 and 4 show only the "Container ... Creating" and
+    "Created" lines of Docker, step 3 shows these two lines and the perl
+    warnings below, and step 5 shows "Deployment verified:" with
+    $OLD_RELEASE.
+  - Step 3 shows these 7 lines two times, for its pg_restore and its psql.
+    They are harmless: the Odoo image has no en_US.UTF-8 locale.
+      perl: warning: Setting locale failed.
+      perl: warning: Please check that your locale settings:
+              LANGUAGE = (unset),
+              LC_ALL = (unset),
+              LANG = "en_US.UTF-8"
+          are supported and installed on your system.
+      perl: warning: Falling back to the standard locale ("C").
+  - The App is down from step 1 to the end of step 5. In a test with a
+    database of 112 MB, that was about one minute. The time grows with the
+    size of the database (step 3) and of the attachments (step 4).$sizes
+    Step 5 takes longer when it must pull the images of
+    $OLD_RELEASE. Meanwhile the page shows an error such as 502 Bad Gateway.
   - The HTTPS front (https.sh) can stay as it is: $OLD_RELEASE works behind
     it, so no nginx step is needed.
 1. Stop the App:
