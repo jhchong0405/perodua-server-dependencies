@@ -220,6 +220,19 @@ RESTORE_FIXTURE = [
                for n in range(5)) for table in ('fixture_event', 'fixture_event_2026', 'fixture_event_2027')),
     """ALTER TABLE fixture_event_2026 ADD CONSTRAINT fixture_event_2026_user FOREIGN KEY (user_id) REFERENCES res_users ON DELETE SET NULL;
        ALTER TABLE fixture_event_2027 ADD CONSTRAINT fixture_event_2027_user FOREIGN KEY (user_id) REFERENCES res_users ON DELETE SET NULL""",
+    # Table inheritance (INHERITS, not partitions). The dump creates each
+    # child, which gets a copy of each default of its table, and then sets
+    # each inherited default apart (DEFAULT NULL where the child dropped it):
+    # the restore deletes each copy and keeps a lock on it, 12 here. A
+    # partition gets its defaults in its own CREATE TABLE: no lock.
+    """CREATE TABLE fixture_base (id int, a int DEFAULT 1, b text DEFAULT 'b', c date DEFAULT '2026-01-01');
+       CREATE TABLE fixture_kid (note text) INHERITS (fixture_base);
+       CREATE TABLE fixture_kid_bare () INHERITS (fixture_base);
+       ALTER TABLE fixture_kid_bare ALTER COLUMN a DROP DEFAULT, ALTER COLUMN b DROP DEFAULT, ALTER COLUMN c DROP DEFAULT;
+       CREATE TABLE fixture_kid_own () INHERITS (fixture_base);
+       ALTER TABLE fixture_kid_own ALTER COLUMN a SET DEFAULT 2;
+       CREATE TABLE fixture_grandkid () INHERITS (fixture_kid);
+       ALTER TABLE fixture_event ADD COLUMN level int DEFAULT 0""",
     """CREATE TABLE fixture_log (id int, note text);
        CREATE RULE fixture_log_notify AS ON INSERT TO fixture_log DO ALSO NOTIFY fixture_log;
        COMMENT ON RULE fixture_log_notify ON fixture_log IS 'tells listeners';
@@ -549,7 +562,8 @@ class PreflightModuleUpgradeTests(unittest.TestCase):
                                 capture_output=True, text=True).stdout.replace('\nSET transaction_timeout = 0;\n', '\n', 1)
         for first in range(0, 150, 10):
             self.sql('DROP TABLE ' + ', '.join(f'model_{n}' for n in range(first, first + 10)))
-        for statement in ('DROP PUBLICATION fixture_pub', 'DROP SCHEMA fixture_api CASCADE', 'DROP TABLE fixture_event',
+        for statement in ('DROP PUBLICATION fixture_pub', 'DROP SCHEMA fixture_api CASCADE', 'DROP TABLE fixture_base CASCADE',
+                          'DROP TABLE fixture_event',
                           'DROP TABLE fixture_kind', 'DROP MATERIALIZED VIEW fixture_totals, fixture_ids, fixture_later',
                           'DROP TABLE fixture_log, fixture_cache, fixture_typed, fixture_line CASCADE',
                           'DROP SCHEMA public CASCADE; CREATE SCHEMA public'):
@@ -578,13 +592,19 @@ class PreflightModuleUpgradeTests(unittest.TestCase):
         # table: collations, text search objects, user array types and the
         # types of the new heaps of REFRESH included.
         self.assertGreaterEqual(relations + others, locked, f'count {relations} + {others}, locked {locked}')
-        # And per catalog: the triggers above included. The two types of the
-        # new heap of each REFRESH are counted apart. pg_trgm and unaccent
-        # make and drop no object of their own in the restore.
+        # And per catalog: the triggers and the inherited defaults above
+        # included. The two types of the new heap of each REFRESH are counted
+        # apart, and so are the inherited defaults: what the count has above
+        # the catalogs, the types of the new heaps and the transaction ID.
+        # pg_trgm and unaccent make and drop no object of their own in the
+        # restore.
         self.assertGreaterEqual(held.get('pg_trigger', 0), 20)
-        for catalog, value in held.items():
-            room = counted.get(catalog, 0) + (2 * materialized_views if catalog == 'pg_type' else 0)
-            self.assertLessEqual(value, room, f'{catalog}: counted {room}, locked {value}')
+        self.assertGreaterEqual(held.get('pg_attrdef', 0), 12)
+        apart = {'pg_type': 2 * materialized_views,
+                 'pg_attrdef': others - sum(counted.values()) - 2 * materialized_views - 1}
+        over = [f'{catalog}: counted {counted.get(catalog, 0) + apart.get(catalog, 0)}, locked {value}'
+                for catalog, value in sorted(held.items()) if value > counted.get(catalog, 0) + apart.get(catalog, 0)]
+        self.assertEqual(over, [])
         # The restored database counts the same, less what the restore dropped:
         # the copies of the foreign keys are now one with the keys of their table.
         [[restored_relations, restored_others, *lock_table]] = self.sql(RESTORE_LOCKS_SQL)

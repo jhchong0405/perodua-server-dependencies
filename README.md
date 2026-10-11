@@ -111,7 +111,7 @@ after a backup of the database and the attachments. The steps are in
     Reviewed or Approved campaign uses;
   - each part has a Delivery Based On (PO / IDDI), PO until a user sets IDDI.
     At 17:00 each day, the open back order lines of PO parts go on one
-    confirmed PO per supplier;
+    confirmed PO per supplier and warehouse;
   - a new order saves with only its Customer, its Delivery date starts at the
     Order date plus one day, 12:00, and its Customer picker offers only the
     customers that Save accepts. An Export Order needs its export contract
@@ -128,13 +128,35 @@ after a backup of the database and the attachments. The steps are in
   - Agent Profile takes the place of the AGT agent registry, and Supplier
     Profile lists no agents;
   - each workbench table has white column names on a #305496 header row.
-- **Cross-site POSTs are refused** (new in v1.2.1). The POST routes of the
-  web page that take no CSRF token refuse a request whose `Origin` names
-  another host, or whose `Sec-Fetch-Site` is not `same-origin` or `none`
-  (403). Those that read JSON take only `Content-Type: application/json`
-  (415). The web page sends these. The nginx of the web image and `https.sh`
-  pass the host name on, so the servers need no change. A front proxy must
-  keep the `Host` header, as before.
+- **The 17:00 back order PO run is on** (new in v1.2.1). The scheduled action
+  `perodua_supplier_execution.cron_perodua_backorder_purchase_orders` comes on
+  with the upgrade (`Cron jobs new with this release: ... (on)`). Its first
+  run is at the first 17:00 Kuala Lumpur time after the module upgrade, or
+  when v1.2.1 starts if that time has passed. That run also takes the back
+  orders made before the upgrade. It puts each open back order line of a PO
+  part on a PO, but not a line of a BTB order, and not a line that it gives
+  a No PO Reason (campaign order, no supplier, Stop IDDI Creation window, no
+  receipt operation). It confirms each PO at once (a PO that needs approval
+  is not made, and its lines get a No PO Reason). It sends no mail and calls
+  no EBS. #1357 gives each existing part Delivery Based On PO, so the first
+  run takes the open back order lines of all parts. The new scheduled action
+  `perodua_supplier_execution.cron_manual_po_supplier_email_sync` runs every
+  15 minutes: it records whether the supplier e-mail of a Manual PO was sent
+  or failed, and sends no mail.
+- **POSTs from another site are refused** (new in v1.2.1). The POST routes
+  of the workbench web page (`/uiux/api/...`) that take no CSRF token refuse
+  a request whose `Origin` names another host (another name of the same site
+  too), or whose `Sec-Fetch-Site` is not `same-origin` or `none` (403). All of
+  them except the two file uploads also take only
+  `Content-Type: application/json` (415). Sign-in and sign-out
+  (`/uiux/api/session/login` and `logout`) check the origin in the same way
+  (403). The hand-over callback (`/uiux/api/handover/callback`) is a POST
+  from another host by design: the ticket page of the hub posts it to the
+  module name. It checks its signed ticket (for this module name, in time,
+  used once), and that the `Origin` is the hub and `Sec-Fetch-Site` is
+  `same-site`. The requests of the web page pass these checks. The nginx of
+  the web image and `https.sh` pass the host name on, so the servers need no
+  change. A front proxy must keep the `Host` header, as before.
 - **How long the upgrade takes.** On the sandbox, with v1.2.0 (the same module
   upgrade from v1.0.8): about 2.5 minutes, with the App down for about 1.5
   minutes of it. The way back with `restore.txt` took about 1 minute. The

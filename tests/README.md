@@ -308,8 +308,8 @@ fail") with `RESTORE_LOCKS` on standard output, both numbers and the value to
 set (128, or more when the database needs more, never less than the value of
 the server: 276 for a server at 256 with 4 connections), `mark-upgrading`
 then exits 3 and writes nothing, and the same modules are not refused. On PostgreSQL,
-with `pg_dump`, `pg_restore` and `psql` on the PATH, a database with every
-kind of object that a restore can create and lock is made a few objects per
+with `pg_dump`, `pg_restore` and `psql` on the PATH, a database with each
+kind of object that the count covers is made a few objects per
 transaction: 150 Odoo-shaped tables, the extensions `pg_trgm` and `unaccent`,
 enum, domain, composite and range types, a collation, a text search
 dictionary and configuration, a conversion, columns of user array types,
@@ -317,7 +317,10 @@ functions (one with a `BEGIN ATOMIC` body), an operator and a cast, a
 generated column, statistics, a trigger, a rule and a policy with comments, a
 publication, a partitioned, an inheriting, a typed and an unlogged table, 20
 triggers without a comment on the partitioned table (one with `DEPENDS ON
-EXTENSION`), a foreign key of it, a constraint trigger, 5 foreign keys of it
+EXTENSION`), a foreign key of it and a default, a constraint trigger, a table
+with 3 defaults and 3 `INHERITS` children of it and a grandchild (one child
+without these defaults, one with its own; the restore deletes the copies of
+12 defaults and keeps a lock on each), 5 foreign keys of the partitioned table
 to a partitioned table with 3 partitions and, on each partition, a copy of
 these keys and of its key to `res_users` (12, which the restore makes one
 with the keys of the table), a view, two populated materialized views (one
@@ -327,13 +330,20 @@ a few objects per transaction and restored in one transaction, as
 is at least the locks that the restore holds in the lock table (not those in
 the fast-path slots of the session, and not the lock of the probe on
 `pg_locks`), and so is the count of each catalog (with the two types of each
-`REFRESH` for `pg_type`); the restored relations are in the count, and the
-restored database counts the same, less what the restore dropped: no copy of
-a key is left (with PostgreSQL 16.15: 2,380 counted, 1,802 held; triggers 242
-counted, 118 held). With the count of 3902553, which counted only triggers
-with a comment, this test fails: `pg_trigger: counted 1, locked 118`; with
-the count of 3044160, which left out the internal triggers of partitions, it
-fails: `pg_trigger: counted 62, locked 118`. When the server has no room for
+`REFRESH` for `pg_type`, and the inherited defaults for `pg_attrdef`); the
+restored relations are in the count, and the restored database counts the
+same, less what the restore dropped: no copy of a key is left (with
+PostgreSQL 16.15: 2,414 counted, 1,834 held; triggers 242 counted, 118 held;
+inherited defaults 13 counted, 12 held). The test names each catalog with
+more locks than its count. With the count of 7666b07, which left out the
+inherited defaults, it fails with `pg_attrdef: counted 0, locked 12`; with a
+count of only the defaults that the children have, with
+`pg_attrdef: counted 10, locked 12`. With the count of 3044160, which also
+left out the internal triggers of partitions, it fails with these two:
+`pg_attrdef: counted 0, locked 12` and `pg_trigger: counted 62, locked 118`;
+with the count of 3902553, which counted only triggers with a comment, with
+`pg_attrdef: counted 0, locked 12` and `pg_trigger: counted 1, locked 118`.
+When the server has no room for
 the count, the check refuses, and a restore that fails stops with
 `out of shared memory`.
 

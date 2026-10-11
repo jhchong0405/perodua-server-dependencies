@@ -763,11 +763,18 @@ server, which is shared by all its sessions. If they do not, step 3 can stop
 with `out of shared memory`; the database is then empty and the App stays
 down.
 
-`preflight.py upgrade-check` counts what the restore can lock, more rather
-than less, and reads the size of the lock table: `max_locks_per_transaction`
-x (`max_connections` + `max_prepared_transactions`), as the PostgreSQL
+`preflight.py upgrade-check` counts the objects that the restore can lock and
+reads the size of the lock table: `max_locks_per_transaction` x
+(`max_connections` + `max_prepared_transactions`), as the PostgreSQL
 documentation gives it. It prints both as `RESTORE_LOCKS`; `deploy-app.sh`
-shows them as `Locks for the way back: ...`. The count has:
+shows them as `Locks for the way back: ...`. The count covers the kinds of
+objects in the list below, more rather than less. It is not a proof for each
+possible database: it is measured and tested on the databases in the table
+below, and the kit's lock test (`tests/test_preflight_module_upgrade.py`,
+on PostgreSQL in each integration run) compares it with the locks of each
+catalog on its own fixture. The margin of 1,000 covers the small rest. For
+the Odoo database of this project, the real restore passes with less than
+half of the counted need. The count has:
 
 - each relation from OID 16384 outside temporary schemas (tables, indexes,
   sequences, views, materialized views, TOAST tables and their indexes), and
@@ -797,6 +804,17 @@ shows them as `Locks for the way back: ...`. The count has:
   keys between tables that are not partitioned, are not locked and not
   counted (an Odoo database of this project has about 13,000, and no
   partitioned table);
+- each column with a default of a table that is an `INHERITS` child (not a
+  partition), and each inherited column of such a child whose parent column
+  has a default. `pg_dump` creates the child, which then gets a copy of each
+  default of its parent, and then sets each inherited default apart
+  (`DEFAULT NULL` when the child has none): PostgreSQL deletes the copy and
+  keeps a lock on it until the commit. A partition gets its defaults in its
+  own `CREATE TABLE`, so it has no such lock. An Odoo database of this
+  project has 5 `INHERITS` children (those of `ir_actions`), each with the
+  default of its `id`: they count 5, and the restore locks none of them,
+  because `pg_dump` sets the `serial` default of `ir_actions` after it
+  creates the children;
 - each object below OID 16384 that such an object depends on (such as the
   schema `public` and `plpgsql`), and each system relation (413 in
   PostgreSQL 16: `CREATE COLLATION` and views can keep a lock on one);
@@ -807,11 +825,12 @@ shows them as `Locks for the way back: ...`. The count has:
 The need is the count plus a margin of 1,000 for the locks that other
 sessions on the DB server hold while step 3 runs (autovacuum, other
 databases, monitoring; the App is stopped): about 15 sessions at the default
-of 64. The margin also covers the objects that the install script of an
-extension makes and drops in step 3: their locks stay until the commit, but
-no catalog shows them afterwards. Measured, for one extension each: `cube`
-14, `seg` 14, `intarray` 12, `hstore` 4, all the other trusted extensions 0
-(`pg_trgm` and `unaccent`, which this project uses, included).
+of 64. The margin also covers the small rest that the count does not have,
+such as the objects that the install script of an extension makes and drops
+in step 3: their locks stay until the commit, but no catalog shows them
+afterwards. Measured, for one extension each: `cube` 14, `seg` 14,
+`intarray` 12, `hstore` 4, all the other trusted extensions 0 (`pg_trgm` and
+`unaccent`, which this project uses, included).
 
 Measured with PostgreSQL 16.15, the `pg_dump` 18 of the release image and the
 command of step 3, with `pg_locks` before the commit (the locks in the lock
@@ -819,13 +838,18 @@ table, not the 16 fast-path slots of the session):
 
 | Database | Locks held | Count |
 | --- | --- | --- |
-| Odoo 19 database of this project (888 tables, 5,246 relations) | 10,678 | 11,135 |
+| Odoo 19 database of this project (888 tables, 5,246 relations) | 10,677 | 11,141 |
 | Odoo-shaped fixture (700 models, 150 many2many tables, `CHECK` constraints) | 12,489 | 13,645 |
 | Each kind of object above (20 trusted extensions, collations, text search, user array columns, enum, composite, domain and range types, populated materialized views, functions, operators, casts, partitions with foreign keys, rules, policies, a constraint trigger, a trigger with `DEPENDS ON EXTENSION`), made by the owner | 1,456 | 2,186 |
 | 400 populated materialized views, 300 enum array columns, 300 row-type array columns, 20 text search configurations, 20 collations | 7,457 | 8,269 |
 | A partitioned table with 2 partitions and 32,000 row triggers, made by the owner | 32,022 | 96,434 |
 | A table with 20 partitions and 50 foreign keys to a table with 30 partitions, and a copy of each key on each partition (1,000), made by the owner | 94,861 | 103,374 |
 | A table with 100 partitions and 200 foreign keys to a table that is not partitioned, and a copy of each key on each partition (20,000), made by the owner | 61,011 | 121,424 |
+| A table with 40 columns with a default and 200 `INHERITS` children, made by the owner | 8,804 | 9,219 |
+| The same, with the 40 defaults dropped on each child, made by the owner | 8,804 | 9,219 |
+
+The rows from the second to the seventh were measured before the inherited
+defaults came into the count, which can only make their count larger.
 
 The trigger database shows why each trigger counts: before, only a trigger
 with a comment counted, so the check gave 1,434 with the margin and found
@@ -836,15 +860,21 @@ foreign keys show why the internal triggers of partitions count: without
 them, the count of the first was 34,174, the check found room from 352
 (with 100 connections), and step 3 stopped with `out of shared memory` at
 352, 455, 506 and 507 (it passed from 508). Now the check finds room from
-1,044, and step 3 passes there.
+1,044, and step 3 passes there. The two databases with `INHERITS` children
+show why the inherited defaults count: without them, the count of each was
+1,219, the check found room from 23, and step 3 stopped with
+`out of shared memory` at 23 (the first database also at 33 and 41; it
+passed from 42). The children of the second database have no default of
+their own, so a count of the defaults of the children gives 0 there. Now
+the check finds room from 103 for each.
 
 The Odoo database needs about twice as many locks as it has relations: each
 constraint and each row type is also locked. The restore of the Odoo database
-passed with `max_locks_per_transaction` 54 and stopped with
-`out of shared memory` at 52 (with `max_connections` 100): PostgreSQL 16 also
-sizes the table for its background processes, and a full table takes free
-shared memory. Nothing promises that room, so the check uses the documented
-size.
+passed with `max_locks_per_transaction` 54 (room for 5,400, less than half of
+the counted need of 12,141) and stopped with `out of shared memory` at 53
+(with `max_connections` 100): PostgreSQL 16 also sizes the table for its
+background processes, and a full table takes free shared memory. Nothing
+promises that room, so the check uses the documented size.
 
 With a module upgrade, the backup is the only way back, and too little room
 refuses the upgrade before anything changes (and at the second check, with the

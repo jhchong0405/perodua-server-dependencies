@@ -928,8 +928,10 @@ def module_upgrade_problems(cur, modules, installed, uat, excluded_rows):
 # The way back, restore.txt step 3, restores the backup in one transaction. Up
 # to its commit it keeps a lock on each relation that it creates or reads and,
 # as PostgreSQL 16.15 records dependencies, on each object that a new object
-# depends on. RESTORE_LOCKS counts all that it can lock, more rather than
-# less:
+# depends on. RESTORE_LOCKS counts these kinds of objects, more rather than
+# less. It is measured and tested on the databases that docs/DEPLOYMENT.md
+# lists ("The lock table of the way back"); RESTORE_LOCK_MARGIN covers the
+# small rest:
 #   - each relation from OID 16384 outside temporary schemas, and each
 #     materialized view once more for the new heap of its REFRESH (three
 #     times with its TOAST table and index);
@@ -954,6 +956,14 @@ def module_upgrade_problems(cur, modules, installed, uat, excluded_rows):
 #     triggers, those of foreign keys between tables that are not
 #     partitioned, are not locked: an Odoo database has about 13000 of them,
 #     and no partitioned table;
+#   - each column with a default of an INHERITS child (not a partition), and
+#     each inherited column of such a child whose parent column has a
+#     default. pg_dump creates the child, which then gets a copy of each
+#     default of its parent, and sets each inherited default apart (DEFAULT
+#     NULL when the child has none): PostgreSQL deletes the copy and keeps a
+#     lock on it. The 5 children of ir_actions in an Odoo database count 5,
+#     although their copies are not locked: pg_dump sets the serial default
+#     of ir_actions after it creates the children;
 #   - each object below OID 16384 that such an object depends on (such as the
 #     schema public and plpgsql), and each system relation (CREATE COLLATION
 #     and views can keep a lock on one);
@@ -962,10 +972,11 @@ def module_upgrade_problems(cur, modules, installed, uat, excluded_rows):
 #     and the transaction ID.
 # Measured with PostgreSQL 16.15 before the commit (the locks in the lock
 # table): an Odoo 19 database of this project (888 tables, 5246 relations)
-# held 10678, and this count gives 11135 (413 of them system relations); a
+# held 10677, and this count gives 11141 (413 of them system relations); a
 # partitioned table with 32000 triggers held 32022, and the count gives 96434;
 # 1000 copies of foreign keys on 20 partitions, to a table with 30
-# partitions, held 94861, and the count gives 103374.
+# partitions, held 94861, and the count gives 103374; 200 INHERITS children
+# of a table with 40 defaults held 8804, and the count gives 9219.
 RESTORE_LOCKS = """WITH relation AS (
         SELECT c.relkind, c.reltoastrelid FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
          WHERE c.oid >= 16384 AND n.nspname !~ '^pg_(toast_)?temp_'),
@@ -1001,6 +1012,14 @@ RESTORE_LOCKS = """WITH relation AS (
                    WHERE NOT tgisinternal OR EXISTS (SELECT FROM pg_depend WHERE refclassid = 'pg_trigger'::regclass AND refobjid = t.oid)
                       OR EXISTS (SELECT FROM pg_description WHERE classoid = 'pg_trigger'::regclass AND objoid = t.oid)
                       OR EXISTS (SELECT FROM pg_class WHERE oid = t.tgrelid AND (relkind = 'p' OR relispartition))),
+     inherited_default AS (
+        SELECT a.attrelid, a.attnum FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE c.oid >= 16384 AND n.nspname !~ '^pg_(toast_)?temp_' AND NOT c.relispartition AND a.attnum > 0 AND NOT a.attisdropped
+           AND EXISTS (SELECT FROM pg_inherits WHERE inhrelid = c.oid)
+           AND (EXISTS (SELECT FROM pg_attrdef WHERE adrelid = a.attrelid AND adnum = a.attnum)
+                OR a.attinhcount > 0 AND EXISTS (SELECT FROM pg_inherits i JOIN pg_attribute p ON p.attrelid = i.inhparent AND p.attname = a.attname
+                                                  JOIN pg_attrdef d ON d.adrelid = p.attrelid AND d.adnum = p.attnum
+                                                  WHERE i.inhrelid = c.oid))),
      other AS (
         SELECT o.catalog, o.oid FROM object o LEFT JOIN pg_namespace n ON n.oid = o.ns
          WHERE o.oid >= 16384 AND coalesce(n.nspname !~ '^pg_(toast_)?temp_', true)
@@ -1011,7 +1030,7 @@ RESTORE_LOCKS = """WITH relation AS (
         UNION SELECT 'pg_tablespace'::regclass, oid FROM pg_tablespace WHERE oid >= 16384)
 SELECT (SELECT count(*) + count(*) FILTER (WHERE relkind = 'm') + 2 * count(*) FILTER (WHERE relkind = 'm' AND reltoastrelid <> 0)
           FROM relation),
-       (SELECT count(*) FROM other) + 2 * (SELECT count(*) FROM relation WHERE relkind = 'm') + 1,
+       (SELECT count(*) FROM other) + (SELECT count(*) FROM inherited_default) + 2 * (SELECT count(*) FROM relation WHERE relkind = 'm') + 1,
        current_setting('max_locks_per_transaction')::int, current_setting('max_connections')::int,
        current_setting('max_prepared_transactions')::int"""
 # Room for the locks that other sessions on the DB server hold while step 3
