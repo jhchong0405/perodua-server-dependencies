@@ -359,6 +359,9 @@ PHASE=preflight
 NETWORK_DIRTY=0
 HBA_BACKUP=''
 PGCONFIG_BACKUP=''
+# Whether PostgreSQL restarted with the changed postgresql.conf: only then does
+# a failure need a restart to put the old settings back, else a reload is enough.
+PGCONFIG_RESTARTED=0
 cleanup() {
     local rc=$?
     unset DB_PASSWORD VERIFIER
@@ -368,7 +371,7 @@ cleanup() {
             printf 'Restoring configuration snapshots after failed network setup.\n' >&2
             [[ -z $HBA_BACKUP ]] || cp -p -- "$HBA_BACKUP" "$HBA"
             [[ -z $PGCONFIG_BACKUP ]] || cp -p -- "$PGCONFIG_BACKUP" "$CLUSTER_CONF/postgresql.conf"
-            if [[ -n $PGCONFIG_BACKUP ]]; then
+            if [[ -n $PGCONFIG_BACKUP ]] && ((PGCONFIG_RESTARTED)); then
                 pg_ctlcluster 16 "$PG_CLUSTER" restart || printf 'Could not restart restored configuration; administrator action required.\n' >&2
             else
                 pg_ctlcluster 16 "$PG_CLUSTER" reload || printf 'Could not reload restored configuration; administrator action required.\n' >&2
@@ -620,13 +623,23 @@ running_locks=$(admin -c 'SHOW max_locks_per_transaction')
 ((running_locks >= LOCKS_PER_TRANSACTION)) || needs_restart=1
 if ((needs_restart)); then
     log 'Restarting PostgreSQL for the new settings: open connections are closed.'
+    PGCONFIG_RESTARTED=1
     restart_cluster
     [[ $(admin -c 'SHOW listen_addresses') == "$new_listen" ]] || die 'listen_addresses was overridden by another setting; inspect PostgreSQL configuration.'
     running_locks=$(admin -c 'SHOW max_locks_per_transaction')
     ((running_locks >= LOCKS_PER_TRANSACTION)) \
         || die 'max_locks_per_transaction was overridden by another setting; inspect PostgreSQL configuration.'
 fi
-"$PG_BIN/pg_isready" -h "$DB_LISTEN_IP" -p "$PG_PORT" >/dev/null || die 'PostgreSQL is not accepting connections at DB_LISTEN_IP.'
+# A connection that sends nothing: PostgreSQL logs nothing for it. pg_isready
+# as root logs a failed login of role root when no pg_hba.conf line fits root
+# from DB_LISTEN_IP (such as a LAN address).
+python3 - "$DB_LISTEN_IP" "$PG_PORT" <<'PY' || die 'PostgreSQL is not accepting connections at DB_LISTEN_IP.'
+import socket, sys
+try:
+    socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=3).close()
+except OSError as exc:
+    sys.exit(f'ERROR: no connection to {sys.argv[1]} port {sys.argv[2]}: {exc}')
+PY
 NETWORK_DIRTY=0
 
 # One server: DB_LISTEN_IP is Docker's address on this server, which exists

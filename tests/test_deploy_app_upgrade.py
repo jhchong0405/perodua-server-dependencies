@@ -551,8 +551,8 @@ class UpgradeTests(UpgradeHarness, unittest.TestCase):
         # the down time and the HTTPS front.
         self.assertIn(f'  - Steps 1 to 4 run in a scripts folder of {OLD_RELEASE} or of {RELEASE}, such\n'
                       f'    as {SCRIPTS} (this upgrade ran there): service.sh and\n'
-                      '    reset_database.py are in it, the same in both releases. Step 5 runs in a\n'
-                      f'    scripts folder of {OLD_RELEASE}.\n'
+                      '    reset_database.py are in it, and do the same in both releases. Step 5\n'
+                      f'    runs in a scripts folder of {OLD_RELEASE}.\n'
                       '  - Each command must end without an error (exit status 0: echo $? shows 0).\n'
                       '    If one fails, stop: do not run the next step.', hint)
         for line in ('step 1 shows\n    "App stopped."', 'steps 2 and 4 show only the "Container ... Creating" and\n'
@@ -563,20 +563,24 @@ class UpgradeTests(UpgradeHarness, unittest.TestCase):
                      '    Before this backup: database perodua 2 MB, attachments 1 MB.\n'
                      f'    Step 5 takes longer when it must pull the images of\n    {OLD_RELEASE}. Meanwhile',
                      f'The HTTPS front (https.sh) can stay as it is: {OLD_RELEASE} works behind\n    it, so no nginx step is needed.',
-                     'too small: at the backup it had room for 6400 locks, and this step can\n   need 1250 with a margin.',
-                     '     sudo pg_conftool 16 main set max_locks_per_transaction 128\n'
-                     '   and, in the scripts folder of deploy-db.sh: sudo bash service.sh --role db restart\n'
-                     '   Then run steps 2 and 3 again.'):
+                     # The room was enough at the backup: no value to set.
+                     '   At the backup, the lock table of the DB server had room for 6400 locks,\n'
+                     '   and this step can need 1250 with a margin: the room was enough. If it\n'
+                     '   stops with "out of shared memory", check on the DB server that\n'
+                     '   max_locks_per_transaction is still 64 or more (this changes nothing):\n'
+                     '     sudo -u postgres psql -X -At -c "SHOW max_locks_per_transaction"\n4. Put the attachments back'):
             self.assertIn(line, hint)
+        self.assertNotIn('pg_conftool', hint)
         # The perl warnings of step 3, line by line as the restore of the test
-        # with v1.0.8 printed them two times (three of them start with a tab).
+        # with v1.0.8 printed them two times, with its tabs, after an indent.
         self.assertIn('  - Step 3 shows these 7 lines two times, for its pg_restore and its psql.\n'
                       '    They are harmless: the Odoo image has no en_US.UTF-8 locale.\n', hint)
         shown = hint.split('the Odoo image has no en_US.UTF-8 locale.\n', 1)[1].splitlines()[:7]
-        self.assertEqual([line.strip() for line in shown], [
+        self.assertEqual([line[:6] for line in shown], ['      '] * 7)
+        self.assertEqual([line[6:] for line in shown], [
             'perl: warning: Setting locale failed.', 'perl: warning: Please check that your locale settings:',
-            'LANGUAGE = (unset),', 'LC_ALL = (unset),', 'LANG = "en_US.UTF-8"', 'are supported and installed on your system.',
-            'perl: warning: Falling back to the standard locale ("C").'])
+            '\tLANGUAGE = (unset),', '\tLC_ALL = (unset),', '\tLANG = "en_US.UTF-8"',
+            '    are supported and installed on your system.', 'perl: warning: Falling back to the standard locale ("C").'])
         self.assertNotIn('would fail', result.stdout)
         self.assertLess(hint.index('Run the commands in this order'), hint.index('1. Stop the App'))
         self.assertIn('Locks for the way back:', result.stdout)
@@ -612,6 +616,28 @@ class UpgradeTests(UpgradeHarness, unittest.TestCase):
         [backup] = self.backups()
         self.assertIn('room for 6400 locks, and this step can\n   need 11686 with a margin.', (backup / 'restore.txt').read_text())
         self.assertIn('sudo pg_conftool 16 main set max_locks_per_transaction 128\n', (backup / 'restore.txt').read_text())
+
+    def test_a_db_server_at_256_with_the_room_gets_no_value_to_set(self):
+        # deploy-db.sh keeps a higher value. Room enough at the backup:
+        # restore.txt names no value to set.
+        result = self.run_script(locks='5246 5856 1000 256 100 0')
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertNotIn('Warning: with these settings', result.stdout)
+        [backup] = self.backups()
+        hint = (backup / 'restore.txt').read_text()
+        self.assertIn('room for 25600 locks,\n   and this step can need 12102 with a margin: the room was enough.', hint)
+        self.assertIn('max_locks_per_transaction is still 256 or more (this changes nothing)', hint)
+        self.assertNotIn('pg_conftool', hint)
+
+    def test_a_db_server_at_256_without_the_room_gets_more(self):
+        # 12102 locks over 40 connections: 303 each, more than 256.
+        result = self.run_script(locks='5246 5856 1000 256 40 0')
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn('set max_locks_per_transaction to 303 on the DB server', result.stdout)
+        [backup] = self.backups()
+        hint = (backup / 'restore.txt').read_text()
+        self.assertIn('too small: at the backup it had room for 10240 locks, and this step can\n   need 12102 with a margin.', hint)
+        self.assertIn('     sudo pg_conftool 16 main set max_locks_per_transaction 303\n', hint)
 
     def test_a_database_that_needs_more_than_128_locks_per_connection_gets_its_own_value(self):
         # 11686 locks over 50 connections: 234 each.

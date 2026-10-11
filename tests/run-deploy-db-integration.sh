@@ -151,7 +151,7 @@ pass 'same-backup rerun preserves database identity and post-deployment writes'
 # The lock table of the way back of deploy-app.sh --upgrade: the first
 # deployment set 128 and restarted PostgreSQL once; a rerun changes nothing, a
 # higher value stays, and a lower one in postgresql.auto.conf is refused with
-# postgresql.conf put back.
+# postgresql.conf put back and no restart (the running 256 stays).
 assert_sql postgres 'SHOW max_locks_per_transaction' 128
 [[ $(pg_conftool 16 main show max_locks_per_transaction) == 'max_locks_per_transaction = 128' ]] \
     || die 'postgresql.conf does not set max_locks_per_transaction 128'
@@ -176,11 +176,13 @@ deploy_fails restored
 grep -q 'max_locks_per_transaction is overridden by another configuration file (such as postgresql.auto.conf) with 64, less than 128' \
     "$TEST_DIR/restored.log" || die 'the lower value in postgresql.auto.conf was not named'
 [[ $(hash_file /etc/postgresql/16/main/postgresql.conf) == "$config_before" ]] || die 'the refused run did not put postgresql.conf back'
+[[ $(admin_sql -d postgres -c 'SELECT pg_postmaster_start_time()') == "$started" ]] || die 'the refused run restarted PostgreSQL'
+assert_sql postgres 'SHOW max_locks_per_transaction' 256
 admin_sql -d postgres -c 'ALTER SYSTEM RESET max_locks_per_transaction'
 pg_ctlcluster 16 main restart
 assert_sql postgres 'SHOW max_locks_per_transaction' 128
 assert_sql restored "SELECT count(*) FROM public.business_records WHERE reference='AFTER-DEPLOY'" 1
-pass 'max_locks_per_transaction 128 for the way back: set with one restart, unchanged on a rerun, a higher value kept, a lower postgresql.auto.conf value refused and postgresql.conf put back'
+pass 'max_locks_per_transaction 128 for the way back: set with one restart, unchanged on a rerun, a higher value kept, a lower postgresql.auto.conf value refused with postgresql.conf put back and no restart'
 
 mv /var/lib/perodua-db-deploy/16-main/restored/success /var/lib/perodua-db-deploy/16-main/restored/pending
 deploy_ok restored
@@ -336,14 +338,16 @@ current_listener=$(admin_sql -d postgres -c 'SHOW listen_addresses')
 admin_sql -d postgres -c "ALTER SYSTEM SET listen_addresses = '$current_listener'"
 config_before=$(hash_file /etc/postgresql/16/main/postgresql.conf)
 hba_before=$(hash_file /etc/postgresql/16/main/pg_hba.conf)
+started=$(admin_sql -d postgres -c 'SELECT pg_postmaster_start_time()')
 write_conf overridden_listener app_overridden
 sed -i 's/^DB_LISTEN_IP=.*/DB_LISTEN_IP=127.0.0.3/' "$TEST_DIR/overridden_listener.conf"
 deploy_fails overridden_listener
 assert_absent overridden_listener
 [[ $(hash_file /etc/postgresql/16/main/postgresql.conf) == "$config_before" ]] || die 'failed network setup did not restore postgresql.conf'
 [[ $(hash_file /etc/postgresql/16/main/pg_hba.conf) == "$hba_before" ]] || die 'failed network setup did not restore pg_hba.conf'
+[[ $(admin_sql -d postgres -c 'SELECT pg_postmaster_start_time()') == "$started" ]] || die 'the refused listen address restarted PostgreSQL'
 admin_sql -d postgres -c 'ALTER SYSTEM RESET listen_addresses'
-pass 'auto.conf listener override refused with original PostgreSQL and HBA configuration restored'
+pass 'auto.conf listener override refused with original PostgreSQL and HBA configuration restored, without a restart'
 
 # ── DB_MODE=empty ────────────────────────────────────────────────────────────
 STATE_ROOT=/var/lib/perodua-db-deploy/16-main
@@ -606,11 +610,17 @@ service_ok service-status-down status
 grep -q '^16  *main  *5432  *down ' "$TEST_DIR/service-status-down.log" || die 'status does not show the cluster down'
 service_ok service-stop-again stop
 grep -q 'already stopped' "$TEST_DIR/service-stop-again.log" || die 'a second stop did not say the cluster is already stopped'
+# The readiness probe of start logs no failed login (as root it logged
+# 'FATAL:  role "root" does not exist' at each start).
+PG_LOG=/var/log/postgresql/postgresql-16-main.log
+log_lines=$(wc -l < "$PG_LOG")
 service_ok service-start start
 service_ok service-restart restart
+service_ok service-start-running start
+if tail -n +"$((log_lines + 1))" "$PG_LOG" | grep 'FATAL'; then die 'service.sh --role db start or restart left a FATAL line in the PostgreSQL log'; fi
 [[ $(admin_sql -d postgres -c 'SELECT string_agg(datname, $$,$$ ORDER BY datname) FROM pg_database') == "$databases" ]] \
     || die 'the databases changed across stop, start and restart'
-pass 'service.sh --role db: status, stop (closing and reporting an open connection), a repeated stop, start and restart; the databases stay'
+pass 'service.sh --role db: status, stop (closing and reporting an open connection), a repeated stop, start and restart (no FATAL line in the PostgreSQL log); the databases stay'
 
 # ── one server: PostgreSQL on Docker's address starts after Docker ─────────────
 # A stub Docker reports 127.0.0.6 as a Docker network address of this server;

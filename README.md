@@ -947,7 +947,7 @@ Follow `restore.txt` in the backup folder of step 12
 (`/opt/perodua-app/backups/TIME-client-stable-uiux-v1.0.8/restore.txt`), all
 of its steps, in order, one command at a time. It has the commands with the
 real paths. Run steps 1 to 4 in the `scripts` folder of v1.2.0 (`restore.txt`
-names it) or of the old release: `service.sh` and `reset_database.py` are the
+names it) or of the old release: `service.sh` and `reset_database.py` do the
 same in both. Each command must end without an error, with exit status 0
 (`echo $?` shows `0`). If one fails, stop: do not run the next step. A failed
 step 3, for example, leaves the database empty.
@@ -963,9 +963,10 @@ step 3, for example, leaves the database empty.
    `LANG`, and ends with
    `perl: warning: Falling back to the standard locale ("C").`. They are
    harmless: the Odoo image has no `en_US.UTF-8` locale. If it stops with
-   `out of shared memory`, set `max_locks_per_transaction` on the DB server
-   as `restore.txt` says (the App is already stopped), then run steps 2 and 3
-   again.
+   `out of shared memory`, do what step 3 of `restore.txt` says: when the
+   room was too small at the backup, it gives the `max_locks_per_transaction`
+   to set on the DB server (the App is already stopped). Then run steps 2 and
+   3 again.
 4. Put the attachments back. This also ends every sign-in: all users must
    sign in again. It shows only the Docker lines.
 5. Copy `deployment-identity` and `app.env` from the backup folder back into

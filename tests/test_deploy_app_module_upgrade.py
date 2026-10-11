@@ -35,9 +35,10 @@ ACCEPTED = re.search(r'^OLD_RELEASES_ACCEPTED=(\S+)$', TEXT, re.M).group(1).spli
 OLD = 'client-stable-uiux-v1.0.6'
 OLD_REVISION = 'b' * 40
 CONTAINER = 'perodua-upgrade-fixture-module-upgrade'
-# service.sh of v1.0.5, v1.0.6, v1.0.7 and v1.0.8 (kit 4198af8 to 8867545) is
-# this file, byte for byte. If it changes, keep a copy of that one for the test
-# below: it is what the old scripts folder runs after the mark.
+# service.sh of v1.0.5, v1.0.6, v1.0.7 and v1.0.8 (kit 4198af8 to 8867545),
+# byte for byte: what the old scripts folder runs after the mark. The
+# service.sh of this kit differs from it only in db_start.
+OLD_SERVICE = Path(__file__).resolve().parent / 'fixtures' / 'service-v1.0.5-v1.0.8.sh'
 OLD_SERVICE_SHA256 = 'b3c2533b5f2f7b78c6e2b2c036ce215dc8e306f56b96058ef8a4ddb13f1ce26c'
 # reset_database.py of the same kit versions. restore.txt runs both in a
 # scripts folder of the old or the new release, and says that they are the same.
@@ -346,6 +347,16 @@ class ModuleUpgradeTests(ModuleUpgradeFixture, unittest.TestCase):
         self.log.unlink()
         result = self.upgrade(refuse='perodua_e2e is installed')
         self.assertNotIn('To give the DB server the room', result.stdout)
+
+    def test_a_refusal_on_a_db_server_at_256_names_more_than_256(self):
+        # 12102 locks over 40 connections: 303 each. Never a lower value
+        # than the DB server has.
+        result = self.upgrade(refuse='the way back can fail. (fixture)', locks='5246 5856 1000 256 40 0')
+        self.assert_refused_before_the_stop(result, 'the module upgrade (-u) is refused for the reasons above')
+        self.assertIn('To give the DB server the room, set max_locks_per_transaction to 303 there, with the App stopped:\n',
+                      result.stdout)
+        self.assertIn('     sudo pg_conftool 16 main set max_locks_per_transaction 303\n', result.stdout)
+        self.assertIn('the first number must be\n     303 and the last one 12102 or more:', result.stdout)
 
     def test_the_value_of_the_lock_table_is_128_in_each_script(self):
         # deploy-app.sh (bash and preflight.py) and deploy-db.sh agree on the
@@ -670,7 +681,7 @@ class OldServiceShTests(ModuleUpgradeFixture, unittest.TestCase):
     """service.sh of v1.0.5 to v1.0.8 never starts the App after the mark."""
 
     def service(self, action):
-        return subprocess.run(['bash', str(SCRIPTS / 'service.sh'), '--role', 'app', '--dir', str(self.deploy_dir), action],
+        return subprocess.run(['bash', str(OLD_SERVICE), '--role', 'app', '--dir', str(self.deploy_dir), action],
                               env=self.env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60)
 
     def assert_not_started(self):
@@ -684,10 +695,17 @@ class OldServiceShTests(ModuleUpgradeFixture, unittest.TestCase):
                 self.assertNotIn('restart', self.names())
                 self.assertNotIn('Run the reset again', result.stdout)
 
-    def test_service_sh_is_the_one_of_the_old_releases(self):
+    def test_service_sh_and_reset_database_py_do_what_those_of_the_old_releases_do(self):
+        # restore.txt steps 1 to 4 run them from the folder of either release.
         import hashlib
-        self.assertEqual(hashlib.sha256((SCRIPTS / 'service.sh').read_bytes()).hexdigest(), OLD_SERVICE_SHA256)
+        self.assertEqual(hashlib.sha256(OLD_SERVICE.read_bytes()).hexdigest(), OLD_SERVICE_SHA256)
         self.assertEqual(hashlib.sha256((SCRIPTS / 'reset_database.py').read_bytes()).hexdigest(), OLD_RESET_SHA256)
+        # Only the readiness probe of db_start runs as the OS user postgres.
+        def without_db_start(text):
+            return re.sub(r'\ndb_start\(\) \{\n.*?\n\}\n', '\n', text, count=1, flags=re.S)
+        new, old = (SCRIPTS / 'service.sh').read_text(), OLD_SERVICE.read_text()
+        self.assertNotEqual(new, old)
+        self.assertEqual(without_db_start(new), without_db_start(old))
 
     def test_old_service_sh_refuses_a_marked_database(self):
         # Before the switch: the directory's own preflight.py is the old one.

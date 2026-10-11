@@ -176,14 +176,16 @@ HBA rules are preserved. Existing listener addresses are preserved and the reque
 address is added. Adding a listener may restart this PostgreSQL cluster, briefly
 disconnecting its other sessions; deploy on the intended DB server during its
 setup/maintenance window. Configuration snapshots are retained; failed network
-configuration is rolled back.
+configuration is rolled back (with a restart only when PostgreSQL had already
+restarted with the change).
 
 `max_locks_per_transaction` is set to 128 in `postgresql.conf` when the value
 that PostgreSQL reads at its next start is lower; a higher value stays. It
 takes a restart of the cluster, in the same way (one restart for both). A
 running value below 128 also restarts it. A lower value in another
 configuration file (such as `postgresql.auto.conf` from `ALTER SYSTEM`) is
-refused, and `postgresql.conf` is put back. The way back of
+refused: `postgresql.conf` is put back, and PostgreSQL is not restarted (the
+running server did not change). The way back of
 `deploy-app.sh --upgrade` needs this room: see
 [The lock table of the way back](#the-lock-table-of-the-way-back). A run on a DB
 server that has 128 or more changes nothing. `uninstall.sh` keeps the value.
@@ -777,8 +779,15 @@ shows them as `Locks for the way back: ...`. The count has:
   `pg_ts_template`, `pg_statistic_ext`, `pg_namespace`, `pg_extension`,
   `pg_language`, `pg_am`, `pg_cast`, `pg_transform`,
   `pg_foreign_data_wrapper`, `pg_foreign_server`, `pg_event_trigger`,
-  `pg_publication` and `pg_largeobject_metadata`, and each trigger, rule and
-  policy with a comment (`COMMENT ON` locks it);
+  `pg_publication`, `pg_largeobject_metadata`, `pg_rewrite` (rules, and the
+  rule of each view) and `pg_policy`;
+- each trigger from OID 16384 that is not internal: a trigger of a
+  partitioned table (the restore locks it, because its clone on each
+  partition depends on it) and its clones, constraint triggers and triggers
+  with `DEPENDS ON EXTENSION`; and each internal trigger that another object
+  depends on or that has a comment. The other internal triggers, those of
+  foreign keys, are not locked and not counted (an Odoo database of this
+  project has about 13,000);
 - each object below OID 16384 that such an object depends on (such as the
   schema `public` and `plpgsql`), and each system relation (413 in
   PostgreSQL 16: `CREATE COLLATION` and views can keep a lock on one);
@@ -789,7 +798,11 @@ shows them as `Locks for the way back: ...`. The count has:
 The need is the count plus a margin of 1,000 for the locks that other
 sessions on the DB server hold while step 3 runs (autovacuum, other
 databases, monitoring; the App is stopped): about 15 sessions at the default
-of 64.
+of 64. The margin also covers the objects that the install script of an
+extension makes and drops in step 3: their locks stay until the commit, but
+no catalog shows them afterwards. Measured, for one extension each: `cube`
+14, `seg` 14, `intarray` 12, `hstore` 4, all the other trusted extensions 0
+(`pg_trgm` and `unaccent`, which this project uses, included).
 
 Measured with PostgreSQL 16.15, the `pg_dump` 18 of the release image and the
 command of step 3, with `pg_locks` before the commit (the locks in the lock
@@ -797,10 +810,17 @@ table, not the 16 fast-path slots of the session):
 
 | Database | Locks held | Count |
 | --- | --- | --- |
-| Odoo 19 database of this project (888 tables, 5,246 relations) | 10,678 | 11,103 |
-| Odoo-shaped fixture (700 models, 150 many2many tables, `CHECK` constraints) | 12,489 | 13,615 |
-| Each kind of object above (collations, text search, user array columns, enum, composite, domain and range types, populated materialized views, extensions, functions, operators) and 150 Odoo-shaped tables | 1,510 | 1,946 |
-| 400 populated materialized views, 300 enum array columns, 300 row-type array columns, 20 text search configurations, 20 collations | 7,457 | 7,869 |
+| Odoo 19 database of this project (888 tables, 5,246 relations) | 10,678 | 11,135 |
+| Odoo-shaped fixture (700 models, 150 many2many tables, `CHECK` constraints) | 12,489 | 13,645 |
+| Each kind of object above (20 trusted extensions, collations, text search, user array columns, enum, composite, domain and range types, populated materialized views, functions, operators, casts, partitions with foreign keys, rules, policies, a constraint trigger, a trigger with `DEPENDS ON EXTENSION`), made by the owner | 1,456 | 2,186 |
+| 400 populated materialized views, 300 enum array columns, 300 row-type array columns, 20 text search configurations, 20 collations | 7,457 | 8,269 |
+| A partitioned table with 2 partitions and 32,000 row triggers, made by the owner | 32,022 | 96,434 |
+
+The last database shows why each trigger counts: before, only a trigger with
+a comment counted, so the check gave 1,434 with the margin and found room
+with 128 x 100 (12,800), and step 3 then stopped with `out of shared memory`
+and left the database empty. Now it refuses there and names 975, and step 3
+passes with 975.
 
 The Odoo database needs about twice as many locks as it has relations: each
 constraint and each row type is also locked. The restore of the Odoo database
@@ -818,7 +838,10 @@ the database needs more. `deploy-app.sh` then prints the steps. PostgreSQL's
 default of 64 with 100 connections (room for 6,400) is too small for an Odoo
 database of this project (about 12,100 with the margin). With the same
 modules, too little room is a warning: the way back without the data needs no
-restore. `restore.txt` gives the two numbers and the command at step 3.
+restore. `restore.txt` gives the two numbers at step 3, and the command
+that sets the value only when the room at the backup was too small; else it
+says that the room was enough. The value to set is never lower than the value
+that the DB server has.
 
 `deploy-db.sh` sets 128 on a new DB server. On a DB server that it set up
 earlier, show the value and the room (this changes nothing):

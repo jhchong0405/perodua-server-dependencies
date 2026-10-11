@@ -49,6 +49,9 @@ RESTORED = INIT[:1] + [EXCLUDED] + INIT[1:]
 HOLD = 'Held by deploy-app.sh --upgrade (module upgrade): release it with deploy-app.sh --release-queued-mail'
 PG = os.environ.get('PREFLIGHT_TEST_PG', '').split()
 RESTORE_LOCKS_SQL = re.search(r'RESTORE_LOCKS = """(.*?)"""', NEW, re.S).group(1)
+# The same count of the objects other than relations, per catalog.
+CATALOG_LOCKS_SQL = (RESTORE_LOCKS_SQL.split('\nSELECT (SELECT count(*)', 1)[0]
+                     + '\nSELECT catalog::regclass::text, count(*) FROM other GROUP BY 1')
 
 FAKE_PSYCOPG2 = r'''
 import os, re, sqlite3
@@ -189,6 +192,17 @@ RESTORE_FIXTURE = [
        CREATE INDEX fixture_event_at ON fixture_event (at);
        CREATE UNLOGGED TABLE fixture_cache (key text PRIMARY KEY, value jsonb);
        CREATE SEQUENCE fixture_number""",
+    # Triggers that the restore locks without a comment: those of a partitioned
+    # table (the clone on each partition depends on its trigger), one that
+    # depends on an extension and a constraint trigger; and a foreign key of a
+    # partitioned table.
+    """CREATE FUNCTION fixture_keep() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END';
+       ALTER TABLE fixture_event ADD COLUMN user_id int REFERENCES res_users ON DELETE SET NULL;
+       """ + ';'.join(f'CREATE TRIGGER fixture_event_{n} BEFORE UPDATE ON fixture_event FOR EACH ROW EXECUTE FUNCTION fixture_keep()'
+                     for n in range(20)) + """;
+       ALTER TRIGGER fixture_event_0 ON fixture_event DEPENDS ON EXTENSION pg_trgm;
+       CREATE CONSTRAINT TRIGGER fixture_line_check AFTER INSERT ON fixture_line DEFERRABLE INITIALLY DEFERRED
+           FOR EACH ROW EXECUTE FUNCTION fixture_keep()""",
     """CREATE TABLE fixture_log (id int, note text);
        CREATE RULE fixture_log_notify AS ON INSERT TO fixture_log DO ALSO NOTIFY fixture_log;
        COMMENT ON RULE fixture_log_notify ON fixture_log IS 'tells listeners';
@@ -460,6 +474,15 @@ class PreflightModuleUpgradeTests(unittest.TestCase):
         # database needs more: 1101 locks over 5 connections is 221 each.
         self.env['FAKE_PG_LOCK_TABLE'] = '11 5 0'
         self.assertIn('Set max_locks_per_transaction to 221 on the DB server', self.check(ok=False))
+        # A DB server at 256 (deploy-db.sh keeps a higher value): enough room
+        # for 100 connections; with 4, 1101 locks need 276 each, never less
+        # than 256.
+        self.env['FAKE_PG_LOCK_TABLE'] = '256 100 0'
+        self.assertTrue(self.check().endswith('MODULE_UPGRADE 1'))
+        self.env['FAKE_PG_LOCK_TABLE'] = '256 4 0'
+        self.assertIn('room for 1024: max_locks_per_transaction 256 x (max_connections 4 + max_prepared_transactions 0). '
+                      'With too few, step 3 can stop with "out of shared memory", leave the database empty and the App down. '
+                      'Set max_locks_per_transaction to 276 on the DB server', self.check(ok=False))
         self.env['FAKE_PG_LOCK_TABLE'] = '11 100 0'
         result = self.process('mark-upgrading', self.from_fp, 'client-stable-uiux-v1.0.6', 'client-stable-uiux-v1.2.0')
         self.assertEqual(result.returncode, 3, result.stderr)  # deploy-app.sh starts the old App again
@@ -485,6 +508,8 @@ class PreflightModuleUpgradeTests(unittest.TestCase):
                                   write_uid int REFERENCES res_users ON DELETE SET NULL)""" for n in range(first, first + 10)))
         [count] = self.sql(RESTORE_LOCKS_SQL)
         relations, others, per_transaction, connections, prepared = count
+        counted = dict(self.sql(CATALOG_LOCKS_SQL))
+        [[materialized_views]] = self.sql("SELECT count(*) FROM pg_class WHERE relkind = 'm'")
         need, room = relations + others + 1000, per_transaction * (connections + prepared)
         result = self.process('upgrade-check', self.from_fp)
         self.assertEqual(self.locks(result.stdout), [relations, others, 1000, per_transaction, connections, prepared])
@@ -506,15 +531,17 @@ class PreflightModuleUpgradeTests(unittest.TestCase):
                                 capture_output=True, text=True).stdout.replace('\nSET transaction_timeout = 0;\n', '\n', 1)
         for first in range(0, 150, 10):
             self.sql('DROP TABLE ' + ', '.join(f'model_{n}' for n in range(first, first + 10)))
-        for statement in ('DROP PUBLICATION fixture_pub', 'DROP SCHEMA fixture_api CASCADE',
+        for statement in ('DROP PUBLICATION fixture_pub', 'DROP SCHEMA fixture_api CASCADE', 'DROP TABLE fixture_event',
                           'DROP MATERIALIZED VIEW fixture_totals, fixture_ids, fixture_later',
-                          'DROP TABLE fixture_log, fixture_cache, fixture_event, fixture_typed, fixture_line CASCADE',
+                          'DROP TABLE fixture_log, fixture_cache, fixture_typed, fixture_line CASCADE',
                           'DROP SCHEMA public CASCADE; CREATE SCHEMA public'):
             self.sql(statement)
         probe = ("\\o\nSELECT count(DISTINCT relation) FILTER (WHERE locktype = 'relation' AND relation >= 16384),"
                  " count(DISTINCT (locktype, database, relation, classid, objid, objsubid, virtualxid, transactionid::text))"
                  " FILTER (WHERE NOT fastpath AND relation IS DISTINCT FROM 'pg_locks'::regclass)"
-                 " FROM pg_locks WHERE pid = pg_backend_pid();\n")
+                 " FROM pg_locks WHERE pid = pg_backend_pid();\n"
+                 "SELECT classid::regclass::text, count(DISTINCT objid) FROM pg_locks"
+                 " WHERE pid = pg_backend_pid() AND locktype = 'object' GROUP BY 1;\n")
         restore = subprocess.run(['psql', '-X', '-q', '-A', '-t', '-F', ' ', '-v', 'ON_ERROR_STOP=1', '--single-transaction', *server,
                                   '--dbname', PG[4]], input='\\o /dev/null\n' + script + probe, env=env,
                                  capture_output=True, text=True, timeout=600)
@@ -523,7 +550,9 @@ class PreflightModuleUpgradeTests(unittest.TestCase):
             self.assertIn('out of shared memory', restore.stderr)
             self.assertGreater(need, room)
             return
-        locked_relations, locked = (int(value) for value in restore.stdout.split())
+        first, *catalogs = restore.stdout.splitlines()
+        locked_relations, locked = (int(value) for value in first.split())
+        held = {catalog: int(value) for catalog, value in (line.split() for line in catalogs)}
         # Each relation of the dump, and the new heaps of the REFRESH of the
         # materialized views (no longer in pg_class), are in the count.
         self.assertLessEqual(locked_relations, relations)
@@ -531,6 +560,13 @@ class PreflightModuleUpgradeTests(unittest.TestCase):
         # table: collations, text search objects, user array types and the
         # types of the new heaps of REFRESH included.
         self.assertGreaterEqual(relations + others, locked, f'count {relations} + {others}, locked {locked}')
+        # And per catalog: the triggers above included. The two types of the
+        # new heap of each REFRESH are counted apart. pg_trgm and unaccent
+        # make and drop no object of their own in the restore.
+        self.assertGreaterEqual(held.get('pg_trigger', 0), 20)
+        for catalog, value in held.items():
+            room = counted.get(catalog, 0) + (2 * materialized_views if catalog == 'pg_type' else 0)
+            self.assertLessEqual(value, room, f'{catalog}: counted {room}, locked {value}')
         self.assertEqual(self.sql(RESTORE_LOCKS_SQL), [count])  # the restored database counts the same
 
     # ── the mark ────────────────────────────────────────────────────────────

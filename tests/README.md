@@ -174,8 +174,12 @@ directory's own, or the staged one of the new release) and the release that
   step 3, shown two times, are harmless (the test compares them with the
   output of a restore with v1.0.8), the down time with the size of the
   database and of the attachments before the backup, and that the HTTPS
-  front stays; step 3 gives the lock numbers of the check and the commands
-  that set 128 on the DB server;
+  front stays; the 7 lines are compared byte for byte, with their tabs; step
+  3 gives the lock numbers of the check and, when the room at the backup was
+  too small, the commands that set 128 or more on the DB server; else it says
+  that the room was enough and names no value. A DB server at 256 gets no
+  value to set when it has the room, and 303 when 40 connections need it:
+  never a value lower than it has;
 - the check prints `Locks for the way back:` with the numbers of
   `RESTORE_LOCKS`; with the same modules, a lock table too small for
   `restore.txt` step 3 is a warning with the value to set (128, or 234 for a
@@ -227,7 +231,8 @@ only `from`. It checks:
   refusal for the lock table is followed by the numbers and the five steps
   that set 128 on the DB server (with the `--dir` of the upgrade, the
   `pg_conftool` command, `service.sh --role db restart` and the read-only
-  query of README.md), then the error; another refusal prints no steps.
+  query of README.md), then the error; another refusal prints no steps. On a
+  DB server at 256 with 40 connections, the steps name 303.
   `deploy-app.sh` (bash and `preflight.py`), `deploy-db.sh` and README.md
   agree on 128;
   `--confirm`, `--drop-retired-data` and `--release-queued-mail` are refused
@@ -259,11 +264,13 @@ only `from`. It checks:
 - `--release-queued-mail` runs only `preflight.py release-mail` with the
   directory's compose file, and only from the folder of the release the
   directory runs; it prints the two numbers of the released mail;
-- as root on Linux: `service.sh` (byte for byte that of v1.0.5 to v1.0.8, pinned
-  by its sha256) refuses `start` and `restart` on a marked database, before and
-  after the switch, without `up` and without its advice to reset.
-  `reset_database.py` is pinned the same way: `restore.txt` says that both are
-  the same in the folders of the old and the new release.
+- as root on Linux: the `service.sh` of v1.0.5 to v1.0.8
+  (`fixtures/service-v1.0.5-v1.0.8.sh`, pinned by its sha256) refuses `start`
+  and `restart` on a marked database, before and after the switch, without
+  `up` and without its advice to reset. The `service.sh` of this kit differs
+  from it only in `db_start` (its readiness probe runs as the OS user
+  `postgres`), and `reset_database.py` is pinned by its sha256: `restore.txt`
+  says that both do the same in the folders of the old and the new release.
 
 `test_preflight_module_upgrade.py` runs the exact `preflight.py` that
 `deploy-app.sh` writes, and the one of v1.0.5 to v1.0.8
@@ -298,8 +305,9 @@ The lock check of the way back: `upgrade-check` prints `RESTORE_LOCKS` before
 `FAKE_PG_LOCK_TABLE`: exactly enough room passes (also with a prepared
 transaction), one lock more refuses the module upgrade ("the way back can
 fail") with `RESTORE_LOCKS` on standard output, both numbers and the value to
-set (128, or more when the database needs more), `mark-upgrading` then exits
-3 and writes nothing, and the same modules are not refused. On PostgreSQL,
+set (128, or more when the database needs more, never less than the value of
+the server: 276 for a server at 256 with 4 connections), `mark-upgrading`
+then exits 3 and writes nothing, and the same modules are not refused. On PostgreSQL,
 with `pg_dump`, `pg_restore` and `psql` on the PATH, a database with every
 kind of object that a restore can create and lock is made a few objects per
 transaction: 150 Odoo-shaped tables, the extensions `pg_trgm` and `unaccent`,
@@ -307,16 +315,22 @@ enum, domain, composite and range types, a collation, a text search
 dictionary and configuration, a conversion, columns of user array types,
 functions (one with a `BEGIN ATOMIC` body), an operator and a cast, a
 generated column, statistics, a trigger, a rule and a policy with comments, a
-publication, a partitioned, an inheriting, a typed and an unlogged table, a
-view, two populated materialized views (one with TOAST) and one without data,
-and a second schema. It is dumped, emptied a few objects per transaction and
-restored in one transaction, as `restore.txt` step 3 does. Before the commit,
-the transaction reads `pg_locks`: the count is at least the locks that the
+publication, a partitioned, an inheriting, a typed and an unlogged table, 20
+triggers without a comment on the partitioned table (one with `DEPENDS ON
+EXTENSION`), a foreign key of it, a constraint trigger, a view, two populated
+materialized views (one with TOAST) and one without data, and a second
+schema. It is dumped, emptied a few objects per transaction and restored in
+one transaction, as `restore.txt` step 3 does. Before the commit, the
+transaction reads `pg_locks`: the count is at least the locks that the
 restore holds in the lock table (not those in the fast-path slots of the
-session, and not the lock of the probe on `pg_locks`), the restored relations
-are in the count, and the restored database counts the same (with PostgreSQL
-16.15: 2,041 counted, 1,605 held). When the server has no room for the count,
-the check refuses, and a restore that fails stops with `out of shared memory`.
+session, and not the lock of the probe on `pg_locks`), and so is the count of
+each catalog (with the two types of each `REFRESH` for `pg_type`); the
+restored relations are in the count, and the restored database counts the
+same (with PostgreSQL 16.15: 2,112 counted, 1,630 held; triggers 62 counted,
+22 held). With the count of 3902553, which counted only triggers with a
+comment, this test fails: `pg_trigger: counted 1, locked 22`. When the server
+has no room for the count, the check refuses, and a restore that fails stops
+with `out of shared memory`.
 
 `test_uninstall_app.py` runs `uninstall.sh --role app` against a fake Docker CLI.
 The fake keeps containers, volumes and networks in a file, including those of
@@ -945,10 +959,11 @@ invalid archives and corrupt compressed payloads; failure before publication and
 backup; missing expected tables; configuration injection rejection; secret-file
 permissions; literal SQL/HBA keyword names and access isolation; nonlocal listener
 refusal; a real listener update and restart; configuration rollback on a conflicting
-`postgresql.auto.conf`; `max_locks_per_transaction` 128 in `postgresql.conf` and
-in force after the first deployment (with one restart), no restart on a rerun,
-a higher value kept, and a lower value in `postgresql.auto.conf` refused with
-`postgresql.conf` put back; password absence in output logs; interactive database
+`postgresql.auto.conf`, without a restart; `max_locks_per_transaction` 128 in
+`postgresql.conf` and in force after the first deployment (with one restart),
+no restart on a rerun, a higher value kept, and a lower value in
+`postgresql.auto.conf` refused with `postgresql.conf` put back and no restart
+(the running value stays); password absence in output logs; interactive database
 password entry on a pseudo-terminal that asks again after a too-short password
 or two different entries and never echoes it; and real HTTPS Basic-auth downloads
 with correct and incorrect passwords supplied through a pseudo-terminal. The
@@ -1010,7 +1025,10 @@ cluster is removed after it.
   reports `EMPTY`;
 - `--role db`: `status` shows the cluster online; `stop` closes an open
   connection and says so, the cluster is down and a second `stop` says it
-  already is; `start` and `restart` bring it back with the same databases.
+  already is; `start` and `restart` bring it back with the same databases,
+  and `start`, `restart` and a `start` of a running cluster leave no `FATAL`
+  line in the PostgreSQL log (the readiness probe runs as the OS user
+  `postgres`; as root it logged `role "root" does not exist`).
 
 One server: with a stub Docker that reports the listen address as Docker's,
 `deploy-db.sh` writes the setting that starts PostgreSQL after Docker, and a
