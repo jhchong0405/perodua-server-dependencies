@@ -52,6 +52,10 @@ RESTORE_LOCKS_SQL = re.search(r'RESTORE_LOCKS = """(.*?)"""', NEW, re.S).group(1
 # The same count of the objects other than relations, per catalog.
 CATALOG_LOCKS_SQL = (RESTORE_LOCKS_SQL.split('\nSELECT (SELECT count(*)', 1)[0]
                      + '\nSELECT catalog::regclass::text, count(*) FROM other GROUP BY 1')
+# The foreign keys of a partition that are its own, not the clone of a key of
+# its table.
+PARTITION_KEYS_SQL = ("SELECT count(*) FROM pg_constraint c JOIN pg_class r ON r.oid = c.conrelid"
+                      " WHERE c.contype = 'f' AND c.conparentid = 0 AND r.relispartition")
 
 FAKE_PSYCOPG2 = r'''
 import os, re, sqlite3
@@ -203,6 +207,19 @@ RESTORE_FIXTURE = [
        ALTER TRIGGER fixture_event_0 ON fixture_event DEPENDS ON EXTENSION pg_trgm;
        CREATE CONSTRAINT TRIGGER fixture_line_check AFTER INSERT ON fixture_line DEFERRABLE INITIALLY DEFERRED
            FOR EACH ROW EXECUTE FUNCTION fixture_keep()""",
+    # Foreign keys that each partition has two times: the clone of the key of
+    # its table, and its own copy (its name comes first in the dump). The
+    # restore makes the two one: PostgreSQL drops the triggers of the copy on
+    # the referenced table, and its constraints and their triggers on the
+    # partitions of a partitioned one, and keeps a lock on each.
+    """CREATE TABLE fixture_kind (id int PRIMARY KEY) PARTITION BY HASH (id);
+       """ + ';'.join(f'CREATE TABLE fixture_kind_{n} PARTITION OF fixture_kind FOR VALUES WITH (MODULUS 3, REMAINDER {n})'
+                     for n in range(3)) + """;
+       ALTER TABLE fixture_event ADD COLUMN kind_id int""",
+    *(';'.join(f'ALTER TABLE {table} ADD CONSTRAINT {table}_kind_{n} FOREIGN KEY (kind_id) REFERENCES fixture_kind'
+               for n in range(5)) for table in ('fixture_event', 'fixture_event_2026', 'fixture_event_2027')),
+    """ALTER TABLE fixture_event_2026 ADD CONSTRAINT fixture_event_2026_user FOREIGN KEY (user_id) REFERENCES res_users ON DELETE SET NULL;
+       ALTER TABLE fixture_event_2027 ADD CONSTRAINT fixture_event_2027_user FOREIGN KEY (user_id) REFERENCES res_users ON DELETE SET NULL""",
     """CREATE TABLE fixture_log (id int, note text);
        CREATE RULE fixture_log_notify AS ON INSERT TO fixture_log DO ALSO NOTIFY fixture_log;
        COMMENT ON RULE fixture_log_notify ON fixture_log IS 'tells listeners';
@@ -508,6 +525,7 @@ class PreflightModuleUpgradeTests(unittest.TestCase):
                                   write_uid int REFERENCES res_users ON DELETE SET NULL)""" for n in range(first, first + 10)))
         [count] = self.sql(RESTORE_LOCKS_SQL)
         relations, others, per_transaction, connections, prepared = count
+        self.assertEqual(self.sql(PARTITION_KEYS_SQL), [(12,)])  # the copies
         counted = dict(self.sql(CATALOG_LOCKS_SQL))
         [[materialized_views]] = self.sql("SELECT count(*) FROM pg_class WHERE relkind = 'm'")
         need, room = relations + others + 1000, per_transaction * (connections + prepared)
@@ -532,7 +550,7 @@ class PreflightModuleUpgradeTests(unittest.TestCase):
         for first in range(0, 150, 10):
             self.sql('DROP TABLE ' + ', '.join(f'model_{n}' for n in range(first, first + 10)))
         for statement in ('DROP PUBLICATION fixture_pub', 'DROP SCHEMA fixture_api CASCADE', 'DROP TABLE fixture_event',
-                          'DROP MATERIALIZED VIEW fixture_totals, fixture_ids, fixture_later',
+                          'DROP TABLE fixture_kind', 'DROP MATERIALIZED VIEW fixture_totals, fixture_ids, fixture_later',
                           'DROP TABLE fixture_log, fixture_cache, fixture_typed, fixture_line CASCADE',
                           'DROP SCHEMA public CASCADE; CREATE SCHEMA public'):
             self.sql(statement)
@@ -567,7 +585,12 @@ class PreflightModuleUpgradeTests(unittest.TestCase):
         for catalog, value in held.items():
             room = counted.get(catalog, 0) + (2 * materialized_views if catalog == 'pg_type' else 0)
             self.assertLessEqual(value, room, f'{catalog}: counted {room}, locked {value}')
-        self.assertEqual(self.sql(RESTORE_LOCKS_SQL), [count])  # the restored database counts the same
+        # The restored database counts the same, less what the restore dropped:
+        # the copies of the foreign keys are now one with the keys of their table.
+        [[restored_relations, restored_others, *lock_table]] = self.sql(RESTORE_LOCKS_SQL)
+        self.assertEqual([restored_relations, *lock_table], [relations, per_transaction, connections, prepared])
+        self.assertLess(restored_others, others)
+        self.assertEqual(self.sql(PARTITION_KEYS_SQL), [(0,)])
 
     # ── the mark ────────────────────────────────────────────────────────────
     def test_from_the_mark_on_neither_release_accepts_the_database(self):

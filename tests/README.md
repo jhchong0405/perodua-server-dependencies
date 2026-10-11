@@ -229,7 +229,7 @@ only `from`. It checks:
   missing or wrong confirmation stop before the App stops, and nothing changes;
   the lock numbers are in the output and in step 3 of `restore.txt`. A
   refusal for the lock table is followed by the numbers and the five steps
-  that set 128 on the DB server (with the `--dir` of the upgrade, the
+  that set 128 on a DB server below it (with the `--dir` of the upgrade, the
   `pg_conftool` command, `service.sh --role db restart` and the read-only
   query of README.md), then the error; another refusal prints no steps. On a
   DB server at 256 with 40 connections, the steps name 303.
@@ -317,20 +317,25 @@ functions (one with a `BEGIN ATOMIC` body), an operator and a cast, a
 generated column, statistics, a trigger, a rule and a policy with comments, a
 publication, a partitioned, an inheriting, a typed and an unlogged table, 20
 triggers without a comment on the partitioned table (one with `DEPENDS ON
-EXTENSION`), a foreign key of it, a constraint trigger, a view, two populated
-materialized views (one with TOAST) and one without data, and a second
-schema. It is dumped, emptied a few objects per transaction and restored in
-one transaction, as `restore.txt` step 3 does. Before the commit, the
-transaction reads `pg_locks`: the count is at least the locks that the
-restore holds in the lock table (not those in the fast-path slots of the
-session, and not the lock of the probe on `pg_locks`), and so is the count of
-each catalog (with the two types of each `REFRESH` for `pg_type`); the
-restored relations are in the count, and the restored database counts the
-same (with PostgreSQL 16.15: 2,112 counted, 1,630 held; triggers 62 counted,
-22 held). With the count of 3902553, which counted only triggers with a
-comment, this test fails: `pg_trigger: counted 1, locked 22`. When the server
-has no room for the count, the check refuses, and a restore that fails stops
-with `out of shared memory`.
+EXTENSION`), a foreign key of it, a constraint trigger, 5 foreign keys of it
+to a partitioned table with 3 partitions and, on each partition, a copy of
+these keys and of its key to `res_users` (12, which the restore makes one
+with the keys of the table), a view, two populated materialized views (one
+with TOAST) and one without data, and a second schema. It is dumped, emptied
+a few objects per transaction and restored in one transaction, as
+`restore.txt` step 3 does. Before the commit, the transaction reads `pg_locks`: the count
+is at least the locks that the restore holds in the lock table (not those in
+the fast-path slots of the session, and not the lock of the probe on
+`pg_locks`), and so is the count of each catalog (with the two types of each
+`REFRESH` for `pg_type`); the restored relations are in the count, and the
+restored database counts the same, less what the restore dropped: no copy of
+a key is left (with PostgreSQL 16.15: 2,380 counted, 1,802 held; triggers 242
+counted, 118 held). With the count of 3902553, which counted only triggers
+with a comment, this test fails: `pg_trigger: counted 1, locked 118`; with
+the count of 3044160, which left out the internal triggers of partitions, it
+fails: `pg_trigger: counted 62, locked 118`. When the server has no room for
+the count, the check refuses, and a restore that fails stops with
+`out of shared memory`.
 
 `test_uninstall_app.py` runs `uninstall.sh --role app` against a fake Docker CLI.
 The fake keeps containers, volumes and networks in a file, including those of

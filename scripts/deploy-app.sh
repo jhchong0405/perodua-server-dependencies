@@ -5,13 +5,13 @@ set -Eeuo pipefail
 export LC_ALL=C
 umask 077
 
-RELEASE=client-stable-uiux-v1.2.0
-REVISION=09d8c712f27c29facaad53c0a34de7df78e0b3f2
+RELEASE=client-stable-uiux-v1.2.1
+REVISION=0d4d1aec10e7e6a54b03ca423be4348751d769ea
 # Built by CI from REVISION and published to GHCR, then copied to the private
 # registry, registry to registry, with no new build: the digests are the ones
 # CI built. The Odoo image loads no sample data; both images name REVISION.
-ODOO_IMAGE=perodua-deploy.novutal.com/perodua-odoo:client-stable-uiux-v1.2.0@sha256:e1d08ad8d8f5bf04131d361965380eadd3242fc1c7c08df49703bba3783a2e23
-WEB_IMAGE=perodua-deploy.novutal.com/perodua-odoo:client-stable-uiux-web-v1.2.0@sha256:89c1a0f941c148b5f7cf50b871dcaed51a4e92fb6761a4d81b8b0e97a17f1518
+ODOO_IMAGE=perodua-deploy.novutal.com/perodua-odoo:client-stable-uiux-v1.2.1@sha256:f8fdd18614a7a2d29c0aa622e74f3e3fa72a09f56698d6934e3798645c0e7d30
+WEB_IMAGE=perodua-deploy.novutal.com/perodua-odoo:client-stable-uiux-web-v1.2.1@sha256:b1b8c7d4a4d65342d974df7cfe2e38010446c3a1d630844bc606af3111091060
 REGISTRY=${ODOO_IMAGE%%/*}
 # Whether the pinned web image serves the page under PUBLIC_ROOT and shows
 # ENVIRONMENT_LABEL: yes from v1.0.4. The scripts folder of v1.0.3 has 0 here.
@@ -77,7 +77,7 @@ Usage: bash deploy-app.sh [--config PATH] [--dir PATH] [--non-interactive] [--in
        bash deploy-app.sh --upgrade [--dir PATH] [--backup-dir PATH] [--non-interactive]
                           [--confirm DATABASE] [--drop-retired-data]
        bash deploy-app.sh --release-queued-mail [--dir PATH]
-Deploy the pinned Client Stable UIUX v1.2.0 Odoo + Web images using Docker Compose.
+Deploy the pinned Client Stable UIUX v1.2.1 Odoo + Web images using Docker Compose.
 Requires a reachable external PostgreSQL 16 server; does not install or configure it.
 Default: use an already initialized, matching Client Stable UIUX database.
 --init-db initializes a NEW or EMPTY database as a fresh UAT system without
@@ -942,10 +942,18 @@ def module_upgrade_problems(cur, modules, installed, uat, excluded_rows):
 #     pg_event_trigger, pg_publication, pg_largeobject_metadata, pg_rewrite
 #     and pg_policy;
 #   - each trigger from OID 16384 that is not internal (its clones on
-#     partitions, constraint triggers and DEPENDS ON EXTENSION included), and
-#     each internal trigger that another object depends on or with a comment.
-#     The other internal triggers, those of foreign keys, are not locked: an
-#     Odoo database has about 13000 of them;
+#     partitions, constraint triggers and DEPENDS ON EXTENSION included),
+#     each internal trigger that another object depends on or with a comment,
+#     and each internal trigger of a partitioned table or of a partition. A
+#     foreign key of a partition that is the same as a foreign key of its
+#     table becomes one with it in the restore: PostgreSQL drops the triggers
+#     of the copy on the referenced table (and, when that table is
+#     partitioned, its constraints and triggers on the partitions) and keeps a
+#     lock on each. The copy has as many triggers on the partition as it loses
+#     on a referenced table that is not partitioned. The other internal
+#     triggers, those of foreign keys between tables that are not
+#     partitioned, are not locked: an Odoo database has about 13000 of them,
+#     and no partitioned table;
 #   - each object below OID 16384 that such an object depends on (such as the
 #     schema public and plpgsql), and each system relation (CREATE COLLATION
 #     and views can keep a lock on one);
@@ -955,7 +963,9 @@ def module_upgrade_problems(cur, modules, installed, uat, excluded_rows):
 # Measured with PostgreSQL 16.15 before the commit (the locks in the lock
 # table): an Odoo 19 database of this project (888 tables, 5246 relations)
 # held 10678, and this count gives 11135 (413 of them system relations); a
-# partitioned table with 32000 triggers held 32022, and the count gives 96434.
+# partitioned table with 32000 triggers held 32022, and the count gives 96434;
+# 1000 copies of foreign keys on 20 partitions, to a table with 30
+# partitions, held 94861, and the count gives 103374.
 RESTORE_LOCKS = """WITH relation AS (
         SELECT c.relkind, c.reltoastrelid FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
          WHERE c.oid >= 16384 AND n.nspname !~ '^pg_(toast_)?temp_'),
@@ -989,7 +999,8 @@ RESTORE_LOCKS = """WITH relation AS (
         UNION ALL SELECT 'pg_policy'::regclass, oid, NULL FROM pg_policy
         UNION ALL SELECT 'pg_trigger'::regclass, oid, NULL FROM pg_trigger t
                    WHERE NOT tgisinternal OR EXISTS (SELECT FROM pg_depend WHERE refclassid = 'pg_trigger'::regclass AND refobjid = t.oid)
-                      OR EXISTS (SELECT FROM pg_description WHERE classoid = 'pg_trigger'::regclass AND objoid = t.oid)),
+                      OR EXISTS (SELECT FROM pg_description WHERE classoid = 'pg_trigger'::regclass AND objoid = t.oid)
+                      OR EXISTS (SELECT FROM pg_class WHERE oid = t.tgrelid AND (relkind = 'p' OR relispartition))),
      other AS (
         SELECT o.catalog, o.oid FROM object o LEFT JOIN pg_namespace n ON n.oid = o.ns
          WHERE o.oid >= 16384 AND coalesce(n.nspname !~ '^pg_(toast_)?temp_', true)
