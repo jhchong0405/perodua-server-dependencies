@@ -95,6 +95,60 @@ The sign-in hand-over of v1.0.5. The tests run a copy of `deploy-app.sh` with
 - the pinned release has `HANDOVER_SUPPORTED=1` exactly when it is v1.0.5 or
   later, and `--help` names the pinned release.
 
+Outgoing email (v1.2.2). The tests run a copy of `deploy-app.sh` with
+`MAIL_SUPPORTED` set to 1 or 0, as a release that does or does not have the
+mail code. Every SMTP password in them is the fake `fake-app-password`, and no
+test connects to an SMTP server: the fake Docker answers `perodua-mail-test`.
+`test_deploy_app.py` checks:
+- the pinned release has `MAIL_SUPPORTED=1` exactly when it is v1.2.2 or later;
+  with 0, each mail setting (also with `--check-config`), `--mail` and
+  `--send-test-mail` stop before any Docker call with "needs client-stable-uiux
+  v1.2.2 or later";
+- the settings of a configuration are saved in `app.env`, with
+  `SMTP_PASSWORD_FILE` naming `secrets/smtp_password`, and given to the Odoo
+  service only: the `PERODUA_SMTP_*` lines, `PERODUA_MAIL_REDIRECT_TO`,
+  `secrets: [db_password, smtp_password]` and the top-level secret. A later run
+  from `app.env` writes the same files. The secret rules of `iss-api.sh`: the
+  password is in no Docker argument and not in `compose.yml`, `app.env`,
+  `.deployment-identity` or the output; the secret is 0444 in the 0700
+  `secrets` folder; `app.env` is 0600, also after an `app.env` written by hand
+  with 0644;
+- the encryption gives the default port (587, 465 or 25); without a user there
+  is no user line, password file or secret; without mail settings, `app.env`
+  holds only the keys of v1.0.3 and `app.env` and `compose.yml` are the same,
+  byte for byte, as the release without mail writes them; clearing the settings
+  removes them and the saved password;
+- invalid values, a missing `SMTP_FROM` or `MAIL_REDIRECT_TO`, `none` with a
+  user, a user without `SMTP_PASSWORD_FILE` in a non-interactive run, a
+  relative or missing password file or a folder, a password file without a
+  user and any mail setting without `SMTP_HOST` stop before any Docker call,
+  and shell syntax in a value never runs;
+- the table of values that the image's entrypoint also accepts or refuses (host
+  names, addresses, sender names): through `mail_problem` itself (also the
+  empty host and an address with a line break) and through `--check-config`;
+- `--check-config` refuses an SMTP password file that is empty or holds a line
+  break, also the directory's own `secrets/smtp_password`;
+- on a pseudo-terminal: the first run asks `Configure outgoing email now?` after
+  the page question (a release without mail does not), then the questions in
+  their order, with echo off for the password. A wrong host, menu number, port
+  or sender is asked again; `off` is not a test address; real mail needs `SEND
+  REAL MAIL` typed exactly; None asks for no user or password. `--mail` asks
+  again with the saved values as defaults: another encryption gives its port,
+  Enter keeps the saved password, `-` empties the sender name, and a new
+  password replaces the secret. It can switch mail off, and needs a terminal
+  and a plain run;
+- `--send-test-mail` runs only `compose run --rm --no-deps -T odoo
+  perodua-mail-test ADDRESS` with the directory's compose file, names the test
+  address that gets the email, reports a failure of the helper, and refuses a
+  bad address, other options, a directory without a deployment, a deployment
+  without mail and a first run that never used its database.
+
+`test_deploy_app_uat.py` checks that the mail settings add no container step
+and that the final message names them. `test_deploy_app_upgrade.py` checks that
+`--upgrade` copies the SMTP password next to the staged `compose.yml` of the new
+release. `test_uninstall_app.py` checks that the plan names the SMTP password
+when the directory has one.
+
 `test_deploy_app_uat.py` checks that `preflight.py public-urls` runs once on
 every path (an initialized database with and without `--init-db`, a fresh
 initialization, `SETUP_PENDING`, `SETUP_UNMARKED`), after the fresh checks and

@@ -487,6 +487,16 @@ class UninstallAppTests(unittest.TestCase):
                       "copy them elsewhere first to keep them", result.stdout)
         self.assertEqual(self.changes(), [])
 
+    def test_the_plan_names_the_smtp_password_it_deletes(self):
+        result = self.run_script("--confirm", "another-project")
+        self.assertIn(f"delete {self.app} (configuration, the copy of the database password, logs)", result.stdout)
+        (self.app / "secrets" / "smtp_password").write_text("fake-app-password")
+        result = self.run_script("--confirm", "another-project")
+        self.assertIn(f"delete {self.app} (configuration, the copies of the database password and the SMTP password, logs)",
+                      result.stdout)
+        self.assertNotIn("fake-app-password", result.stdout + result.stderr)
+        self.assertEqual(self.changes(), [])
+
     def test_a_wrong_confirmation_changes_nothing(self):
         result = self.run_script("--confirm", "another-project")
         self.assertNotEqual(result.returncode, 0)

@@ -383,6 +383,10 @@ firewall (security group): Docker's published ports bypass ufw. With a
 configuration file that sets `BIND_IP=0.0.0.0`, the script prints the same
 warning instead of asking.
 
+From v1.2.2 it then asks `Configure outgoing email now? [y/N]`; `y` asks the
+questions of [Outgoing email](#outgoing-email-v122-or-later). v1.2.1 does not
+ask.
+
 If the project's attachments volume was already there (a default
 `uninstall.sh --role app` keeps it), the script decides what to do with it:
 
@@ -583,7 +587,8 @@ database name is typed, or given with `--confirm` for unattended use. Then it:
 3. removes the containers, the attachments volume and the containers'
    anonymous volumes, as `uninstall.sh --purge` does, but keeps the directory,
    its configuration and the images;
-4. runs `deploy-app.sh --init-db` with the saved configuration, from the same
+4. runs `deploy-app.sh --init-db` with the saved configuration (the outgoing
+   email settings and the SMTP password too), from the same
    `scripts` folder: see [Initialize a fresh UAT system on the App Server](#initialize-a-fresh-uat-system-on-the-app-server).
    Before that, the directory is bound to that release, so a reset run from a
    newer release's folder installs the newer release.
@@ -1131,10 +1136,11 @@ database or project name is typed. For unattended use, pass the name with
 removes the directory only if `deploy-app.sh` created it (it contains
 `.deployment-identity`). It runs `docker compose down --remove-orphans` for that
 project and deletes the containers' anonymous volumes, then deletes the directory
-with its configuration, logs and copy of the database password. The attachments
-volume and the pinned images are kept. A later `deploy-app.sh` of the same
-project uses the volume again with the same database, and asks before deleting
-it for a new empty one (see
+with its configuration, logs and copies of the database password and the SMTP
+password (when outgoing email signs in). The attachments volume and the pinned
+images are kept. A later `deploy-app.sh` of the same project uses the volume
+again with the same database, and asks before deleting it for a new empty one
+(see
 [Initialize a fresh UAT system](#initialize-a-fresh-uat-system-on-the-app-server)).
 With `--purge` the volume is removed as well (`down --volumes`), and so is each
 image in `compose.yml` that no other container uses. The database is not touched.
@@ -1479,6 +1485,140 @@ add it only when the customer decides that these names are HTTPS-only. The SSH
 tunnel (`localhost`) and the server's IP address are other host names with
 their own cookies: they keep working over HTTP. On port 443, `https.sh` closes
 the connection for them, and for every other name that is not in its table.
+
+## Outgoing email (v1.2.2 or later)
+
+Odoo sends email only through an SMTP server that `deploy-app.sh` configures.
+Outgoing email needs Client Stable UIUX v1.2.2 or later: its Odoo image reads
+the settings below (the image contract `PERODUA_SMTP_*`), and sends every email
+to one test address unless that is switched off. v1.2.1, which this kit pins,
+has no mail code. Its `deploy-app.sh` has `MAIL_SUPPORTED=0`: it asks no mail
+question, and it stops with `needs client-stable-uiux v1.2.2 or later` before
+any Docker call when a mail setting is set (also in `--check-config`), and on
+`--mail` and `--send-test-mail`. Outgoing email stays off until the kit pins
+v1.2.2. A deployment without mail settings gets the same `app.env` and
+`compose.yml`, byte for byte, as before.
+
+### Settings
+
+The settings are in `app.env` (or `--config`). Each run saves the ones that have
+a value, and leaves out the empty ones, so a deployment without outgoing email
+keeps an `app.env` that the scripts of v1.2.1 and earlier still read.
+
+| Setting | Meaning |
+| --- | --- |
+| `SMTP_HOST` | The SMTP server: a host name (labels of letters, digits and `-`, separated by single dots, 253 characters at most) or an IPv4 address. Empty: no outgoing email, and no other mail setting may be set. |
+| `SMTP_ENCRYPTION` | `starttls` (the default), `ssl` or `none`. `none` is for an internal relay only, and cannot sign in. Odoo does not check the server certificate (Odoo's normal mode on this path). |
+| `SMTP_PORT` | 1-65535. Default from the encryption: 587, 465 or 25. |
+| `SMTP_USER` | The sign-in user. Empty: no sign-in. At most 254 characters, without spaces, control characters, `"`, `\` or `$`. |
+| `SMTP_PASSWORD_FILE` | Needed with `SMTP_USER`: the absolute path to a readable file that holds only the password, on one line. There is no password setting or option, because a command line shows in `ps` and in the shell history. `deploy-app.sh` copies it to `secrets/smtp_password` and saves this path to that copy. |
+| `SMTP_FROM` | Needed with `SMTP_HOST`: the sender address of every email, a plain address such as `no-reply@perodua.com.my`. The author of an email stays in Reply-To. |
+| `SMTP_FROM_NAME` | The sender name of every email, such as `Perodua SPD`: 1-64 letters, digits, spaces and `. , & ( ) _ ' -`, starting with a letter or digit. Empty: the author's name. |
+| `MAIL_REDIRECT_TO` | Needed with `SMTP_HOST`: one test address that gets every email, or `off`. With an address, Odoo sends each email to that address only, with its real recipients before the subject (`[TEST for a@x, b@y +N]`). `off` sends each email to its real recipients. |
+
+A value that breaks a rule stops the run before any Docker call, with the rule.
+`compose.yml` gets the values inside `"..."` as they are: that is safe only
+because no rule lets `"`, `\` or `$` through. The image checks the same values
+with the same rules (one table of test values in both repositories).
+
+### Questions
+
+On a terminal, the first run (without a configuration file) asks
+`Configure outgoing email now? [y/N]` after "Who may open the web page?". For a
+deployment that runs, `sudo bash deploy-app.sh --mail` asks the same questions,
+with the saved settings as defaults, then deploys as usual. `--mail` needs a
+terminal, and does not go with `--upgrade`, `--check-config`,
+`--non-interactive`, `--release-queued-mail` or `--send-test-mail`. Enter keeps
+the value in brackets; `-` empties a value that may be empty. A wrong answer is
+explained and asked again.
+
+1. The SMTP server. `-` (or Enter with none saved) asks
+   `Switch outgoing email off? [y/N]`: `y` removes every mail setting and the
+   saved SMTP password, `N` asks for the server again.
+2. The encryption, as a menu: `1) STARTTLS, port 587`, `2) SSL/TLS, port 465`,
+   `3) None, port 25: an internal relay only, without sign-in`.
+3. The port. The default comes from the menu; the saved port stays the
+   default while the encryption stays the same.
+4. The sign-in user. Enter (with none saved) or `-` is no sign-in. Not asked for
+   None.
+5. The password, with hidden input (`read -s`). With a saved password, Enter
+   keeps it. Asked only with a user.
+6. The sender address. With no saved one, the default is the user when that is
+   an address.
+7. The sender name. Enter (with none saved) or `-` keeps the author's name.
+8. `Send every email to one test address? [Y/n]`. `Y` (the default) asks for the
+   address; `off` is not accepted there. `n` asks to type `SEND REAL MAIL`; any
+   other answer asks the question again. The answer is saved as the address or
+   as `off`.
+
+The run prints the result in one line, without the password, for example
+`Outgoing email: smtp.example.com:587 starttls, sign-in as user@example.com, from no-reply@perodua.com.my as "Perodua SPD", every email to the test address you@perodua.com.my.`
+
+### What a run writes
+
+Only when `SMTP_HOST` is set:
+
+- `app.env`: the mail settings that have a value, with `SMTP_ENCRYPTION` and
+  `SMTP_PORT` filled in, and, with a user,
+  `SMTP_PASSWORD_FILE=<dir>/secrets/smtp_password`. No mail setting goes into
+  `.deployment-identity`, so a change of them is not "a different database".
+- `secrets/smtp_password` (with a user): the password, mode 0444 in the 0700
+  `secrets` folder, staged and moved as `db_password` is. `--upgrade` copies it
+  next to the staged `compose.yml` as well (`docker compose config` does not
+  notice a missing secret file). Without a user, or without `SMTP_HOST`, the run
+  deletes a saved copy.
+- `compose.yml`, the `odoo` service: `PERODUA_SMTP_HOST`, `PERODUA_SMTP_PORT`,
+  `PERODUA_SMTP_ENCRYPTION`, with a user `PERODUA_SMTP_USER` and
+  `PERODUA_SMTP_PASSWORD_FILE: /run/secrets/smtp_password`, `PERODUA_SMTP_FROM`,
+  `PERODUA_SMTP_FROM_NAME` (when set) and `PERODUA_MAIL_REDIRECT_TO`; with a user
+  also `secrets: [db_password, smtp_password]` and the top-level secret
+  `smtp_password` (`file: ./secrets/smtp_password`). The image reads the
+  password from the file into the environment of Odoo only: it is in no command
+  line, `compose.yml`, `app.env` or `docker inspect`.
+
+`app.env` is mode 0600, also when it was written by hand with another mode. No
+new step runs: the containers are recreated with the new `compose.yml`, as on
+every run.
+
+### Test email
+
+```sh
+sudo bash deploy-app.sh --send-test-mail you@perodua.com.my
+```
+
+It runs on its own, on a deployment that has used its database and has
+`SMTP_HOST`: `docker compose run --rm --no-deps -T odoo perodua-mail-test ADDRESS`,
+the image's helper, which sends one email through Odoo. So `MAIL_REDIRECT_TO`
+applies to it: with a test address, the email goes there, with
+`[TEST for ADDRESS]` before its subject. A failure prints the reason and stops
+with an error.
+
+### Mail in the queue
+
+When the outgoing email settings change (the server, port, encryption, user,
+sender or test address, not the password), Odoo holds every mail that waited in
+the queue (state Outgoing): it gets the state Delivery Failed with the reason
+that the settings changed. Review it in Settings > Technical > Emails, then
+Retry or Cancel it; while a test address is set, Retry sends it to the test
+address. So the switch from a test address to `off` never sends the mail of the
+test period to its real recipients. This hold is the image's, and differs from
+the hold of a module upgrade, which `--release-queued-mail` releases
+([Module upgrade](#module-upgrade--u)).
+
+A reset (`service.sh reset`) keeps the mail settings and the SMTP password:
+`--check-config` checks the password file before anything is deleted.
+`uninstall.sh --role app` deletes them with the directory.
+
+### For production
+
+1. Get the relay details from the mail administrator: server, port,
+   encryption, account, permitted sender, and the App server's address on the
+   relay's allow-list and in the firewall.
+2. Configure it with the test address (`--mail`, answer `Y`), and send a test
+   email.
+3. Review the held mail.
+4. Only when the owner agrees: `--mail` again, answer `n` and type
+   `SEND REAL MAIL`.
 
 ## HTTPS certificate from Let's Encrypt
 

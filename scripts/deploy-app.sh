@@ -23,6 +23,12 @@ PUBLIC_ROOT_SUPPORTED=1
 # here.
 HANDOVER_SUPPORTED=1
 HANDOVER_HOST=stgiss.perodua.com.my
+# Whether the pinned Odoo image sends outgoing email with the SMTP settings of
+# app.env (SMTP_HOST and the other mail keys), each to the one test address
+# MAIL_REDIRECT_TO unless it is off: yes from v1.2.2. v1.2.1 has no mail code,
+# so a scripts folder that pins it refuses the mail settings, --mail and
+# --send-test-mail.
+MAIL_SUPPORTED=0
 # --init-db: a fresh UAT database, the release graph without the client
 # demonstration dataset. Before anything is written, uat_guard.py checks the
 # pinned image: nothing Odoo could install may depend on EXCLUDED_MODULE or
@@ -65,6 +71,13 @@ DB_HOST='' DB_PORT=5432 DB_NAME=perodua DB_USER=odoo DB_PASSWORD_FILE=''
 PROJECT_NAME=perodua-client-uiux HTTP_PORT=8110 BIND_IP=0.0.0.0
 STARTUP_TIMEOUT=600 INIT_TIMEOUT=3600
 PUBLIC_ROOT='' ENVIRONMENT_LABEL='' PUBLIC_BASE_URL=''
+# Outgoing email: empty SMTP_HOST is no outgoing email. --mail asks the mail
+# questions; --send-test-mail ADDRESS sends one test email through the
+# deployment. The SMTP password a question took waits in smtp_password until
+# it is staged as a secret, as the database password does.
+SMTP_HOST='' SMTP_PORT='' SMTP_ENCRYPTION='' SMTP_USER='' SMTP_PASSWORD_FILE='' SMTP_FROM='' SMTP_FROM_NAME='' MAIL_REDIRECT_TO=''
+MAIL_KEYS=(SMTP_HOST SMTP_PORT SMTP_ENCRYPTION SMTP_USER SMTP_PASSWORD_FILE SMTP_FROM SMTP_FROM_NAME MAIL_REDIRECT_TO)
+MAIL=0 TEST_MAIL='' smtp_password=''
 # The settings the configuration file gives a value, and whether that file is an
 # app.env written by hand in the deployment directory before its first run.
 declare -A SET=()
@@ -77,6 +90,8 @@ Usage: bash deploy-app.sh [--config PATH] [--dir PATH] [--non-interactive] [--in
        bash deploy-app.sh --upgrade [--dir PATH] [--backup-dir PATH] [--non-interactive]
                           [--confirm DATABASE] [--drop-retired-data]
        bash deploy-app.sh --release-queued-mail [--dir PATH]
+       bash deploy-app.sh --mail [--dir PATH] [--init-db]
+       bash deploy-app.sh --send-test-mail ADDRESS [--dir PATH]
 Deploy the pinned Client Stable UIUX v1.2.1 Odoo + Web images using Docker Compose.
 Requires a reachable external PostgreSQL 16 server; does not install or configure it.
 Default: use an already initialized, matching Client Stable UIUX database.
@@ -115,6 +130,14 @@ Optional keys, read only from --config or app.env: PUBLIC_ROOT (such as /dev,
 v1.0.4 or later) serves the page under http://HOST:PORT/dev/app/;
 ENVIRONMENT_LABEL is the label on the sign-in page (v1.0.4 or later);
 PUBLIC_BASE_URL (such as https://HOST/dev) is the address browsers use.
+Outgoing email (Client Stable UIUX v1.2.2 or later; off while empty): SMTP_HOST,
+SMTP_PORT, SMTP_ENCRYPTION (starttls, ssl or none), SMTP_USER,
+SMTP_PASSWORD_FILE (an absolute path; there is no password option), SMTP_FROM,
+SMTP_FROM_NAME and MAIL_REDIRECT_TO (one test address that gets every email,
+or off). A first run on a terminal asks whether to configure it.
+--mail asks the outgoing email questions again, with the saved answers as
+defaults, then deploys as usual. It needs a terminal.
+--send-test-mail ADDRESS sends one test email through the running deployment.
 HELP
 }
 fail() { printf 'Error: %s\n' "$*" >&2; exit 1; }
@@ -233,13 +256,14 @@ trap 'exit 130' INT TERM
 trap '[[ $BASHPID != "$$" ]] || printf "Deployment failed at line %s.\n" "$LINENO" >&2' ERR
 while (($#)); do
     case $1 in
-        --config|--dir|--backup-dir|--confirm)
+        --config|--dir|--backup-dir|--confirm|--send-test-mail)
             (($# >= 2)) || fail "$1 requires a value"
             case $1 in
                 --config) CONFIG=$2 ;;
                 --dir) DEPLOY_DIR=$2 ;;
                 --backup-dir) BACKUP_BASE=$2 ;;
                 --confirm) CONFIRM=$2; [[ -n $CONFIRM ]] || fail '--confirm requires the database name' ;;
+                --send-test-mail) TEST_MAIL=$2; [[ -n $TEST_MAIL ]] || fail '--send-test-mail requires the address that gets the test email' ;;
             esac
             shift 2 ;;
         --non-interactive) NON_INTERACTIVE=1; shift ;;
@@ -248,6 +272,7 @@ while (($#)); do
         --upgrade) UPGRADE=1; shift ;;
         --drop-retired-data) DROP_RETIRED=1; shift ;;
         --release-queued-mail) RELEASE_MAIL=1; shift ;;
+        --mail) MAIL=1; shift ;;
         --help|-h) usage; exit 0 ;;
         *) fail "Unknown argument: $1" ;;
     esac
@@ -273,6 +298,21 @@ if ((RELEASE_MAIL)); then
     [[ -f $DEPLOY_DIR/.deployment-identity && ! -L $DEPLOY_DIR/.deployment-identity ]] \
         || fail "--release-queued-mail needs a deployment, and $DEPLOY_DIR has none (no .deployment-identity)"
 fi
+MAIL_NEEDS="needs client-stable-uiux v1.2.2 or later, and this scripts folder deploys $RELEASE. Use the scripts folder of v1.2.2 or later"
+if ((MAIL)) || [[ -n $TEST_MAIL ]]; then
+    ((MAIL_SUPPORTED)) || fail "Outgoing email $MAIL_NEEDS"
+fi
+if ((MAIL)); then
+    ((UPGRADE == 0 && CHECK_ONLY == 0 && NON_INTERACTIVE == 0 && RELEASE_MAIL == 0 && ${#TEST_MAIL} == 0)) \
+        || fail '--mail asks the outgoing email questions, then deploys as usual: not with --upgrade, --check-config, --non-interactive, --release-queued-mail or --send-test-mail'
+    [[ -t 0 ]] || fail '--mail asks questions and requires a terminal. Without one, write the SMTP_ settings and MAIL_REDIRECT_TO into app.env and run deploy-app.sh --non-interactive'
+fi
+if [[ -n $TEST_MAIL ]]; then
+    ((UPGRADE == 0 && INIT_DB == 0 && CHECK_ONLY == 0 && RELEASE_MAIL == 0)) \
+        || fail '--send-test-mail runs on its own, on a deployment: not with --upgrade, --init-db, --check-config or --release-queued-mail'
+    [[ -f $DEPLOY_DIR/.deployment-identity && ! -L $DEPLOY_DIR/.deployment-identity ]] \
+        || fail "--send-test-mail needs a deployment, and $DEPLOY_DIR has none (no .deployment-identity)"
+fi
 if [[ -z $CONFIG && -f $DEPLOY_DIR/app.env ]]; then
     CONFIG=$DEPLOY_DIR/app.env
     # Before the first deployment, app.env can only be the operator's: every
@@ -287,12 +327,19 @@ if [[ -n $CONFIG ]]; then
         [[ $line =~ ^([A-Z_]+)=(.*)$ ]] || fail 'Configuration must contain literal KEY=VALUE lines'
         key=${BASH_REMATCH[1]} value=${BASH_REMATCH[2]}
         case $key in
-            DB_HOST|DB_PORT|DB_NAME|DB_USER|DB_PASSWORD_FILE|PROJECT_NAME|HTTP_PORT|BIND_IP|STARTUP_TIMEOUT|INIT_TIMEOUT|PUBLIC_ROOT|ENVIRONMENT_LABEL|PUBLIC_BASE_URL)
+            DB_HOST|DB_PORT|DB_NAME|DB_USER|DB_PASSWORD_FILE|PROJECT_NAME|HTTP_PORT|BIND_IP|STARTUP_TIMEOUT|INIT_TIMEOUT|PUBLIC_ROOT|ENVIRONMENT_LABEL|PUBLIC_BASE_URL|SMTP_HOST|SMTP_PORT|SMTP_ENCRYPTION|SMTP_USER|SMTP_PASSWORD_FILE|SMTP_FROM|SMTP_FROM_NAME|MAIL_REDIRECT_TO)
                 printf -v "$key" '%s' "$value"
                 [[ -z $value ]] || SET[$key]=1 ;;
             *) fail "Unknown configuration key: $key" ;;
         esac
     done < "$CONFIG"
+fi
+# Outgoing email needs the mail code of the image, and v1.2.1 has none:
+# refused before any question.
+if ((MAIL_SUPPORTED == 0)); then
+    for key in "${MAIL_KEYS[@]}"; do
+        [[ -z ${!key} ]] || fail "$key is set, but outgoing email $MAIL_NEEDS, or remove the SMTP_ settings and MAIL_REDIRECT_TO from $CONFIG"
+    done
 fi
 # --check-config never asks: there must be settings to check.
 ((CHECK_ONLY == 0)) || [[ -n $CONFIG ]] || fail "--check-config needs --config or $DEPLOY_DIR/app.env"
@@ -303,6 +350,151 @@ prompt() {
     read -r -p "$label [${!name}]: " answer || fail 'Input cancelled'
     [[ -z $answer ]] || printf -v "$name" '%s' "$answer"
     [[ -n ${!name} ]] || fail "$name is required"
+}
+password_problem() {  # why $1 cannot be the database password (or the password $2 names), if it cannot
+    [[ -n $1 && $1 != *$'\n'* && $1 != *$'\r'* ]] || printf '%s must be nonempty and contain no line breaks' "${2:-Database password}"
+}
+# Host names: dot-separated DNS labels, or an IPv4 address (PUBLIC_BASE_URL, SMTP_HOST).
+host_pattern='^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$'
+mail_problem() {  # why $2 cannot be the value of the mail setting $1, if it cannot
+    # The image checks the same values with the same rules. compose.yml gets
+    # them inside "..." as they are: no rule lets " \ or $ through.
+    local value=$2 address user name
+    address='^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$'
+    user='^[^[:space:][:cntrl:]"\$]{1,254}$'
+    name="^[A-Za-z0-9][A-Za-z0-9 .,&()_'-]{0,63}\$"
+    case $1 in
+        SMTP_HOST)
+            [[ ${#value} -le 253 && $value =~ $host_pattern ]] \
+                || printf 'SMTP_HOST must be a host name or IPv4 address: labels of letters, digits and - separated by single dots, each starting and ending with a letter or digit, 253 characters at most' ;;
+        SMTP_PORT)
+            if [[ ! $value =~ ^[1-9][0-9]{0,4}$ ]] || ((10#$value > 65535)); then printf 'SMTP_PORT must be a port number, 1-65535'; fi ;;
+        SMTP_ENCRYPTION)
+            [[ $value == starttls || $value == ssl || $value == none ]] || printf 'SMTP_ENCRYPTION must be starttls, ssl or none' ;;
+        SMTP_USER)
+            [[ -z $value || $value =~ $user ]] \
+                || printf 'SMTP_USER must be empty (no sign-in) or at most 254 characters without spaces, control characters, ", \\ or $' ;;
+        SMTP_FROM)
+            [[ ${#value} -le 254 && $value =~ $address ]] || printf 'SMTP_FROM must be a plain email address, such as no-reply@perodua.com.my' ;;
+        SMTP_FROM_NAME)
+            [[ -z $value || $value =~ $name ]] \
+                || printf "SMTP_FROM_NAME must be empty (the author's name) or 1-64 letters, digits, spaces and . , & ( ) _ ' -, starting with a letter or digit" ;;
+        MAIL_REDIRECT_TO)
+            [[ $value == off || ${#value} -le 254 && $value =~ $address ]] \
+                || printf 'MAIL_REDIRECT_TO must be one email address, such as you@perodua.com.my, that gets every email, or off' ;;
+        --send-test-mail)
+            [[ ${#value} -le 254 && $value =~ $address ]] || printf 'The address of --send-test-mail must be one email address, such as you@perodua.com.my' ;;
+    esac
+}
+ask_mail_value() {  # $1 setting, $2 question, $3 what no value means when it may stay empty
+    local name=$1 question=$2 answer problem
+    # Enter keeps the value shown. - leaves one that may stay empty without a
+    # value; so does Enter when none is shown.
+    if [[ -n ${3:-} && -n ${!name} ]]; then question+=" (- for $3)"; elif [[ -n ${3:-} ]]; then question+=" (Enter for $3)"; fi
+    while :; do
+        read -r -p "$question [${!name}]: " answer || fail 'Input cancelled'
+        if [[ -n ${3:-} && $answer == - ]]; then answer=''; else answer=${answer:-${!name}}; fi
+        if [[ -z $answer ]]; then
+            [[ -z ${3:-} ]] || break
+            printf 'An answer is required.\n'
+            continue
+        fi
+        problem=$(mail_problem "$name" "$answer")
+        [[ -n $problem ]] || break
+        printf '%s. Try again.\n' "$problem"
+    done
+    printf -v "$name" '%s' "$answer"
+}
+mail_summary() {  # the outgoing email settings in one line, without the password
+    printf '%s:%s %s, ' "$SMTP_HOST" "$SMTP_PORT" "$SMTP_ENCRYPTION"
+    if [[ -n $SMTP_USER ]]; then printf 'sign-in as %s, ' "$SMTP_USER"; else printf 'no sign-in, '; fi
+    printf 'from %s' "$SMTP_FROM"
+    [[ -z $SMTP_FROM_NAME ]] || printf ' as "%s"' "$SMTP_FROM_NAME"
+    if [[ $MAIL_REDIRECT_TO == off ]]; then
+        printf ', every email to its real recipients'
+    else
+        printf ', every email to the test address %s' "$MAIL_REDIRECT_TO"
+    fi
+}
+ask_mail() {  # the outgoing email questions: a first run that chose them, or --mail
+    local answer problem saved='' default encryptions=(starttls ssl none) ports=(587 465 25)
+    printf '\nOutgoing email. The answers are saved in %s/app.env, the SMTP password in %s/secrets/smtp_password.\n' "$DEPLOY_DIR" "$DEPLOY_DIR"
+    while :; do
+        read -r -p "SMTP server, host name or IP address (- for none) [$SMTP_HOST]: " answer || fail 'Input cancelled'
+        if [[ $answer == - ]]; then answer=''; else answer=${answer:-$SMTP_HOST}; fi
+        if [[ -z $answer ]]; then
+            read -r -p 'Switch outgoing email off? [y/N]: ' answer || fail 'Input cancelled'
+            [[ ${answer:-n} == [Yy]* ]] || continue
+            for key in "${MAIL_KEYS[@]}"; do printf -v "$key" '%s' ''; done
+            smtp_password=''
+            printf 'Outgoing email is off.\n'
+            return
+        fi
+        problem=$(mail_problem SMTP_HOST "$answer")
+        [[ -n $problem ]] || break
+        printf '%s. Try again.\n' "$problem"
+    done
+    SMTP_HOST=$answer
+    case $SMTP_ENCRYPTION in ssl) default=2 ;; none) default=3 ;; *) default=1 ;; esac
+    printf 'Encryption of the connection to %s:\n' "$SMTP_HOST"
+    printf '  1) STARTTLS, port 587\n'
+    printf '  2) SSL/TLS, port 465\n'
+    printf '  3) None, port 25: an internal relay only, without sign-in\n'
+    while :; do
+        read -r -p "Choose [$default]: " answer || fail 'Input cancelled'
+        answer=${answer:-$default}
+        [[ $answer != [123] ]] || break
+        printf 'Enter a number from 1 to 3.\n'
+    done
+    # The saved port stays the default while the encryption stays the same.
+    [[ ${encryptions[answer - 1]} == "$SMTP_ENCRYPTION" && -n $SMTP_PORT ]] || SMTP_PORT=${ports[answer - 1]}
+    SMTP_ENCRYPTION=${encryptions[answer - 1]}
+    ask_mail_value SMTP_PORT 'SMTP port'
+    if [[ $SMTP_ENCRYPTION == none ]]; then
+        printf 'No sign-in: without encryption, a password would cross the network as plain text.\n'
+        SMTP_USER=''
+    else
+        ask_mail_value SMTP_USER 'SMTP sign-in user' 'no sign-in'
+    fi
+    smtp_password=''
+    if [[ -n $SMTP_USER ]]; then
+        if [[ -n $SMTP_PASSWORD_FILE && -r $SMTP_PASSWORD_FILE ]] || [[ -r $DEPLOY_DIR/secrets/smtp_password ]]; then saved=1; fi
+        while :; do
+            if [[ -n $saved ]]; then
+                read -r -s -p 'SMTP password (hidden; Enter keeps the saved one): ' smtp_password || fail 'Input cancelled'
+            else
+                read -r -s -p 'SMTP password (hidden): ' smtp_password || fail 'Input cancelled'
+            fi
+            printf '\n'
+            [[ -n $smtp_password || -z $saved ]] || break
+            problem=$(password_problem "$smtp_password" 'SMTP password')
+            [[ -n $problem ]] || break
+            printf '%s. Try again.\n' "$problem"
+        done
+    fi
+    # A sign-in user that is an address is the usual sender: Gmail, for one,
+    # sends only as the address that signed in.
+    if [[ -z $SMTP_FROM && -n $SMTP_USER && -z $(mail_problem SMTP_FROM "$SMTP_USER") ]]; then SMTP_FROM=$SMTP_USER; fi
+    ask_mail_value SMTP_FROM 'Sender address of every email'
+    ask_mail_value SMTP_FROM_NAME 'Sender name of every email' "the author's name"
+    while :; do
+        read -r -p 'Send every email to one test address? [Y/n]: ' answer || fail 'Input cancelled'
+        if [[ ${answer:-y} == [Yy]* ]]; then
+            [[ $MAIL_REDIRECT_TO != off ]] || MAIL_REDIRECT_TO=''
+            ask_mail_value MAIL_REDIRECT_TO 'Test address that gets every email'
+            [[ $MAIL_REDIRECT_TO == off ]] || break
+            printf 'off is not an address. To send every email to its real recipients, answer n.\n'
+            MAIL_REDIRECT_TO=''
+            continue
+        fi
+        printf 'Then every email goes to its real recipients: users, suppliers and customers.\n'
+        read -r -p 'Type SEND REAL MAIL to confirm: ' answer || fail 'Input cancelled'
+        if [[ $answer == 'SEND REAL MAIL' ]]; then MAIL_REDIRECT_TO=off; break; fi
+        printf 'The confirmation did not match.\n'
+    done
+    # A password typed above replaces the file: it is staged on its own.
+    [[ -z $smtp_password ]] || SMTP_PASSWORD_FILE=''
+    printf 'Outgoing email: %s.\n' "$(mail_summary)"
 }
 db_host_problem() {  # why DB_HOST cannot be used, if it cannot
     case $DB_HOST in
@@ -392,6 +584,11 @@ if [[ -z $CONFIG ]]; then
     ask_database
     prompt HTTP_PORT 'Web port that browsers open on this server'
     ((NON_INTERACTIVE)) || choose_bind_ip
+    if ((MAIL_SUPPORTED && NON_INTERACTIVE == 0 && MAIL == 0)); then
+        printf '\n'
+        read -r -p 'Configure outgoing email now? [y/N]: ' answer || fail 'Input cancelled'
+        [[ ${answer:-n} != [Yy]* ]] || MAIL=1
+    fi
 elif [[ -z $DB_HOST ]]; then
     # A configuration without the database settings, such as an app.env written
     # by hand with only PUBLIC_ROOT and the other settings of the page: a run on
@@ -402,6 +599,9 @@ elif [[ -z $DB_HOST ]]; then
     printf '%s has no database settings: answer the questions below. They are saved in %s/app.env.\n' "$CONFIG" "$DEPLOY_DIR"
     ask_database
 fi
+# The outgoing email questions: a first run that chose them, or --mail, with
+# the saved settings as defaults.
+((MAIL == 0)) || ask_mail
 problem=$(db_host_problem)
 [[ -z $problem ]] || fail "$problem"
 for key in DB_NAME DB_USER; do
@@ -426,7 +626,6 @@ label_pattern='^[A-Za-z0-9 ._()-]{1,40}$'
 # PUBLIC_BASE_URL: the host is dot-separated DNS labels (or an IPv4 address);
 # it becomes the frozen web.base.url, which only Odoo's settings can change.
 url_pattern='^https?://([A-Za-z0-9.-]+)(:[0-9]{1,5})?(/[a-z0-9][a-z0-9-]{0,30})?$'
-host_pattern='^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$'
 if [[ -n $PUBLIC_BASE_URL ]]; then
     [[ $PUBLIC_BASE_URL =~ $url_pattern ]] \
         || fail 'PUBLIC_BASE_URL must be empty or http(s)://HOST[:PORT][/PATH] without a / at the end, such as https://stgissrp.perodua.com.my/dev'
@@ -474,6 +673,45 @@ if ((HANDOVER_SUPPORTED)); then
         printf 'Warning: PUBLIC_BASE_URL has the port %s, not 443, %s.\n' "$url_port" "$handover_off" >&2
     fi
 fi
+# Outgoing email: Odoo sends through SMTP_HOST, each email to MAIL_REDIRECT_TO
+# unless it is off. Without SMTP_HOST there is no outgoing email, and the other
+# mail settings have no meaning. The encryption and the port get their
+# defaults here, so app.env and compose.yml name them.
+if [[ -z $SMTP_HOST ]]; then
+    for key in "${MAIL_KEYS[@]}"; do
+        [[ -z ${!key} ]] || fail "$key applies only with SMTP_HOST, the SMTP server. Set SMTP_HOST, or remove $key for no outgoing email"
+    done
+else
+    SMTP_ENCRYPTION=${SMTP_ENCRYPTION:-starttls}
+    problem=$(mail_problem SMTP_ENCRYPTION "$SMTP_ENCRYPTION")
+    [[ -z $problem ]] || fail "$problem"
+    if [[ -z $SMTP_PORT ]]; then
+        case $SMTP_ENCRYPTION in starttls) SMTP_PORT=587 ;; ssl) SMTP_PORT=465 ;; none) SMTP_PORT=25 ;; esac
+    fi
+    [[ -n $SMTP_FROM ]] || fail 'SMTP_FROM is required with SMTP_HOST: the sender address of every email'
+    [[ -n $MAIL_REDIRECT_TO ]] \
+        || fail 'MAIL_REDIRECT_TO is required with SMTP_HOST: one test address that gets every email, or off to send each email to its real recipients'
+    for key in SMTP_HOST SMTP_PORT SMTP_USER SMTP_FROM SMTP_FROM_NAME MAIL_REDIRECT_TO; do
+        problem=$(mail_problem "$key" "${!key}")
+        [[ -z $problem ]] || fail "$problem"
+    done
+    if [[ -n $SMTP_USER ]]; then
+        [[ $SMTP_ENCRYPTION != none ]] \
+            || fail 'SMTP_USER cannot sign in with SMTP_ENCRYPTION=none: the password would cross the network as plain text. Use starttls or ssl, or a relay that needs no sign-in'
+        [[ -z $SMTP_PASSWORD_FILE || ( $SMTP_PASSWORD_FILE == /* && -r $SMTP_PASSWORD_FILE && -f $SMTP_PASSWORD_FILE ) ]] \
+            || fail 'SMTP_PASSWORD_FILE must be an absolute path to a readable file'
+        # There is no password option: a command line shows in ps and in the shell history.
+        if ((NON_INTERACTIVE)) && [[ -z $SMTP_PASSWORD_FILE && ! -r $DEPLOY_DIR/secrets/smtp_password ]]; then
+            fail 'SMTP_USER needs SMTP_PASSWORD_FILE, the absolute path to a file that holds the SMTP password, for a non-interactive deployment'
+        fi
+    else
+        [[ -z $SMTP_PASSWORD_FILE ]] || fail 'SMTP_PASSWORD_FILE applies only with SMTP_USER: a relay without sign-in needs no password'
+    fi
+fi
+if [[ -n $TEST_MAIL ]]; then
+    problem=$(mail_problem --send-test-mail "$TEST_MAIL")
+    [[ -z $problem ]] || fail "$problem"
+fi
 [[ -z $DB_PASSWORD_FILE || ( $DB_PASSWORD_FILE == /* && -r $DB_PASSWORD_FILE && -f $DB_PASSWORD_FILE ) ]] || fail 'DB_PASSWORD_FILE must be an absolute path to a readable file'
 if ((NON_INTERACTIVE)) && [[ -z $DB_PASSWORD_FILE && ! -r $DEPLOY_DIR/secrets/db_password ]]; then
     fail 'DB_PASSWORD_FILE is required for the first non-interactive deployment'
@@ -481,24 +719,24 @@ fi
 for helper in uat_guard.py uat_admins.py; do
     [[ -f $SCRIPT_DIR/$helper && ! -L $SCRIPT_DIR/$helper ]] || fail "$helper is missing next to deploy-app.sh; run it from the complete release directory"
 done
+check_password_file() {  # $1 the *_FILE setting, $2 the saved secret, $3 the password's name in messages
+    local password_source=$1 password problem
+    [[ -n $password_source || ! -r $2 ]] || password_source=$2
+    [[ -n $password_source ]] || return 0
+    password=$(<"$password_source")
+    problem=$(password_problem "$password" "$3")
+    unset password
+    [[ -z $problem ]] || fail "$problem ($password_source)"
+}
 # service.sh reset runs this before it deletes anything, so that settings this
 # release refuses stop the reset while the data is still there. The directory
 # identity is not compared: the reset binds the directory to this release.
-password_problem() {  # why $1 cannot be the database password, if it cannot
-    [[ -n $1 && $1 != *$'\n'* && $1 != *$'\r'* ]] || printf 'Database password must be nonempty and contain no line breaks'
-}
 if ((CHECK_ONLY)); then
-    # A real run reads the password only after the checks above. Read it here
-    # too, from the same file, so that a reset does not delete the data and
-    # then refuse the password.
-    password_source=$DB_PASSWORD_FILE
-    [[ -n $password_source || ! -r $DEPLOY_DIR/secrets/db_password ]] || password_source=$DEPLOY_DIR/secrets/db_password
-    if [[ -n $password_source ]]; then
-        password=$(<"$password_source")
-        problem=$(password_problem "$password")
-        unset password
-        [[ -z $problem ]] || fail "$problem ($password_source)"
-    fi
+    # A real run reads the passwords only after the checks above. Read them
+    # here too, from the same files, so that a reset does not delete the data
+    # and then refuse a password.
+    check_password_file "$DB_PASSWORD_FILE" "$DEPLOY_DIR/secrets/db_password" 'Database password'
+    [[ -z $SMTP_USER ]] || check_password_file "$SMTP_PASSWORD_FILE" "$DEPLOY_DIR/secrets/smtp_password" 'SMTP password'
     printf 'Configuration valid for %s. Nothing was changed.\n' "$RELEASE"
     exit 0
 fi
@@ -575,6 +813,25 @@ if ((RELEASE_MAIL)); then
         "$((10#${BASH_REMATCH[1]} + 10#${BASH_REMATCH[2]}))" "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
     exit 0
 fi
+if [[ -n $TEST_MAIL ]]; then
+    # One test email through the deployment's own settings: the image's
+    # perodua-mail-test sends it with Odoo, so MAIL_REDIRECT_TO applies to it
+    # as to every other email.
+    ! unverified || fail "The first deployment in $DEPLOY_DIR stopped before it used its database. Finish it with deploy-app.sh first"
+    [[ -n $SMTP_HOST ]] \
+        || fail "Outgoing email is off in $DEPLOY_DIR (no SMTP_HOST in $CONFIG). Configure it first: sudo bash deploy-app.sh --mail --dir $DEPLOY_DIR"
+    printf 'Sending one test email to %s: %s...\n' "$TEST_MAIL" "$(mail_summary)"
+    docker compose --project-name "$PROJECT_NAME" --file "$DEPLOY_DIR/compose.yml" \
+        run --rm --no-deps -T odoo perodua-mail-test "$TEST_MAIL" </dev/null \
+        || fail 'The test email was not sent, for the reason above. Check the SMTP settings with sudo bash deploy-app.sh --mail, and that this server reaches the SMTP server'
+    if [[ $MAIL_REDIRECT_TO == off ]]; then
+        printf 'Test email sent to %s. Check that it arrives.\n' "$TEST_MAIL"
+    else
+        printf 'Test email sent. MAIL_REDIRECT_TO sends it to the test address %s, with [TEST for %s] before its subject: check that it arrives there.\n' \
+            "$MAIL_REDIRECT_TO" "$TEST_MAIL"
+    fi
+    exit 0
+fi
 containers=$(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT_NAME")
 for container in $containers; do
     owner=$(docker inspect --format '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}' "$container")
@@ -616,6 +873,28 @@ unset password
 # The enclosing secrets directory is 0700. 0444 lets the unprivileged image UID
 # read its bind-mounted secret; Docker Compose file secrets do not remap modes.
 chmod 0444 "$TEMP_DIR/db_password"
+# Outgoing email with a sign-in: the SMTP password, staged the same way. A
+# question took it (smtp_password), or SMTP_PASSWORD_FILE or the saved secret
+# holds it; a terminal is asked for it otherwise.
+if [[ -n $SMTP_USER ]]; then
+    if [[ -z $smtp_password ]]; then
+        if [[ -n $SMTP_PASSWORD_FILE ]]; then
+            smtp_password=$(<"$SMTP_PASSWORD_FILE")
+        elif [[ -r $DEPLOY_DIR/secrets/smtp_password ]]; then
+            smtp_password=$(<"$DEPLOY_DIR/secrets/smtp_password")
+        else
+            ((NON_INTERACTIVE == 0)) || fail 'SMTP_USER needs SMTP_PASSWORD_FILE for a non-interactive deployment'
+            [[ -t 0 ]] || fail 'SMTP password input requires a terminal'
+            read -r -s -p 'SMTP password (hidden): ' smtp_password || fail 'Input cancelled'
+            printf '\n'
+        fi
+    fi
+    problem=$(password_problem "$smtp_password" 'SMTP password')
+    [[ -z $problem ]] || fail "$problem"
+    printf '%s' "$smtp_password" > "$TEMP_DIR/smtp_password"
+    unset smtp_password
+    chmod 0444 "$TEMP_DIR/smtp_password"
+fi
 
 auth_error() { grep -Eiq 'unauthorized|authentication required|denied|forbidden|403|401|no basic auth' "$1"; }
 pull_image() {
@@ -1385,6 +1664,24 @@ with connect(db) as cn:
             print(restore_locks_line(restore_locks(cur)))
         print('READY ' + str(attachments))
 PY
+# Outgoing email, only when SMTP_HOST is set: without it, compose.yml stays as
+# earlier runs wrote it. The values go inside "..." as they are, which is safe
+# only because the checks above refuse " \ and $ in each of them.
+mail_environment='' mail_secret='' odoo_secrets=db_password
+if [[ -n $SMTP_HOST ]]; then
+    mail_environment+=$'\n'"      PERODUA_SMTP_HOST: \"$SMTP_HOST\""
+    mail_environment+=$'\n'"      PERODUA_SMTP_PORT: \"$SMTP_PORT\""
+    mail_environment+=$'\n'"      PERODUA_SMTP_ENCRYPTION: \"$SMTP_ENCRYPTION\""
+    if [[ -n $SMTP_USER ]]; then
+        mail_environment+=$'\n'"      PERODUA_SMTP_USER: \"$SMTP_USER\""
+        mail_environment+=$'\n'"      PERODUA_SMTP_PASSWORD_FILE: /run/secrets/smtp_password"
+        mail_secret=$'\n'"  smtp_password:"$'\n'"    file: ./secrets/smtp_password"
+        odoo_secrets+=', smtp_password'
+    fi
+    mail_environment+=$'\n'"      PERODUA_SMTP_FROM: \"$SMTP_FROM\""
+    [[ -z $SMTP_FROM_NAME ]] || mail_environment+=$'\n'"      PERODUA_SMTP_FROM_NAME: \"$SMTP_FROM_NAME\""
+    mail_environment+=$'\n'"      PERODUA_MAIL_REDIRECT_TO: \"$MAIL_REDIRECT_TO\""
+fi
 cat > "$TEMP_DIR/compose.yml" <<YAML
 services:
   odoo:
@@ -1399,9 +1696,9 @@ services:
       PERODUA_IMAGE_PROFILE: client-stable-uiux
       INIT_MODULES: "$INIT_MODULES"
       RESTORED_MODULES: "$RESTORED_MODULES"
-      EXCLUDED_MODULE: "$EXCLUDED_MODULE"
+      EXCLUDED_MODULE: "$EXCLUDED_MODULE"$mail_environment
     command: ["odoo", "-c", "/etc/odoo/odoo.conf", "-d", "$DB_NAME", "--proxy-mode", "--workers=0"]
-    secrets: [db_password]
+    secrets: [$odoo_secrets]
     volumes:
       - filestore:/var/lib/odoo
       - ./preflight.py:/opt/deploy/preflight.py:ro
@@ -1437,7 +1734,7 @@ services:
     restart: unless-stopped
 secrets:
   db_password:
-    file: ./secrets/db_password
+    file: ./secrets/db_password$mail_secret
 volumes:
   filestore:
 YAML
@@ -1456,6 +1753,8 @@ upgrade_check_database() {
     local state report
     install -d -m 0700 "$TEMP_DIR/secrets"
     cp -p -- "$TEMP_DIR/db_password" "$TEMP_DIR/secrets/db_password"
+    # compose config does not see a missing secret file: copy it as well.
+    [[ -z $SMTP_USER ]] || cp -p -- "$TEMP_DIR/smtp_password" "$TEMP_DIR/secrets/smtp_password"
     staged config --quiet
     printf 'Checking database %s for %s before anything is changed...\n' "$DB_NAME" "$RELEASE"
     if ! report=$(staged run --rm --no-deps -T odoo python3 /opt/deploy/preflight.py upgrade-check "$MODULE_UPGRADE_FROM" \
@@ -1884,6 +2183,11 @@ fi
 install -d -m 0700 "$DEPLOY_DIR/secrets"
 for file in compose.yml preflight.py uat_guard.py uat_admins.py; do mv -f -- "$TEMP_DIR/$file" "$DEPLOY_DIR/$file"; done
 mv -f -- "$TEMP_DIR/db_password" "$DEPLOY_DIR/secrets/db_password"
+if [[ -n $SMTP_USER ]]; then
+    mv -f -- "$TEMP_DIR/smtp_password" "$DEPLOY_DIR/secrets/smtp_password"
+else
+    rm -f -- "$DEPLOY_DIR/secrets/smtp_password"  # no outgoing email, or no sign-in: no SMTP password stays
+fi
 # A first deployment stays unverified until it uses its database (bind_directory).
 if [[ ! -e $DEPLOY_DIR/.deployment-identity ]]; then
     : > "$TEMP_DIR/unverified"
@@ -1897,8 +2201,16 @@ mv -f -- "$TEMP_DIR/identity" "$DEPLOY_DIR/.deployment-identity"
     for key in PUBLIC_ROOT ENVIRONMENT_LABEL PUBLIC_BASE_URL; do
         [[ -z ${!key} ]] || printf '%s=%s\n' "$key" "${!key}"
     done
+    # The same for the mail settings: the scripts of v1.2.1 and earlier refuse them.
+    for key in SMTP_HOST SMTP_PORT SMTP_ENCRYPTION SMTP_USER SMTP_FROM SMTP_FROM_NAME MAIL_REDIRECT_TO; do
+        [[ -z ${!key} ]] || printf '%s=%s\n' "$key" "${!key}"
+    done
+    [[ -z $SMTP_USER ]] || printf 'SMTP_PASSWORD_FILE=%s/secrets/smtp_password\n' "$DEPLOY_DIR"
     printf 'DB_PASSWORD_FILE=%s/secrets/db_password\n' "$DEPLOY_DIR"
 } > "$DEPLOY_DIR/app.env"
+# umask 077 gives a new app.env 0600; an app.env written by hand keeps its mode
+# through the rewrite above.
+chmod 0600 "$DEPLOY_DIR/app.env"
 compose() { docker compose --project-name "$PROJECT_NAME" --file "$DEPLOY_DIR/compose.yml" "$@"; }
 compose config --quiet
 preflight() { compose run --rm --no-deps -T odoo python3 /opt/deploy/preflight.py "$@"; }
@@ -2218,6 +2530,13 @@ else
 fi
 [[ -z $PUBLIC_BASE_URL ]] || printf 'Public URL (through the front proxy or F5): %s/app/\n' "$PUBLIC_BASE_URL"
 printf 'Compose: %s/compose.yml\nFilestore volume: %s_filestore\n' "$DEPLOY_DIR" "$PROJECT_NAME"
+if [[ -n $SMTP_HOST ]]; then
+    printf 'Outgoing email: %s.\n' "$(mail_summary)"
+    printf 'When these settings change, Odoo holds the mail that waited in the queue: review it in Settings > Technical > Emails (status Delivery Failed), then Retry or Cancel it.\n'
+    printf 'Send a test email with: sudo bash deploy-app.sh --send-test-mail ADDRESS --dir %q\n' "$DEPLOY_DIR"
+elif ((MAIL_SUPPORTED)); then
+    printf 'Outgoing email: off. Configure it with: sudo bash deploy-app.sh --mail --dir %q\n' "$DEPLOY_DIR"
+fi
 if ((FRESH)); then
     printf 'UAT administrators (UAT only, fixed password): whadmin, admin1, admin2 / perodua\n'
 fi

@@ -2,7 +2,7 @@
 
 For the default deployment. Replace `APP_SERVER_IP` with your App server address.
 If your deployment uses a different project, path or port, use the values supplied at handover.
-These checks do not restart or change the system.
+These checks do not restart or change the system. Check 6 sends one test email.
 
 ## 1. App Server: are both services healthy?
 
@@ -95,6 +95,33 @@ When the hosts file has bypass lines, the normal path also goes directly to the
 App server, and the check does not test the front. Remove them with
 `.\client-check.ps1 -RemoveHostsBypass` in a PowerShell window opened with
 "Run as administrator".
+
+## 6. App Server: does outgoing email work?
+
+Do this check when outgoing email is configured (Client Stable UIUX v1.2.2 or
+later; v1.2.1 has no outgoing email). The settings, without the password:
+
+```bash
+sudo grep -E '^(SMTP_HOST|SMTP_PORT|SMTP_ENCRYPTION|SMTP_USER|SMTP_FROM|SMTP_FROM_NAME|MAIL_REDIRECT_TO)=' /opt/perodua-app/app.env
+```
+
+No `SMTP_HOST` line means that outgoing email is off. Then send one test
+email, in the release's `scripts` folder, to your own address:
+
+```bash
+sudo bash deploy-app.sh --send-test-mail YOUR_ADDRESS
+```
+
+**PASS:** the output says `Test email sent`, and the email arrives:
+
+- with `MAIL_REDIRECT_TO=` an address: at that test address, with
+  `[TEST for YOUR_ADDRESS]` before the subject;
+- with `MAIL_REDIRECT_TO=off`: at `YOUR_ADDRESS`.
+
+`Outgoing email is off` or `The test email was not sent` is not a pass. The
+lines above the error give the reason: a wrong setting (run
+`sudo bash deploy-app.sh --mail` to check the answers), or a firewall between
+the App server and the SMTP server.
 
 ## If a check fails
 

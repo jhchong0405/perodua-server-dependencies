@@ -23,6 +23,9 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 SCRIPT = SCRIPTS / "deploy-app.sh"
 SUPPORT_LINE = re.compile(r"^PUBLIC_ROOT_SUPPORTED=[01]$", re.M)
 HANDOVER_LINE = re.compile(r"^HANDOVER_SUPPORTED=[01]$", re.M)
+MAIL_LINE = re.compile(r"^MAIL_SUPPORTED=[01]$", re.M)
+# An obvious fake: no test ever holds a real SMTP password.
+SMTP_PASSWORD = "fake-app-password"
 
 
 def release_copy(folder, supported):
@@ -145,6 +148,9 @@ if os.environ.get('FAKE_DOCKER_MODE') in ('auth', 'network'):
             print('Login Succeeded'); sys.exit(0)
         print('unauthorized: fixture token rejected', file=sys.stderr); sys.exit(1)
     if args and args[0] == 'compose' and 'config' in args: sys.exit(0)
+    if args and args[0] == 'compose' and 'perodua-mail-test' in args:
+        print('fake perodua-mail-test: one test email to ' + args[-1])
+        sys.exit(int(os.environ.get('FAKE_MAIL_TEST_EXIT', '0')))
     if args and args[0] == 'compose' and 'run' in args:
         # FAKE_PREFLIGHT_STATE: the database check answers with this state,
         # and the fixture stops at the next Docker command instead.
@@ -930,6 +936,578 @@ sys.exit(93)
         self.assertIn("Fixture stopped before", result.stdout)
         self.assertNotIn("Database password", result.stdout)
         self.assertEqual(secret.read_text(), "corrected-password")
+
+
+    # ── outgoing email (v1.2.2): the SMTP settings, --mail and --send-test-mail ──
+    MAIL = {"SMTP_HOST": "smtp.example.com", "SMTP_PORT": "587", "SMTP_ENCRYPTION": "starttls",
+            "SMTP_USER": "sender@example.com", "SMTP_FROM": "sender@example.com",
+            "SMTP_FROM_NAME": "Perodua SPD (test)", "MAIL_REDIRECT_TO": "inbox@example.com"}
+
+    def mail_copy(self, supported=True):
+        """deploy-app.sh and its helpers as a release whose Odoo image does (1)
+        or does not (0) send outgoing email."""
+        script = release_copy(self.base / f"mail-{int(supported)}", supported=True)
+        text = script.read_text(encoding="utf-8")
+        self.assertEqual(len(MAIL_LINE.findall(text)), 1, "deploy-app.sh must set MAIL_SUPPORTED once")
+        script.write_text(MAIL_LINE.sub(f"MAIL_SUPPORTED={int(supported)}", text), encoding="utf-8")
+        return script
+
+    def smtp_password_file(self, content=SMTP_PASSWORD + "\n"):
+        path = self.base / "smtp-password"
+        path.write_text(content, encoding="utf-8", newline="")
+        path.chmod(0o600)
+        return path
+
+    def write_mail_config(self, **updates):
+        values = dict(self.MAIL, SMTP_PASSWORD_FILE=str(self.smtp_password_file()))
+        values.update(updates)
+        self.write_config(**values)
+
+    def assert_smtp_password_kept_secret(self, output=""):
+        for call in self.docker_calls():
+            for arg in call["args"]:
+                self.assertNotIn(SMTP_PASSWORD, arg)
+        self.assertNotIn(SMTP_PASSWORD, output)
+        for name in ("compose.yml", "app.env", ".deployment-identity"):
+            if (self.deploy_dir / name).exists():
+                self.assertNotIn(SMTP_PASSWORD, (self.deploy_dir / name).read_text(), name)
+
+    def mode(self, path):
+        return path.stat().st_mode & 0o777
+
+    def test_the_pinned_release_sends_mail_from_v1_2_2(self):
+        # Moving the pin to v1.2.2 or later must switch MAIL_SUPPORTED on; v1.2.1 has no mail code.
+        text = SCRIPT.read_text(encoding="utf-8")
+        version = re.search(r"^RELEASE=client-stable-uiux-v(\d+)\.(\d+)\.(\d+)$", text, re.M)
+        self.assertIsNotNone(version)
+        supported = tuple(int(part) for part in version.groups()) >= (1, 2, 2)
+        self.assertEqual(MAIL_LINE.findall(text), [f"MAIL_SUPPORTED={int(supported)}"])
+
+    def test_a_release_without_mail_refuses_the_mail_settings_before_docker(self):
+        script = self.mail_copy(supported=False)
+        password = self.smtp_password_file()
+        for key, value in dict(self.MAIL, SMTP_PASSWORD_FILE=str(password)).items():
+            for extra in (("--non-interactive",), ("--check-config",)):
+                with self.subTest(key=key, extra=extra):
+                    self.write_config(**{key: value})
+                    result = self.run_script(*extra, script=script)
+                    self.assert_early_failure(result)
+                    self.assertIn(f"{key} is set, but outgoing email needs client-stable-uiux v1.2.2 or later", result.stdout)
+        self.write_config()
+        for extra in (("--mail",), ("--send-test-mail", "inbox@example.com")):
+            with self.subTest(extra=extra):
+                result = self.run_script(*extra, script=script)
+                self.assert_early_failure(result)
+                self.assertIn("Outgoing email needs client-stable-uiux v1.2.2 or later", result.stdout)
+
+    def test_mail_settings_are_saved_and_given_to_the_odoo_container(self):
+        script = self.mail_copy()
+        self.pulls_succeed()
+        self.write_mail_config()
+        result = self.run_script("--non-interactive", script=script)
+        self.assertIn("Fixture stopped before", result.stdout)
+        saved = (self.deploy_dir / "app.env").read_text()
+        for key, value in self.MAIL.items():
+            self.assertIn(f"\n{key}={value}\n", saved)
+        self.assertIn(f"\nSMTP_PASSWORD_FILE={self.deploy_dir}/secrets/smtp_password\n", saved)
+        compose = (self.deploy_dir / "compose.yml").read_text()
+        odoo = service_environment(compose, "odoo")
+        self.assertEqual({key: value for key, value in odoo.items() if "MAIL" in key or "SMTP" in key}, {
+            "PERODUA_SMTP_HOST": "smtp.example.com", "PERODUA_SMTP_PORT": "587",
+            "PERODUA_SMTP_ENCRYPTION": "starttls", "PERODUA_SMTP_USER": "sender@example.com",
+            "PERODUA_SMTP_PASSWORD_FILE": "/run/secrets/smtp_password", "PERODUA_SMTP_FROM": "sender@example.com",
+            "PERODUA_SMTP_FROM_NAME": "Perodua SPD (test)", "PERODUA_MAIL_REDIRECT_TO": "inbox@example.com"})
+        self.assertEqual(odoo["DB_PASSWORD_FILE"], "/run/secrets/db_password")
+        self.assertFalse(any("SMTP" in key or "MAIL" in key for key in service_environment(compose, "web")))
+        self.assertIn("    secrets: [db_password, smtp_password]\n", compose)
+        self.assertIn("secrets:\n  db_password:\n    file: ./secrets/db_password\n"
+                      "  smtp_password:\n    file: ./secrets/smtp_password\nvolumes:\n", compose)
+        # The secret rules of the database password (and of iss-api.sh).
+        secret = self.deploy_dir / "secrets" / "smtp_password"
+        self.assertEqual(secret.read_text(), SMTP_PASSWORD)
+        self.assertEqual(self.mode(secret), 0o444)
+        self.assertEqual(self.mode(secret.parent), 0o700)
+        self.assertEqual(self.mode(self.deploy_dir / "app.env"), 0o600)
+        self.assertNotIn("smtp", (self.deploy_dir / ".deployment-identity").read_text().lower())
+        self.assert_smtp_password_kept_secret(result.stdout)
+        # A later run without --config reads app.env, and the saved secret, and writes the same files.
+        result = self.run_saved(script)
+        self.assertIn("Fixture stopped before", result.stdout)
+        self.assertEqual((self.deploy_dir / "app.env").read_text(), saved)
+        self.assertEqual((self.deploy_dir / "compose.yml").read_text(), compose)
+        self.assertEqual(secret.read_text(), SMTP_PASSWORD)
+        self.assert_smtp_password_kept_secret(result.stdout)
+
+    def test_the_encryption_gives_the_default_port_and_a_relay_needs_no_sign_in(self):
+        script = self.mail_copy()
+        self.pulls_succeed()
+        for encryption, port in (("", "587"), ("starttls", "587"), ("ssl", "465"), ("none", "25")):
+            with self.subTest(encryption=encryption):
+                self.write_config(SMTP_HOST="10.10.0.25", SMTP_ENCRYPTION=encryption,
+                                  SMTP_FROM="no-reply@perodua.com.my", MAIL_REDIRECT_TO="off")
+                result = self.run_script("--non-interactive", script=script)
+                self.assertIn("Fixture stopped before", result.stdout)
+                saved = (self.deploy_dir / "app.env").read_text()
+                self.assertIn(f"\nSMTP_ENCRYPTION={encryption or 'starttls'}\nSMTP_FROM=", saved)
+                self.assertIn(f"\nSMTP_PORT={port}\n", saved)
+                self.assertNotIn("SMTP_USER", saved)
+                self.assertNotIn("SMTP_PASSWORD_FILE", saved)
+                self.assertNotIn("SMTP_FROM_NAME", saved)
+                compose = (self.deploy_dir / "compose.yml").read_text()
+                odoo = service_environment(compose, "odoo")
+                self.assertEqual(odoo["PERODUA_SMTP_PORT"], port)
+                self.assertEqual(odoo["PERODUA_MAIL_REDIRECT_TO"], "off")
+                for key in ("PERODUA_SMTP_USER", "PERODUA_SMTP_PASSWORD_FILE", "PERODUA_SMTP_FROM_NAME"):
+                    self.assertNotIn(key, odoo)
+                self.assertIn("    secrets: [db_password]\n", compose)
+                self.assertNotIn("smtp_password", compose)
+                self.assertFalse((self.deploy_dir / "secrets" / "smtp_password").exists())
+
+    def test_without_mail_settings_app_env_and_compose_stay_as_before(self):
+        # Byte for byte what the release without mail writes: the scripts of
+        # v1.2.1 and earlier read this app.env, and nothing recreates a
+        # container for a compose.yml that did not change.
+        self.pulls_succeed()
+        written = []
+        for script in (SCRIPT, self.mail_copy()):
+            with self.subTest(script=script):
+                shutil.rmtree(self.deploy_dir, ignore_errors=True)
+                self.write_config()
+                result = self.run_script("--non-interactive", script=script)
+                self.assertIn("Fixture stopped before", result.stdout)
+                saved = (self.deploy_dir / "app.env").read_text()
+                self.assertEqual({line.partition("=")[0] for line in saved.splitlines()}, self.EARLIER_KEYS)
+                compose = (self.deploy_dir / "compose.yml").read_text()
+                self.assertNotIn("SMTP", compose)
+                self.assertNotIn("smtp", compose)
+                self.assertNotIn("MAIL", compose)
+                self.assertIn("    secrets: [db_password]\n", compose)
+                self.assertFalse((self.deploy_dir / "secrets" / "smtp_password").exists())
+                written.append((saved, compose))
+        self.assertEqual(written[0], written[1])
+
+    def test_clearing_the_mail_settings_removes_them_and_the_saved_password(self):
+        script = self.mail_copy()
+        self.pulls_succeed()
+        self.write_mail_config()
+        self.assertIn("Fixture stopped before", self.run_script("--non-interactive", script=script).stdout)
+        self.assertTrue((self.deploy_dir / "secrets" / "smtp_password").exists())
+        self.write_config()
+        self.assertIn("Fixture stopped before", self.run_script("--non-interactive", script=script).stdout)
+        self.assertNotIn("SMTP", (self.deploy_dir / "app.env").read_text())
+        self.assertNotIn("smtp", (self.deploy_dir / "compose.yml").read_text().lower())
+        self.assertFalse((self.deploy_dir / "secrets" / "smtp_password").exists())
+        self.assertTrue((self.deploy_dir / "secrets" / "db_password").exists())
+
+    def test_invalid_mail_settings_fail_before_docker(self):
+        script = self.mail_copy()
+        marker = self.base / "mail-setting-was-executed"
+        relative = "smtp-password"
+        cases = [
+            *[({"SMTP_HOST": value}, "SMTP_HOST must be a host name or IPv4 address")
+              for value in ("a b", "-x.com", "x..com", '"x"', "$x", "x.com.", "a" * 64 + ".com",
+                            ".".join(["a" * 50] * 5), f"$(touch {marker})", "smtp.example.com:587")],
+            *[({"SMTP_PORT": value}, "SMTP_PORT must be a port number, 1-65535")
+              for value in ("0", "65536", "x", "25 ", "-1", "0587")],
+            *[({"SMTP_ENCRYPTION": value}, "SMTP_ENCRYPTION must be starttls, ssl or none")
+              for value in ("tls", "STARTTLS", "ssl_strict", "starttls_strict")],
+            *[({"SMTP_USER": value}, "SMTP_USER must be empty (no sign-in) or at most 254 characters")
+              for value in ("a b", 'a"b', "a\\b", "a$b", "a\tb", "a" * 255, f"`touch {marker}`")],
+            *[({"SMTP_FROM": value}, "SMTP_FROM must be a plain email address")
+              for value in ("a", "a@", "@b.c", "a b@c.d", "a@b", '"a"@b.c', "Perodua <a@b.c>", "a@b.c,d@e.f",
+                            f"$(touch {marker})@b.c")],
+            *[({"MAIL_REDIRECT_TO": value}, "MAIL_REDIRECT_TO must be one email address")
+              for value in ("a", "a@b", "OFF", "Off", "a@b.c d@e.f", "a@b.c,d@e.f", '"a"@b.c')],
+            *[({"SMTP_FROM_NAME": value}, "SMTP_FROM_NAME must be empty (the author's name) or 1-64 letters")
+              for value in (" lead", 'a"b', "a$b", "a" * 65, "a\\b", "a;b", "a<b>", f"$(touch {marker})")],
+            ({"SMTP_FROM": ""}, "SMTP_FROM is required with SMTP_HOST"),
+            ({"MAIL_REDIRECT_TO": ""}, "MAIL_REDIRECT_TO is required with SMTP_HOST"),
+            ({"SMTP_ENCRYPTION": "none"}, "SMTP_USER cannot sign in with SMTP_ENCRYPTION=none"),
+            ({"SMTP_PASSWORD_FILE": ""}, "SMTP_USER needs SMTP_PASSWORD_FILE"),
+            ({"SMTP_PASSWORD_FILE": relative}, "SMTP_PASSWORD_FILE must be an absolute path to a readable file"),
+            ({"SMTP_PASSWORD_FILE": str(self.base / "missing")}, "SMTP_PASSWORD_FILE must be an absolute path"),
+            ({"SMTP_PASSWORD_FILE": str(self.base)}, "SMTP_PASSWORD_FILE must be an absolute path"),
+            ({"SMTP_USER": ""}, "SMTP_PASSWORD_FILE applies only with SMTP_USER"),
+        ]
+        # Without SMTP_HOST, each other mail setting on its own.
+        alone = [(key, value) for key, value in self.MAIL.items() if key != "SMTP_HOST"]
+        alone.append(("SMTP_PASSWORD_FILE", str(self.smtp_password_file())))
+        cases += [({"SMTP_HOST": "", key: value}, f"{key} applies only with SMTP_HOST") for key, value in alone]
+        for updates, message in cases:
+            with self.subTest(**updates):
+                if updates.get("SMTP_HOST") == "":
+                    self.write_config(**updates)
+                else:
+                    self.write_mail_config(**updates)
+                result = self.run_script("--non-interactive", script=script)
+                self.assert_early_failure(result)
+                self.assertIn(message, result.stdout)
+                self.assertNotIn(SMTP_PASSWORD, result.stdout)
+        self.assertFalse(marker.exists(), "A mail setting executed a shell command")
+
+    # The table of values that perodua-odoo's entrypoint and this script both
+    # accept or refuse (the contract of 2026-10-13).
+    HOSTS_ACCEPTED = ("smtp.gmail.com", "relay.perodua.local", "10.10.0.25")
+    HOSTS_REFUSED = ("", "a b", "-x.com", "x..com", '"x"', "$x", ".".join(["a" * 63] * 3) + "." + "a" * 62)
+    ADDRESSES_ACCEPTED = ("myaicode3@gmail.com", "no-reply@perodua.com.my")
+    ADDRESSES_REFUSED = ("a", "a@", "@b.c", "a b@c.d", "a@b", '"a"@b.c', "a@b.c\n")
+    NAMES_ACCEPTED = ("Perodua SPD (test)", "Perodua SPD")
+    NAMES_REFUSED = (" lead", 'a"b', "a$b", "a" * 65)
+
+    def mail_problem(self, key, value):
+        """What mail_problem in deploy-app.sh prints for one value: empty when it is accepted."""
+        lines = SCRIPT.read_text(encoding="utf-8").splitlines()
+        start = lines.index(next(line for line in lines if line.startswith("mail_problem() {")))
+        end = lines.index("}", start)
+        pattern = next(line for line in lines if line.startswith("host_pattern="))
+        source = "\n".join(["set -Eeuo pipefail", "export LC_ALL=C", pattern, *lines[start:end + 1],
+                            'mail_problem "$1" "$2"'])
+        result = subprocess.run(["bash", "-c", source, "mail-problem", key, value], text=True,
+                                capture_output=True, timeout=10)
+        self.assertEqual(result.stderr, "")
+        return result.stdout
+
+    def test_the_validation_table_both_repos_share(self):
+        self.assertEqual(len(self.HOSTS_REFUSED[-1]), 254)
+        self.assertEqual(len(self.NAMES_REFUSED[-1]), 65)
+        table = [("SMTP_HOST", self.HOSTS_ACCEPTED, self.HOSTS_REFUSED),
+                 ("SMTP_FROM", self.ADDRESSES_ACCEPTED, self.ADDRESSES_REFUSED),
+                 ("MAIL_REDIRECT_TO", self.ADDRESSES_ACCEPTED + ("off",), self.ADDRESSES_REFUSED),
+                 ("SMTP_FROM_NAME", self.NAMES_ACCEPTED + ("",), self.NAMES_REFUSED)]
+        for key, accepted, refused in table:
+            for value in accepted:
+                with self.subTest(key=key, accepted=value):
+                    self.assertEqual(self.mail_problem(key, value), "")
+            for value in refused:
+                with self.subTest(key=key, refused=value):
+                    self.assertTrue(self.mail_problem(key, value).startswith(key + " must be"))
+        # The same values through a configuration file, which holds one line per
+        # setting (an empty host is no outgoing email there, and a line break
+        # ends the value).
+        script = self.mail_copy()
+        for key, accepted, refused in table:
+            for value in accepted:
+                with self.subTest(key=key, config_accepted=value):
+                    self.write_mail_config(**{key: value})
+                    result = self.run_script("--check-config", script=script)
+                    self.assertEqual(result.returncode, 0, result.stdout)
+                    self.assertIn("Configuration valid", result.stdout)
+            for value in refused:
+                if value == "" or "\n" in value:
+                    continue
+                with self.subTest(key=key, config_refused=value):
+                    self.write_mail_config(**{key: value})
+                    result = self.run_script("--check-config", script=script)
+                    self.assert_early_failure(result)
+                    self.assertIn(key + " must be", result.stdout)
+        self.assertEqual(self.docker_calls(), [])
+
+    def test_check_config_refuses_an_smtp_password_file_a_deployment_would_refuse(self):
+        # service.sh reset deletes the data after this check; the deployment it
+        # then runs reads the same file and must not be the first to refuse it.
+        script = self.mail_copy()
+        for content in ("", "\n", "first\nsecond\n", "pass\rword"):
+            with self.subTest(content=content):
+                self.write_config(**self.MAIL, SMTP_PASSWORD_FILE=str(self.smtp_password_file(content)))
+                result = self.run_script("--check-config", script=script)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("SMTP password must be nonempty and contain no line breaks", result.stdout)
+                self.assertNotIn("Configuration valid", result.stdout)
+                self.assertEqual(self.docker_calls(), [])
+        self.write_mail_config()
+        result = self.run_script("--check-config", script=script)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertNotIn(SMTP_PASSWORD, result.stdout)
+        # The directory's own secret is read when app.env names no file.
+        self.deploy_dir.mkdir()
+        (self.deploy_dir / "secrets").mkdir()
+        (self.deploy_dir / "secrets" / "smtp_password").write_text("", encoding="utf-8")
+        self.write_mail_config(SMTP_PASSWORD_FILE="")
+        result = self.run_script("--check-config", script=script)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("SMTP password must be nonempty and contain no line breaks", result.stdout)
+        self.assertIn("secrets/smtp_password", result.stdout)
+
+    def test_app_env_is_readable_by_root_only_even_when_written_by_hand(self):
+        self.deploy_dir.mkdir()
+        app_env = self.deploy_dir / "app.env"
+        app_env.write_text(self.config.read_text())
+        app_env.chmod(0o644)
+        self.pulls_succeed()
+        result = self.run_saved_command("--non-interactive")
+        self.assertIn("Fixture stopped before", result.stdout)
+        self.assertEqual(self.mode(app_env), 0o600)
+
+    def mail_first_run(self, script, mail_answers):
+        """A first interactive run of a release with mail: the database
+        questions, the web port, who may open the page, then the mail questions."""
+        self.pulls_succeed()
+        return self.terminal_exchange([
+            (b"Database server IP / hostname []: ", b"192.0.2.20", True),
+            (b"Database port [5432]: ", b"", True),
+            (b"Application database name [perodua]: ", b"", True),
+            (b"Database username [odoo]: ", b"", True),
+            (b"Web port that browsers open on this server [8110]: ", b"", True),
+            (b"Choose [2]: ", b"", True),
+            *mail_answers,
+            (b"Database password (hidden): ", b"fixture-password", False),
+        ], command=["bash", str(script), "--dir", str(self.deploy_dir)])
+
+    def test_a_first_run_asks_the_mail_questions_in_order(self):
+        script = self.mail_copy()
+        code, output = self.mail_first_run(script, [
+            (b"Configure outgoing email now? [y/N]: ", b"y", True),
+            (b"SMTP server, host name or IP address (- for none) []: ", b"smtp.example.com", True),
+            (b"Choose [1]: ", b"", True),
+            (b"SMTP port [587]: ", b"", True),
+            (b"SMTP sign-in user (Enter for no sign-in) []: ", b"sender@example.com", True),
+            (b"SMTP password (hidden): ", SMTP_PASSWORD.encode(), False),
+            (b"Sender address of every email [sender@example.com]: ", b"", True),
+            (b"Sender name of every email (Enter for the author's name) []: ", b"Perodua SPD (test)", True),
+            (b"Send every email to one test address? [Y/n]: ", b"", True),
+            (b"Test address that gets every email []: ", b"inbox@example.com", True),
+        ])
+        self.assertIn("Fixture stopped before", output)
+        self.assertIn("1) STARTTLS, port 587", output)
+        self.assertIn("3) None, port 25: an internal relay only, without sign-in", output)
+        self.assertIn('Outgoing email: smtp.example.com:587 starttls, sign-in as sender@example.com, from '
+                      'sender@example.com as "Perodua SPD (test)", every email to the test address inbox@example.com.',
+                      output)
+        saved = (self.deploy_dir / "app.env").read_text()
+        for key, value in self.MAIL.items():
+            self.assertIn(f"\n{key}={value}\n", saved)
+        self.assertEqual((self.deploy_dir / "secrets" / "smtp_password").read_text(), SMTP_PASSWORD)
+        self.assertEqual(self.mode(self.deploy_dir / "secrets" / "smtp_password"), 0o444)
+        self.assertEqual(service_environment((self.deploy_dir / "compose.yml").read_text(), "odoo")["PERODUA_SMTP_USER"],
+                         "sender@example.com")
+        self.assert_smtp_password_kept_secret(output)
+
+    def test_a_first_run_may_leave_mail_off(self):
+        code, output = self.mail_first_run(self.mail_copy(), [
+            (b"Configure outgoing email now? [y/N]: ", b"", True)])
+        self.assertIn("Fixture stopped before", output)
+        self.assertNotIn("SMTP server", output)
+        self.assertNotIn("SMTP", (self.deploy_dir / "app.env").read_text())
+        self.assertNotIn("smtp", (self.deploy_dir / "compose.yml").read_text().lower())
+        # A release without mail does not ask.
+        shutil.rmtree(self.deploy_dir)
+        code, output = self.interactive_run([b"192.0.2.20"], [(b"Choose [2]: ", b"", True)])
+        self.assertIn("Fixture stopped before", output)
+        self.assertNotIn("outgoing email", output.lower())
+
+    def test_real_mail_needs_the_typed_confirmation_and_wrong_answers_are_asked_again(self):
+        code, output = self.mail_first_run(self.mail_copy(), [
+            (b"Configure outgoing email now? [y/N]: ", b"y", True),
+            (b"SMTP server, host name or IP address (- for none) []: ", b"bad host", True),
+            (b"SMTP server, host name or IP address (- for none) []: ", b"relay.perodua.local", True),
+            (b"Choose [1]: ", b"4", True),
+            (b"Choose [1]: ", b"3", True),
+            (b"SMTP port [25]: ", b"70000", True),
+            (b"SMTP port [25]: ", b"", True),
+            (b"Sender address of every email []: ", b"", True),
+            (b"Sender address of every email []: ", b"a@b", True),
+            (b"Sender address of every email []: ", b"no-reply@perodua.com.my", True),
+            (b"Sender name of every email (Enter for the author's name) []: ", b"", True),
+            (b"Send every email to one test address? [Y/n]: ", b"y", True),
+            (b"Test address that gets every email []: ", b"off", True),
+            (b"Send every email to one test address? [Y/n]: ", b"n", True),
+            (b"Type SEND REAL MAIL to confirm: ", b"send real mail", True),
+            (b"Send every email to one test address? [Y/n]: ", b"n", True),
+            (b"Type SEND REAL MAIL to confirm: ", b"SEND REAL MAIL", True),
+        ])
+        self.assertIn("Fixture stopped before", output)
+        self.assertIn("SMTP_HOST must be a host name or IPv4 address", output)
+        self.assertIn("Enter a number from 1 to 3.", output)
+        self.assertIn("SMTP_PORT must be a port number, 1-65535. Try again.", output)
+        self.assertIn("An answer is required.", output)
+        self.assertIn("SMTP_FROM must be a plain email address", output)
+        self.assertIn("off is not an address. To send every email to its real recipients, answer n.", output)
+        self.assertIn("The confirmation did not match.", output)
+        self.assertIn("No sign-in: without encryption, a password would cross the network as plain text.", output)
+        self.assertNotIn("SMTP sign-in user", output)
+        self.assertNotIn("SMTP password (hidden", output)
+        saved = (self.deploy_dir / "app.env").read_text()
+        for line in ("SMTP_HOST=relay.perodua.local", "SMTP_PORT=25", "SMTP_ENCRYPTION=none",
+                     "SMTP_FROM=no-reply@perodua.com.my", "MAIL_REDIRECT_TO=off"):
+            self.assertIn(f"\n{line}\n", saved)
+        for key in ("SMTP_USER", "SMTP_PASSWORD_FILE", "SMTP_FROM_NAME"):
+            self.assertNotIn(key, saved)
+        odoo = service_environment((self.deploy_dir / "compose.yml").read_text(), "odoo")
+        self.assertEqual(odoo["PERODUA_MAIL_REDIRECT_TO"], "off")
+        self.assertFalse((self.deploy_dir / "secrets" / "smtp_password").exists())
+
+    def mail_deployment(self, script):
+        """A first deployment from a configuration with mail, as --mail later finds it."""
+        self.pulls_succeed()
+        self.write_mail_config()
+        self.assertIn("Fixture stopped before", self.run_script("--non-interactive", script=script).stdout)
+
+    def test_the_mail_option_asks_again_with_the_saved_answers(self):
+        script = self.mail_copy()
+        self.mail_deployment(script)
+        secret = self.deploy_dir / "secrets" / "smtp_password"
+        command = ["bash", str(script), "--dir", str(self.deploy_dir), "--mail"]
+        # The first run stopped before it used its database: it asks for that password again too.
+        database = (b"Database password (hidden; Enter keeps the one entered before): ", b"", False)
+        code, output = self.terminal_exchange([
+            (b"SMTP server, host name or IP address (- for none) [smtp.example.com]: ", b"", True),
+            (b"Choose [1]: ", b"2", True),
+            (b"SMTP port [465]: ", b"", True),
+            (b"SMTP sign-in user (- for no sign-in) [sender@example.com]: ", b"", True),
+            (b"SMTP password (hidden; Enter keeps the saved one): ", b"", False),
+            (b"Sender address of every email [sender@example.com]: ", b"", True),
+            (b"Sender name of every email (- for the author's name) [Perodua SPD (test)]: ", b"-", True),
+            (b"Send every email to one test address? [Y/n]: ", b"", True),
+            (b"Test address that gets every email [inbox@example.com]: ", b"other@example.com", True),
+            database,
+        ], command=command)
+        self.assertIn("Fixture stopped before", output)
+        saved = (self.deploy_dir / "app.env").read_text()
+        for line in ("SMTP_ENCRYPTION=ssl", "SMTP_PORT=465", "MAIL_REDIRECT_TO=other@example.com",
+                     f"SMTP_PASSWORD_FILE={self.deploy_dir}/secrets/smtp_password"):
+            self.assertIn(f"\n{line}\n", saved)
+        self.assertNotIn("SMTP_FROM_NAME", saved)
+        self.assertEqual(secret.read_text(), SMTP_PASSWORD)
+        odoo = service_environment((self.deploy_dir / "compose.yml").read_text(), "odoo")
+        self.assertEqual((odoo["PERODUA_SMTP_ENCRYPTION"], odoo["PERODUA_SMTP_PORT"]), ("ssl", "465"))
+        self.assertNotIn("PERODUA_SMTP_FROM_NAME", odoo)
+        self.assert_smtp_password_kept_secret(output)
+        # A new password replaces the saved one; the same encryption keeps the saved port.
+        code, output = self.terminal_exchange([
+            (b"SMTP server, host name or IP address (- for none) [smtp.example.com]: ", b"", True),
+            (b"Choose [2]: ", b"", True),
+            (b"SMTP port [465]: ", b"2465", True),
+            (b"SMTP sign-in user (- for no sign-in) [sender@example.com]: ", b"", True),
+            (b"SMTP password (hidden; Enter keeps the saved one): ", b"fake-app-password-2", False),
+            (b"Sender address of every email [sender@example.com]: ", b"", True),
+            (b"Sender name of every email (Enter for the author's name) []: ", b"", True),
+            (b"Send every email to one test address? [Y/n]: ", b"", True),
+            (b"Test address that gets every email [other@example.com]: ", b"", True),
+            database,
+        ], command=command)
+        self.assertIn("Fixture stopped before", output)
+        self.assertNotIn("fake-app-password-2", output)
+        self.assertEqual(secret.read_text(), "fake-app-password-2")
+        self.assertIn("\nSMTP_PORT=2465\n", (self.deploy_dir / "app.env").read_text())
+        for call in self.docker_calls():
+            self.assertFalse(any("fake-app-password-2" in arg for arg in call["args"]))
+
+    def test_the_mail_option_can_switch_mail_off(self):
+        script = self.mail_copy()
+        self.mail_deployment(script)
+        code, output = self.terminal_exchange([
+            (b"SMTP server, host name or IP address (- for none) [smtp.example.com]: ", b"-", True),
+            (b"Switch outgoing email off? [y/N]: ", b"", True),
+            (b"SMTP server, host name or IP address (- for none) [smtp.example.com]: ", b"-", True),
+            (b"Switch outgoing email off? [y/N]: ", b"y", True),
+            (b"Database password (hidden; Enter keeps the one entered before): ", b"", False),
+        ], command=["bash", str(script), "--dir", str(self.deploy_dir), "--mail"])
+        self.assertIn("Outgoing email is off.", output)
+        self.assertIn("Fixture stopped before", output)
+        saved = (self.deploy_dir / "app.env").read_text()
+        self.assertEqual({line.partition("=")[0] for line in saved.splitlines()}, self.EARLIER_KEYS)
+        self.assertNotIn("smtp", (self.deploy_dir / "compose.yml").read_text().lower())
+        self.assertFalse((self.deploy_dir / "secrets" / "smtp_password").exists())
+
+    def test_the_mail_option_needs_a_terminal_and_a_plain_run(self):
+        script = self.mail_copy()
+        self.write_config()
+        for extra, message in ((("--mail",), "--mail asks questions and requires a terminal"),
+                               (("--mail", "--non-interactive"), "--mail asks the outgoing email questions"),
+                               (("--mail", "--check-config"), "--mail asks the outgoing email questions"),
+                               (("--mail", "--send-test-mail", "inbox@example.com"), "--mail asks the outgoing email questions"),
+                               (("--mail", "--upgrade"), "--upgrade moves an existing deployment")):
+            with self.subTest(extra=extra):
+                result = subprocess.run(self.command(*extra, script=script), env=self.env, text=True,
+                                        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                        stderr=subprocess.STDOUT, timeout=20)
+                self.assert_early_failure(result)
+                self.assertIn(message, result.stdout)
+
+    def bound_mail_deployment(self, script, **updates):
+        """A deployment with mail that has used its database (READY), as
+        --send-test-mail needs it."""
+        self.pulls_succeed()
+        if updates.pop("mail", True):
+            self.write_mail_config(**updates)
+        else:
+            self.write_config(**updates)
+        self.env["FAKE_PREFLIGHT_STATE"] = "READY 0"
+        result = self.run_script("--non-interactive", script=script)
+        self.assertIn("Existing initialized database accepted", result.stdout)
+        del self.env["FAKE_PREFLIGHT_STATE"]
+        self.assertFalse((self.deploy_dir / ".deployment-unverified").exists())
+        self.calls.unlink()
+
+    def send_test_mail(self, script, *extra, address="you@example.com"):
+        return subprocess.run(["bash", str(script), "--dir", str(self.deploy_dir), "--send-test-mail", address, *extra],
+                              env=self.env, text=True, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT, timeout=20)
+
+    def test_send_test_mail_runs_only_the_image_helper(self):
+        script = self.mail_copy()
+        self.bound_mail_deployment(script)
+        result = self.send_test_mail(script)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        compose_calls = [call["args"] for call in self.docker_calls() if call["args"][:1] == ["compose"]]
+        self.assertEqual(compose_calls[-1], [
+            "compose", "--project-name", "perodua-fixture", "--file", str(self.deploy_dir / "compose.yml"),
+            "run", "--rm", "--no-deps", "-T", "odoo", "perodua-mail-test", "you@example.com"])
+        self.assertEqual([args for args in compose_calls if "run" in args], compose_calls[-1:])
+        self.assertFalse(any(call["args"][:1] == ["pull"] for call in self.docker_calls()))
+        self.assertIn("fake perodua-mail-test: one test email to you@example.com", result.stdout)
+        self.assertIn("MAIL_REDIRECT_TO sends it to the test address inbox@example.com, with [TEST for you@example.com]"
+                      " before its subject", result.stdout)
+        self.assert_smtp_password_kept_secret(result.stdout)
+        # A failure of the helper is reported.
+        self.env["FAKE_MAIL_TEST_EXIT"] = "1"
+        result = self.send_test_mail(script)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("The test email was not sent, for the reason above", result.stdout)
+
+    def test_send_test_mail_to_the_real_recipient(self):
+        script = self.mail_copy()
+        self.bound_mail_deployment(script, MAIL_REDIRECT_TO="off")
+        result = self.send_test_mail(script)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("Test email sent to you@example.com. Check that it arrives.", result.stdout)
+
+    def test_send_test_mail_runs_on_its_own_on_a_deployment_with_mail(self):
+        script = self.mail_copy()
+        for address in ("you", "a@b", "you@example.com,other@example.com", '"you"@example.com'):
+            with self.subTest(address=address):
+                self.write_config()
+                self.deploy_dir.mkdir(exist_ok=True)
+                (self.deploy_dir / ".deployment-identity").write_text("release=x\n")
+                result = self.send_test_mail(script, "--config", str(self.config), address=address)
+                self.assert_early_failure(result)
+                self.assertIn("The address of --send-test-mail must be one email address", result.stdout)
+        shutil.rmtree(self.deploy_dir)
+        result = self.send_test_mail(script)
+        self.assert_early_failure(result)
+        self.assertIn("--send-test-mail needs a deployment", result.stdout)
+        self.bound_mail_deployment(script)
+        for extra in (("--init-db",), ("--check-config",), ("--release-queued-mail",), ("--upgrade",)):
+            with self.subTest(extra=extra):
+                result = self.send_test_mail(script, *extra)
+                self.assert_early_failure(result)
+                self.assertIn("--send-test-mail runs on its own", result.stdout)
+        # Without outgoing email it says how to configure it, and runs nothing.
+        shutil.rmtree(self.deploy_dir)
+        self.bound_mail_deployment(script, mail=False)
+        result = self.send_test_mail(script)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Outgoing email is off in", result.stdout)
+        self.assertIn("deploy-app.sh --mail --dir", result.stdout)
+        self.assertFalse(any("run" in call["args"] for call in self.docker_calls()))
+        # A first deployment that never used its database has nothing to send with.
+        shutil.rmtree(self.deploy_dir)
+        self.mail_deployment(script)
+        self.calls.unlink()
+        result = self.send_test_mail(script)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("stopped before it used its database", result.stdout)
+        self.assertFalse(any("run" in call["args"] for call in self.docker_calls()))
 
 
 if __name__ == "__main__":
