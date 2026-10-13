@@ -32,6 +32,7 @@ ODOO_IMAGE = re.search(r'^ODOO_IMAGE=(\S+)$', TEXT, re.M).group(1)
 OLD_RELEASE = 'client-stable-uiux-v1.0.3'
 OLD_REVISION = 'a' * 40
 DUMP = b'PGDMP fixture archive\n'
+MAIL_LINE = re.compile(r'^MAIL_SUPPORTED=[01]$', re.M)
 FINGERPRINT = ('Database preflight: database module fingerprint does not match this release, '
                'and is not the fingerprint this release upgrades modules from')
 
@@ -55,6 +56,10 @@ if args[:1] == ['compose']:
             overrides.append(f.read())
         rest = rest[2:]
     entry['overrides'] = overrides
+# The secret files next to the compose file the call got.
+if args[:2] == ['compose', '--project-name']:
+    secrets = os.path.join(os.path.dirname(args[4]), 'secrets')
+    entry['secrets'] = sorted(os.listdir(secrets)) if os.path.isdir(secrets) else []
 with open(os.environ['FAKE_DOCKER_LOG'], 'a', encoding='utf-8') as log:
     log.write(json.dumps(entry) + '\n')
 def reply(text='', code=0, err=''):
@@ -531,6 +536,39 @@ class UpgradeTests(UpgradeHarness, unittest.TestCase):
         self.assertIn(f'image: {ODOO_IMAGE}', compose)
         self.assertIn('  filestore:', compose)  # the same attachments volume
         self.assertEqual((self.deploy_dir / 'secrets' / 'db_password').read_text(), 'fixture-password')
+
+    def test_the_smtp_password_reaches_the_staged_and_the_new_deployment(self):
+        # Outgoing email with a sign-in (a release with mail): compose config
+        # does not see a missing secret file, so the staged compose file of the
+        # new release gets a copy of the SMTP password, as of the database one.
+        folder = self.base / 'mail'
+        folder.mkdir()
+        self.assertEqual(len(MAIL_LINE.findall(TEXT)), 1)
+        (folder / 'deploy-app.sh').write_text(MAIL_LINE.sub('MAIL_SUPPORTED=1', TEXT), encoding='utf-8')
+        for helper in ('uat_guard.py', 'uat_admins.py'):
+            shutil.copy(SCRIPTS / helper, folder / helper)
+        smtp_password = self.base / 'smtp-password'
+        smtp_password.write_text('fake-app-password\n')
+        self.write_app_env(SMTP_HOST='smtp.example.com', SMTP_USER='sender@example.com', SMTP_PASSWORD_FILE=str(smtp_password),
+                           SMTP_FROM='sender@example.com', MAIL_REDIRECT_TO='inbox@example.com')
+        result = subprocess.run(['bash', str(folder / 'deploy-app.sh'), '--upgrade', '--dir', str(self.deploy_dir), '--non-interactive'],
+                                env=self.env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        staged = [entry for entry in self.calls()
+                  if entry['args'][:2] == ['compose', '--project-name'] and entry['args'][4] != f'{self.deploy_dir}/compose.yml']
+        self.assertTrue(staged)
+        for entry in staged:
+            self.assertEqual(entry['secrets'], ['db_password', 'smtp_password'], entry['args'])
+        secret = self.deploy_dir / 'secrets' / 'smtp_password'
+        self.assertEqual(secret.read_text(), 'fake-app-password')
+        self.assertEqual(secret.stat().st_mode & 0o777, 0o444)
+        self.assertIn(f'\nSMTP_PASSWORD_FILE={self.deploy_dir}/secrets/smtp_password\n', (self.deploy_dir / 'app.env').read_text())
+        self.assertIn('      PERODUA_SMTP_PASSWORD_FILE: /run/secrets/smtp_password\n', (self.deploy_dir / 'compose.yml').read_text())
+        for entry in self.calls():
+            self.assertFalse(any('fake-app-password' in arg for arg in entry['args']), entry['args'])
+        self.assertNotIn('fake-app-password', result.stdout)
+        [backup] = self.backups()
+        self.assertEqual((backup / 'app.env').read_text(), self.app_env)
 
     def test_the_backup_holds_the_database_the_attachments_and_the_way_back(self):
         result = self.run_script()

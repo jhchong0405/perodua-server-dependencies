@@ -320,6 +320,10 @@ Then choose who may open the web page:
   (security group), because ufw does not filter ports that Docker publishes. The
   script asks you to confirm this choice.
 
+From v1.2.2, it then asks `Configure outgoing email now? [y/N]`:
+[Outgoing email](#outgoing-email-v122-or-later) explains the questions. v1.2.1
+does not ask.
+
 Then enter the database password. When asked, enter the registry username and
 password for `perodua-deploy.novutal.com`. The first run takes several minutes.
 
@@ -449,6 +453,85 @@ Portal) and `stgisscp` (Customer Portal). Each name shows only its own module.
 
 See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#sign-in-once-on-stgiss-v105).
 
+## Outgoing email (v1.2.2 or later)
+
+Odoo sends no email until outgoing email is configured. **It needs Client
+Stable UIUX v1.2.2 or later.** v1.2.1, the release of this kit, has no mail
+code: its `deploy-app.sh` does not ask, and stops with `needs
+client-stable-uiux v1.2.2 or later` on the settings below, `--mail` and
+`--send-test-mail`. Outgoing email stays off until the kit deploys v1.2.2.
+
+Get these from the mail administrator (for the client: client IT):
+
+- the SMTP server (host name or IP address) and its port;
+- the encryption: STARTTLS (port 587), SSL/TLS (port 465), or none (port 25,
+  only for an internal relay that accepts this App server without sign-in);
+- the sign-in user and its password, unless the relay needs no sign-in;
+- the sender address that the server lets the App use;
+- an open firewall from the App server to that port.
+
+**On the first run**, after "Who may open the web page?", `deploy-app.sh` asks
+`Configure outgoing email now? [y/N]`. **On a deployment that runs**, run:
+
+```bash
+sudo bash deploy-app.sh --mail
+```
+
+It asks these questions, in this order. Enter keeps the value in brackets; `-`
+empties a value that may be empty.
+
+1. The SMTP server. `-`, then `y`, switches outgoing email off.
+2. The encryption: `1` STARTTLS (port 587), `2` SSL/TLS (port 465) or `3`
+   None (port 25, an internal relay only).
+3. The port. The default comes from the encryption.
+4. The sign-in user. Enter (with none saved) or `-` is no sign-in: the saved
+   password is then deleted. Not asked with None: the password would cross the
+   network as plain text.
+5. The password, hidden. Enter keeps the saved one.
+6. The sender address of every email.
+7. The sender name of every email. Enter (with none saved) or `-` keeps the
+   author's name. The author stays in Reply-To.
+8. `Send every email to one test address? [Y/n]`. `Y` asks for the address:
+   every email then goes to that address only, with its real recipients
+   before the subject (`[TEST for a@x, b@y]`). `n` sends each email to its
+   real recipients, after you type `SEND REAL MAIL`. Keep a test address on
+   DEV and UAT.
+
+Then the run deploys as usual and recreates the containers: the App is down for
+about a minute. The answers are saved in `/opt/perodua-app/app.env`, and the
+password in `/opt/perodua-app/secrets/smtp_password` (only root can open the
+folder). Send a test email:
+
+```bash
+sudo bash deploy-app.sh --send-test-mail you@perodua.com.my
+```
+
+With a test address, the email goes to the test address. If it does not
+arrive, the output gives the reason; check the answers with `--mail`, and the
+firewall.
+
+**The mail that waited.** When the outgoing email settings change (also when
+the test address goes off), Odoo holds the mail that waited in the queue. It is
+in Settings > Technical > Emails, with the status Delivery Failed. Review it,
+then Retry or Cancel it. While a test address is set, Retry sends it there.
+
+**Without a terminal**, write the settings into `app.env` (see
+`scripts/app.env.example`), with the password alone in a file of its own, and
+run `sudo bash deploy-app.sh --non-interactive`. There is no password option: a
+command line shows in `ps` and in the shell history.
+
+```
+SMTP_HOST=relay.perodua.local
+SMTP_ENCRYPTION=starttls
+SMTP_USER=perodua-spd
+SMTP_PASSWORD_FILE=/root/smtp-password
+SMTP_FROM=no-reply@perodua.com.my
+SMTP_FROM_NAME=Perodua SPD
+MAIL_REDIRECT_TO=you@perodua.com.my
+```
+
+See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#outgoing-email-v122-or-later).
+
 ## Check the data without the web page
 
 On the DB server (with one server, on that server), this counts the records
@@ -518,7 +601,8 @@ It shows its plan and asks you to type the database name. Then it stops the
 App, deletes all data in the database and all attachments, and runs
 `deploy-app.sh --init-db` again, which takes several minutes and may ask for
 the registry account like the first deployment. The database, its login and
-password, the web port and the other settings stay. `whadmin`, `admin1` and
+password, the web port and the other settings stay, also the outgoing email
+settings and the SMTP password (v1.2.2 or later). `whadmin`, `admin1` and
 `admin2` get the password `perodua` again. The reset installs the release of
 the `scripts` folder you run it from, so it also moves a system set up with an
 earlier version to this one. If it stops part-way, solve the problem it shows
@@ -624,6 +708,12 @@ Technical > Emails, with the status Delivery Failed), then send it:
 ```bash
 sudo bash deploy-app.sh --release-queued-mail
 ```
+
+Odoo then sends the released mail with its mail queue. With outgoing email on
+(v1.2.2 or later), it goes out through the SMTP server: to the test address
+while `MAIL_REDIRECT_TO` names one. This hold is a step of the upgrade. Odoo
+itself holds the queue when the outgoing email settings change
+([Outgoing email](#outgoing-email-v122-or-later)).
 
 ## Upgrade an App server to v1.2.1
 

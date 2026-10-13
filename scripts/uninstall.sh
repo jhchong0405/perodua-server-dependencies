@@ -21,11 +21,11 @@ every database on this server; it needs a terminal.
 
 --role app stops and removes the App containers, their anonymous volumes and
 the network, and deletes the deployment directory (default /opt/perodua-app),
-including its copy of the database password. The attachments volume and the
-images are kept; --purge removes them too. Other containers with "perodua" in
-their name or image, such as the App of the earlier perodua-odoo package, are
-listed afterwards, or when there is no deployment, and deleted after a "y" on a
-terminal.
+including its copies of the database password and the SMTP password. The
+attachments volume and the images are kept; --purge removes them too. Other
+containers with "perodua" in their name or image, such as the App of the earlier
+perodua-odoo package, are listed afterwards, or when there is no deployment, and
+deleted after a "y" on a terminal.
 
 The plan is shown first. Type the database or project name to confirm, or pass
 it with --confirm for unattended use.
@@ -216,7 +216,11 @@ uninstall_app() {
     printf '  - stop and remove its %s container(s) and its network\n' "${#ids[@]}"
     ((${#anonymous[@]} == 0)) \
         || printf '  - delete the %s anonymous volume(s) Docker created for them (such as /mnt/extra-addons)\n' "${#anonymous[@]}"
-    printf '  - delete %s (configuration, the copy of the database password, logs)\n' "$DEPLOY_DIR"
+    if [[ -e $DEPLOY_DIR/secrets/smtp_password ]]; then
+        printf '  - delete %s (configuration, the copies of the database password and the SMTP password, logs)\n' "$DEPLOY_DIR"
+    else
+        printf '  - delete %s (configuration, the copy of the database password, logs)\n' "$DEPLOY_DIR"
+    fi
     # deploy-app.sh --upgrade keeps its backups there unless --backup-dir names another place.
     [[ ! -d $DEPLOY_DIR/backups ]] \
         || printf '  - and with it the backups that deploy-app.sh --upgrade saved in %s/backups: copy them elsewhere first to keep them\n' "$DEPLOY_DIR"

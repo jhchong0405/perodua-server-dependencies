@@ -26,6 +26,7 @@ SCRIPT = SCRIPTS / 'deploy-app.sh'
 FRESH_MODULES = ('perodua_client_stable,perodua_gateway,perodua_forecast_workbook,'
                  'perodua_supplier_execution,perodua_uiux_api')
 SUPPORT_LINE = re.compile(r'^PUBLIC_ROOT_SUPPORTED=[01]$', re.M)
+MAIL_LINE = re.compile(r'^MAIL_SUPPORTED=[01]$', re.M)
 BASE_URL = 'https://stgissrp.perodua.com.my/dev'
 
 
@@ -455,6 +456,40 @@ class UatOrchestrationTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertIn('HTTP URL: http://10.1.2.3:18110/uat/app/\n', result.stdout)
         self.assertNotIn('Public URL', result.stdout)
+
+    def test_outgoing_email_adds_no_step(self):
+        # The mail settings reach Odoo through compose.yml, which every run
+        # recreates the containers with: no preflight mode and no step is new.
+        result = self.run_script('READY 0')
+        self.assertEqual(result.returncode, 0, result.stdout)
+        steps = self.container_steps()
+        self.assertNotIn('Outgoing email', result.stdout)  # the pinned release has no mail code
+        self.script = release_copy(Path(self.temp.name) / 'mail', supported=True)
+        text = self.script.read_text(encoding='utf-8')
+        self.assertEqual(len(MAIL_LINE.findall(text)), 1)
+        self.script.write_text(MAIL_LINE.sub('MAIL_SUPPORTED=1', text), encoding='utf-8')
+        smtp_password = Path(self.temp.name) / 'smtp-password'
+        smtp_password.write_text('fake-app-password\n', encoding='utf-8')
+        self.configure(SMTP_HOST='smtp.example.com', SMTP_USER='sender@example.com', SMTP_PASSWORD_FILE=str(smtp_password),
+                       SMTP_FROM='sender@example.com', MAIL_REDIRECT_TO='inbox@example.com')
+        self.log.unlink()
+        result = self.run_script('READY 0')
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(self.container_steps(), steps)
+        self.assertIn('Outgoing email: smtp.example.com:587 starttls, sign-in as sender@example.com, from sender@example.com,'
+                      ' every email to the test address inbox@example.com.\n', result.stdout)
+        self.assertIn(f'Send a test email with: sudo bash deploy-app.sh --send-test-mail ADDRESS --dir {self.deploy_dir}\n',
+                      result.stdout)
+        for args in self.calls():
+            self.assertFalse(any('fake-app-password' in arg for arg in args), args)
+        self.assertNotIn('fake-app-password', result.stdout)
+        self.configure()
+        self.log.unlink()
+        result = self.run_script('READY 0')
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(self.container_steps(), steps)
+        self.assertIn(f'Outgoing email: off. Configure it with: sudo bash deploy-app.sh --mail --dir {self.deploy_dir}\n',
+                      result.stdout)
 
     # ── generated deployment ────────────────────────────────────────────────
     def test_helpers_are_installed_read_only_and_mounted(self):
