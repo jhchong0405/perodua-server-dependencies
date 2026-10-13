@@ -1510,7 +1510,7 @@ keeps an `app.env` that the scripts of v1.2.1 and earlier still read.
 | `SMTP_HOST` | The SMTP server: a host name (labels of letters, digits and `-`, separated by single dots, 253 characters at most) or an IPv4 address. Empty: no outgoing email, and no other mail setting may be set. |
 | `SMTP_ENCRYPTION` | `starttls` (the default), `ssl` or `none`. `none` is for an internal relay only, and cannot sign in. Odoo does not check the server certificate (Odoo's normal mode on this path). |
 | `SMTP_PORT` | 1-65535. Default from the encryption: 587, 465 or 25. |
-| `SMTP_USER` | The sign-in user. Empty: no sign-in. At most 254 characters, without spaces, control characters, `"`, `\` or `$`. |
+| `SMTP_USER` | The sign-in user. Empty: no sign-in. At most 254 ASCII characters, without spaces, control characters, `"`, `\` or `$`. ASCII only, because Python's SMTP sign-in sends the user as ASCII and `compose.yml` must stay valid UTF-8: for a domain with other letters, use its `xn--` form. |
 | `SMTP_PASSWORD_FILE` | Needed with `SMTP_USER`: the absolute path to a readable file that holds only the password, on one line. There is no password setting or option, because a command line shows in `ps` and in the shell history. `deploy-app.sh` copies it to `secrets/smtp_password` and saves this path to that copy. |
 | `SMTP_FROM` | Needed with `SMTP_HOST`: the sender address of every email, a plain address such as `no-reply@perodua.com.my`. The author of an email stays in Reply-To. |
 | `SMTP_FROM_NAME` | The sender name of every email, such as `Perodua SPD`: 1-64 letters, digits, spaces and `. , & ( ) _ ' -`, starting with a letter or digit. Empty: the author's name. |
@@ -1519,7 +1519,8 @@ keeps an `app.env` that the scripts of v1.2.1 and earlier still read.
 A value that breaks a rule stops the run before any Docker call, with the rule.
 `compose.yml` gets the values inside `"..."` as they are: that is safe only
 because no rule lets `"`, `\` or `$` through. The image checks the same values
-with the same rules (one table of test values in both repositories).
+with the same rules (one table of test values in both repositories); only
+`deploy-app.sh` also refuses a non-ASCII `SMTP_USER`.
 
 ### Questions
 
@@ -1540,9 +1541,11 @@ explained and asked again.
 3. The port. The default comes from the menu; the saved port stays the
    default while the encryption stays the same.
 4. The sign-in user. Enter (with none saved) or `-` is no sign-in. Not asked for
-   None.
+   None. No sign-in (also None) removes `SMTP_PASSWORD_FILE` and deletes the
+   saved SMTP password.
 5. The password, with hidden input (`read -s`). With a saved password, Enter
-   keeps it. Asked only with a user.
+   keeps it. Asked only with a user. Spaces at the start and the end stay part
+   of the password, as in a password file.
 6. The sender address. With no saved one, the default is the user when that is
    an address.
 7. The sender name. Enter (with none saved) or `-` keeps the author's name.

@@ -358,7 +358,9 @@ password_problem() {  # why $1 cannot be the database password (or the password 
 host_pattern='^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$'
 mail_problem() {  # why $2 cannot be the value of the mail setting $1, if it cannot
     # The image checks the same values with the same rules. compose.yml gets
-    # them inside "..." as they are: no rule lets " \ or $ through.
+    # them inside "..." as they are: no rule lets " \ or $ through. SMTP_USER
+    # is ASCII only here: Python's SMTP sign-in sends it as ASCII, and a byte
+    # from 0x80 up can make compose.yml invalid UTF-8.
     local value=$2 address user name
     address='^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$'
     user='^[^[:space:][:cntrl:]"\$]{1,254}$'
@@ -372,8 +374,8 @@ mail_problem() {  # why $2 cannot be the value of the mail setting $1, if it can
         SMTP_ENCRYPTION)
             [[ $value == starttls || $value == ssl || $value == none ]] || printf 'SMTP_ENCRYPTION must be starttls, ssl or none' ;;
         SMTP_USER)
-            [[ -z $value || $value =~ $user ]] \
-                || printf 'SMTP_USER must be empty (no sign-in) or at most 254 characters without spaces, control characters, ", \\ or $' ;;
+            [[ -z $value || ( $value =~ $user && $value != *[^[:print:]]* ) ]] \
+                || printf 'SMTP_USER must be empty (no sign-in) or at most 254 ASCII characters without spaces, control characters, ", \\ or $' ;;
         SMTP_FROM)
             [[ ${#value} -le 254 && $value =~ $address ]] || printf 'SMTP_FROM must be a plain email address, such as no-reply@perodua.com.my' ;;
         SMTP_FROM_NAME)
@@ -456,14 +458,16 @@ ask_mail() {  # the outgoing email questions: a first run that chose them, or --
     else
         ask_mail_value SMTP_USER 'SMTP sign-in user' 'no sign-in'
     fi
+    # No sign-in, no password: the saved password file goes with the user.
+    [[ -n $SMTP_USER ]] || SMTP_PASSWORD_FILE=''
     smtp_password=''
     if [[ -n $SMTP_USER ]]; then
         if [[ -n $SMTP_PASSWORD_FILE && -r $SMTP_PASSWORD_FILE ]] || [[ -r $DEPLOY_DIR/secrets/smtp_password ]]; then saved=1; fi
         while :; do
             if [[ -n $saved ]]; then
-                read -r -s -p 'SMTP password (hidden; Enter keeps the saved one): ' smtp_password || fail 'Input cancelled'
+                IFS= read -r -s -p 'SMTP password (hidden; Enter keeps the saved one): ' smtp_password || fail 'Input cancelled'
             else
-                read -r -s -p 'SMTP password (hidden): ' smtp_password || fail 'Input cancelled'
+                IFS= read -r -s -p 'SMTP password (hidden): ' smtp_password || fail 'Input cancelled'
             fi
             printf '\n'
             [[ -n $smtp_password || -z $saved ]] || break
@@ -885,7 +889,7 @@ if [[ -n $SMTP_USER ]]; then
         else
             ((NON_INTERACTIVE == 0)) || fail 'SMTP_USER needs SMTP_PASSWORD_FILE for a non-interactive deployment'
             [[ -t 0 ]] || fail 'SMTP password input requires a terminal'
-            read -r -s -p 'SMTP password (hidden): ' smtp_password || fail 'Input cancelled'
+            IFS= read -r -s -p 'SMTP password (hidden): ' smtp_password || fail 'Input cancelled'
             printf '\n'
         fi
     fi

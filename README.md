@@ -478,18 +478,19 @@ sudo bash deploy-app.sh --mail
 ```
 
 It asks these questions, in this order. Enter keeps the value in brackets; `-`
-empties it.
+empties a value that may be empty.
 
 1. The SMTP server. `-`, then `y`, switches outgoing email off.
 2. The encryption: `1` STARTTLS (port 587), `2` SSL/TLS (port 465) or `3`
    None (port 25, an internal relay only).
 3. The port. The default comes from the encryption.
-4. The sign-in user. Enter (or `-`) for no sign-in. Not asked with None: the
-   password would cross the network as plain text.
+4. The sign-in user. Enter (with none saved) or `-` is no sign-in: the saved
+   password is then deleted. Not asked with None: the password would cross the
+   network as plain text.
 5. The password, hidden. Enter keeps the saved one.
 6. The sender address of every email.
-7. The sender name of every email. Enter (or `-`) keeps the author's name. The
-   author stays in Reply-To.
+7. The sender name of every email. Enter (with none saved) or `-` keeps the
+   author's name. The author stays in Reply-To.
 8. `Send every email to one test address? [Y/n]`. `Y` asks for the address:
    every email then goes to that address only, with its real recipients
    before the subject (`[TEST for a@x, b@y]`). `n` sends each email to its

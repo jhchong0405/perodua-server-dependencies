@@ -126,6 +126,8 @@ test connects to an SMTP server: the fake Docker answers `perodua-mail-test`.
 - the table of values that the image's entrypoint also accepts or refuses (host
   names, addresses, sender names): through `mail_problem` itself (also the
   empty host and an address with a line break) and through `--check-config`;
+- a sign-in user with a byte from 0x80 up (UTF-8 or not) stops the run and
+  `--check-config` before any Docker call or file;
 - `--check-config` refuses an SMTP password file that is empty or holds a line
   break, also the directory's own `secrets/smtp_password`;
 - on a pseudo-terminal: the first run asks `Configure outgoing email now?` after
@@ -135,7 +137,10 @@ test connects to an SMTP server: the fake Docker answers `perodua-mail-test`.
   REAL MAIL` typed exactly; None asks for no user or password. `--mail` asks
   again with the saved values as defaults: another encryption gives its port,
   Enter keeps the saved password, `-` empties the sender name, and a new
-  password replaces the secret. It can switch mail off, and needs a terminal
+  password replaces the secret. On a deployment that signs in, `-` at the user
+  or None removes the user, `SMTP_PASSWORD_FILE`, the `smtp_password` secret
+  and the saved password. Each of the three password questions keeps the
+  spaces at the start and the end. It can switch mail off, and needs a terminal
   and a plain run;
 - `--send-test-mail` runs only `compose run --rm --no-deps -T odoo
   perodua-mail-test ADDRESS` with the directory's compose file, names the test

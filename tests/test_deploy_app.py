@@ -1111,8 +1111,9 @@ sys.exit(93)
               for value in ("0", "65536", "x", "25 ", "-1", "0587")],
             *[({"SMTP_ENCRYPTION": value}, "SMTP_ENCRYPTION must be starttls, ssl or none")
               for value in ("tls", "STARTTLS", "ssl_strict", "starttls_strict")],
-            *[({"SMTP_USER": value}, "SMTP_USER must be empty (no sign-in) or at most 254 characters")
-              for value in ("a b", 'a"b', "a\\b", "a$b", "a\tb", "a" * 255, f"`touch {marker}`")],
+            *[({"SMTP_USER": value}, "SMTP_USER must be empty (no sign-in) or at most 254 ASCII characters")
+              for value in ("a b", 'a"b', "a\\b", "a$b", "a\tb", "a" * 255, f"`touch {marker}`",
+                            "josé@example.com", "a b")],
             *[({"SMTP_FROM": value}, "SMTP_FROM must be a plain email address")
               for value in ("a", "a@", "@b.c", "a b@c.d", "a@b", '"a"@b.c', "Perodua <a@b.c>", "a@b.c,d@e.f",
                             f"$(touch {marker})@b.c")],
@@ -1201,6 +1202,29 @@ sys.exit(93)
                     self.assert_early_failure(result)
                     self.assertIn(key + " must be", result.stdout)
         self.assertEqual(self.docker_calls(), [])
+
+    def test_the_sign_in_user_is_ascii(self):
+        # Python's SMTP sign-in sends the user as ASCII, and compose.yml must
+        # stay valid UTF-8: a byte from 0x80 up stops the run before any file
+        # is written.
+        for value in ("sender@example.com", "perodua-spd", "DOMAIN/perodua.spd", "a" * 254, ""):
+            with self.subTest(accepted=value):
+                self.assertEqual(self.mail_problem("SMTP_USER", value), "")
+        for value in ("josé@example.com", "a b", "user\udcffname", "a" * 255):
+            with self.subTest(refused=value):
+                self.assertTrue(self.mail_problem("SMTP_USER", value).startswith("SMTP_USER must be"))
+        script = self.mail_copy()
+        self.pulls_succeed()
+        self.write_mail_config()
+        text = self.config.read_bytes()
+        self.assertIn(b"\nSMTP_USER=sender@example.com\n", text)
+        self.config.write_bytes(text.replace(b"\nSMTP_USER=sender@example.com\n", b"\nSMTP_USER=user\xffname\n"))
+        for extra in (("--non-interactive",), ("--check-config",)):
+            with self.subTest(extra=extra):
+                result = self.run_script(*extra, script=script)
+                self.assert_early_failure(result)
+                self.assertIn("SMTP_USER must be empty (no sign-in) or at most 254 ASCII characters", result.stdout)
+                self.assertFalse(self.deploy_dir.exists())
 
     def test_check_config_refuses_an_smtp_password_file_a_deployment_would_refuse(self):
         # service.sh reset deletes the data after this check; the deployment it
@@ -1391,6 +1415,114 @@ sys.exit(93)
         self.assertIn("\nSMTP_PORT=2465\n", (self.deploy_dir / "app.env").read_text())
         for call in self.docker_calls():
             self.assertFalse(any("fake-app-password-2" in arg for arg in call["args"]))
+
+    def assert_no_sign_in_saved(self, output):
+        self.assertIn("Fixture stopped before", output)
+        self.assertNotIn("applies only with SMTP_USER", output)
+        saved = (self.deploy_dir / "app.env").read_text()
+        self.assertNotIn("SMTP_USER", saved)
+        self.assertNotIn("SMTP_PASSWORD_FILE", saved)
+        compose = (self.deploy_dir / "compose.yml").read_text()
+        self.assertIn("    secrets: [db_password]\n", compose)
+        self.assertNotIn("smtp_password", compose)
+        self.assertNotIn("PERODUA_SMTP_USER", service_environment(compose, "odoo"))
+        self.assertFalse((self.deploy_dir / "secrets" / "smtp_password").exists())
+        self.assertTrue((self.deploy_dir / "secrets" / "db_password").exists())
+
+    def test_the_mail_option_can_remove_the_sign_in(self):
+        script = self.mail_copy()
+        self.mail_deployment(script)
+        self.assertTrue((self.deploy_dir / "secrets" / "smtp_password").exists())
+        code, output = self.terminal_exchange([
+            (b"SMTP server, host name or IP address (- for none) [smtp.example.com]: ", b"", True),
+            (b"Choose [1]: ", b"", True),
+            (b"SMTP port [587]: ", b"", True),
+            (b"SMTP sign-in user (- for no sign-in) [sender@example.com]: ", b"-", True),
+            (b"Sender address of every email [sender@example.com]: ", b"", True),
+            (b"Sender name of every email (- for the author's name) [Perodua SPD (test)]: ", b"", True),
+            (b"Send every email to one test address? [Y/n]: ", b"", True),
+            (b"Test address that gets every email [inbox@example.com]: ", b"", True),
+            (b"Database password (hidden; Enter keeps the one entered before): ", b"", False),
+        ], command=["bash", str(script), "--dir", str(self.deploy_dir), "--mail"])
+        self.assertNotIn("SMTP password (hidden", output)
+        self.assertIn('Outgoing email: smtp.example.com:587 starttls, no sign-in, from sender@example.com as '
+                      '"Perodua SPD (test)", every email to the test address inbox@example.com.', output)
+        self.assert_no_sign_in_saved(output)
+
+    def test_the_mail_option_can_move_to_a_relay_without_encryption(self):
+        script = self.mail_copy()
+        self.mail_deployment(script)
+        self.assertTrue((self.deploy_dir / "secrets" / "smtp_password").exists())
+        code, output = self.terminal_exchange([
+            (b"SMTP server, host name or IP address (- for none) [smtp.example.com]: ", b"relay.perodua.local", True),
+            (b"Choose [1]: ", b"3", True),
+            (b"SMTP port [25]: ", b"", True),
+            (b"Sender address of every email [sender@example.com]: ", b"", True),
+            (b"Sender name of every email (- for the author's name) [Perodua SPD (test)]: ", b"", True),
+            (b"Send every email to one test address? [Y/n]: ", b"", True),
+            (b"Test address that gets every email [inbox@example.com]: ", b"", True),
+            (b"Database password (hidden; Enter keeps the one entered before): ", b"", False),
+        ], command=["bash", str(script), "--dir", str(self.deploy_dir), "--mail"])
+        self.assertNotIn("SMTP sign-in user", output)
+        self.assertIn("Outgoing email: relay.perodua.local:25 none, no sign-in, from sender@example.com", output)
+        self.assert_no_sign_in_saved(output)
+        odoo = service_environment((self.deploy_dir / "compose.yml").read_text(), "odoo")
+        self.assertEqual((odoo["PERODUA_SMTP_HOST"], odoo["PERODUA_SMTP_ENCRYPTION"], odoo["PERODUA_SMTP_PORT"]),
+                         ("relay.perodua.local", "none", "25"))
+
+    def test_a_typed_smtp_password_keeps_its_spaces(self):
+        # A password file keeps leading and trailing spaces; each password
+        # question must keep them too.
+        script = self.mail_copy()
+        secret = self.deploy_dir / "secrets" / "smtp_password"
+        self.pulls_succeed()
+        # A configuration with a user and no SMTP_PASSWORD_FILE, on a terminal.
+        self.write_config(**self.MAIL)
+        code, output = self.terminal_exchange([
+            (b"SMTP password (hidden): ", b" fake-app-password ", False),
+        ], command=self.command(script=script))
+        self.assertIn("Fixture stopped before", output)
+        self.assertEqual(secret.read_text(), " fake-app-password ")
+        mail = ["bash", str(script), "--dir", str(self.deploy_dir), "--mail"]
+        asked = [
+            (b"SMTP server, host name or IP address (- for none) [smtp.example.com]: ", b"", True),
+            (b"Choose [1]: ", b"", True),
+            (b"SMTP port [587]: ", b"", True),
+        ]
+        answered = [
+            (b"Sender address of every email [sender@example.com]: ", b"", True),
+            (b"Sender name of every email (- for the author's name) [Perodua SPD (test)]: ", b"", True),
+            (b"Send every email to one test address? [Y/n]: ", b"", True),
+            (b"Test address that gets every email [inbox@example.com]: ", b"", True),
+            (b"Database password (hidden; Enter keeps the one entered before): ", b"", False),
+        ]
+        # --mail with a saved password.
+        code, output = self.terminal_exchange([
+            *asked,
+            (b"SMTP sign-in user (- for no sign-in) [sender@example.com]: ", b"", True),
+            (b"SMTP password (hidden; Enter keeps the saved one): ", b"  fake-app-password-2\t ", False),
+            *answered,
+        ], command=mail)
+        self.assertIn("Fixture stopped before", output)
+        self.assertEqual(secret.read_text(), "  fake-app-password-2\t ")
+        # --mail without a saved password: the sign-in removed, then added again.
+        code, output = self.terminal_exchange([
+            *asked,
+            (b"SMTP sign-in user (- for no sign-in) [sender@example.com]: ", b"-", True),
+            *answered,
+        ], command=mail)
+        self.assertIn("Fixture stopped before", output)
+        self.assertFalse(secret.exists())
+        code, output = self.terminal_exchange([
+            *asked,
+            (b"SMTP sign-in user (Enter for no sign-in) []: ", b"sender@example.com", True),
+            (b"SMTP password (hidden): ", b"fake-app-password-3 ", False),
+            *answered,
+        ], command=mail)
+        self.assertIn("Fixture stopped before", output)
+        self.assertEqual(secret.read_text(), "fake-app-password-3 ")
+        for call in self.docker_calls():
+            self.assertFalse(any(SMTP_PASSWORD in arg for arg in call["args"]))
 
     def test_the_mail_option_can_switch_mail_off(self):
         script = self.mail_copy()
