@@ -939,8 +939,10 @@ upgrade goes on as in the chapter above. `deploy-app.sh` pins this:
 | `MODULE_UPGRADE_FROM` | `d7335a5c60803bc8be0f227d80c21639`: the module fingerprint of v1.2.1 (33 `perodua_*` modules in its image). The only fingerprint a module upgrade starts from. |
 | `OLD_RELEASES_ACCEPTED` | `client-stable-uiux-v1.2.1`: the release the directory may run. |
 
-The pinned release, v1.2.2, has other modules than v1.2.1. After the upgrade,
-`perodua.image_modhash` holds the fingerprint of v1.2.2. No module upgrade
+The pinned release, v1.2.2, has the fingerprint
+`a3885675a252d98e79439d7ca8bf6a9d` (34 `perodua_*` modules in its image: the
+33 of v1.2.1 and the new `perodua_access`). After the upgrade,
+`perodua.image_modhash` holds this value. No module upgrade
 starts from the fingerprint of v1.0.3 to v1.0.8
 (`3b62a97697d2974ef37328de7f3d034d`) or of v1.2.0
 (`c4b1b3383aa17134cdd42b3cee9dbf55`). A server on v1.0.3 to v1.0.8 first

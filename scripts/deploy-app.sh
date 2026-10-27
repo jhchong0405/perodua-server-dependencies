@@ -5,13 +5,13 @@ set -Eeuo pipefail
 export LC_ALL=C
 umask 077
 
-RELEASE=client-stable-uiux-v1.2.1
-REVISION=0d4d1aec10e7e6a54b03ca423be4348751d769ea
+RELEASE=client-stable-uiux-v1.2.2
+REVISION=ecd966496435b9999da2624ba8cdc349bce3f852
 # Built by CI from REVISION and published to GHCR, then copied to the private
 # registry, registry to registry, with no new build: the digests are the ones
 # CI built. The Odoo image loads no sample data; both images name REVISION.
-ODOO_IMAGE=perodua-deploy.novutal.com/perodua-odoo:client-stable-uiux-v1.2.1@sha256:f8fdd18614a7a2d29c0aa622e74f3e3fa72a09f56698d6934e3798645c0e7d30
-WEB_IMAGE=perodua-deploy.novutal.com/perodua-odoo:client-stable-uiux-web-v1.2.1@sha256:b1b8c7d4a4d65342d974df7cfe2e38010446c3a1d630844bc606af3111091060
+ODOO_IMAGE=perodua-deploy.novutal.com/perodua-odoo:client-stable-uiux-v1.2.2@sha256:772500ec34d45c24cf9f66aa2bf26c3287d5c81ce8b8173f82ffed282d18bdfb
+WEB_IMAGE=perodua-deploy.novutal.com/perodua-odoo:client-stable-uiux-web-v1.2.2@sha256:477ec3df5878069319f029eb076f317aa3a8b2192b75550ec560f41c5b74619f
 REGISTRY=${ODOO_IMAGE%%/*}
 # Whether the pinned web image serves the page under PUBLIC_ROOT and shows
 # ENVIRONMENT_LABEL: yes from v1.0.4. The scripts folder of v1.0.3 has 0 here.
@@ -94,7 +94,7 @@ Usage: bash deploy-app.sh [--config PATH] [--dir PATH] [--non-interactive] [--in
        bash deploy-app.sh --release-queued-mail [--dir PATH]
        bash deploy-app.sh --mail [--dir PATH] [--init-db]
        bash deploy-app.sh --send-test-mail ADDRESS [--dir PATH]
-Deploy the pinned Client Stable UIUX v1.2.1 Odoo + Web images using Docker Compose.
+Deploy the pinned Client Stable UIUX v1.2.2 Odoo + Web images using Docker Compose.
 Requires a reachable external PostgreSQL 16 server; does not install or configure it.
 Default: use an already initialized, matching Client Stable UIUX database.
 --init-db initializes a NEW or EMPTY database as a fresh UAT system without

@@ -26,17 +26,23 @@ server needs no step.
 
 ## What v1.2.2 changes
 
-v1.2.2 has the changes of v1.2.1 and the ones below. Its Odoo modules are not
-those of v1.2.1, so `deploy-app.sh --upgrade` runs a **module upgrade** (`-u`)
-on the database, after a backup of the database and the attachments. The steps
-are in [Upgrade an App server to v1.2.2](#upgrade-an-app-server-to-v122).
+v1.2.2 (revision `ecd96649`) has the changes of v1.2.1 (revision `0d4d1aec`)
+and the ones below: the 61 merges of the app master from 11 to 27 October 2026.
+Some of the merges change only CI or the demo-uiux line. The Odoo modules of
+v1.2.2 are not those of v1.2.1: its image has 34 `perodua_*` modules, and
+`perodua_access` is new. Thus `deploy-app.sh --upgrade` runs a **module
+upgrade** (`-u`) on the database, after a backup of the database and the
+attachments. The steps are in
+[Upgrade an App server to v1.2.2](#upgrade-an-app-server-to-v122). The upgrade
+changes some data of a v1.2.1 system: count that data before the upgrade (see
+"The data that the upgrade changes" in its "Before you start").
 
-- **The sign-in hub uses OpenID Connect.** stgiss is the sign-in hub and an
-  OpenID Connect provider (`/uiux/api/oidc/`), for the module names
-  (`stgissrp`, `stgisssp`, `stgisscp`) and for WOM and TMS. A module name
-  sends the user to stgiss, as before. stgiss sends back a signed id_token in
-  place of the one-time ticket of v1.0.5 to v1.2.1. The users see the same
-  pages.
+- **The sign-in hub uses OpenID Connect** (app PR #1498). stgiss is the
+  sign-in hub and an OpenID Connect provider (`/uiux/api/oidc/`), for the
+  module names (`stgissrp`, `stgisssp`, `stgisscp`) and for WOM and TMS. A
+  module name sends the user to stgiss, as before. stgiss sends back a
+  signed id_token in place of the one-time ticket of v1.0.5 to v1.2.1. The
+  users see the same pages.
 - **The ticket is only a way back.** The Odoo system parameter
   `perodua_client_stable.module_signin` selects how the module names sign in:
   `oidc` (also when it is not set) or `ticket` (the hand-over of v1.0.5 to
@@ -71,8 +77,125 @@ are in [Upgrade an App server to v1.2.2](#upgrade-an-app-server-to-v122).
   certificate, the Odoo container needs an `extra_hosts` entry or a CA bundle:
   this kit sets neither. See
   [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#sign-in-once-on-stgiss-v105).
-- **Outgoing email.** v1.2.2 is the first release that sends email. It stays
-  off until you configure it: see [Outgoing email](#outgoing-email-v122-or-later).
+- **Outgoing email** (app PR #1442). v1.2.2 is the first release that sends
+  email. It stays off until you configure it: see
+  [Outgoing email](#outgoing-email-v122-or-later).
+- **The Users page** (app issue #1434). RESOURCES PLANNING (MASTER) has a new
+  menu Administration, with Audit Trail and Users. Users shows only to system
+  administrators and Access Administrators, and Audit Trail only to system
+  administrators and Audit Trail Viewers. On the Users page, an administrator
+  makes a user with a role and, as an option, an access end date. The system
+  sends the user a temporary password by email. Without outgoing email, Save
+  makes the account but sends no email, and Reset password, Resend and
+  Activate stay off. With `MAIL_REDIRECT_TO`, these emails go to the test
+  address, not to the user.
+- **Sign-in rules** (app PR #1448). A wrong password 3 times locks an account
+  (5 times in v1.2.1). Another administrator unlocks it. A password that
+  another person sets is temporary: the user must change it at the first
+  sign-in, and it expires after 72 hours. A new password has at least 10
+  characters, a letter and a digit, and not the username. A password set as
+  superuser stays as it is: the UAT administrators keep the password
+  "perodua". An account with an access end date stops at 23:59 Malaysia time
+  of that day. The upgrade gives no account an end date or a temporary
+  password.
+- **Access roles, with enforcement off** (app issues #1435 and #1438). The
+  new module `perodua_access` holds an access tree, roles and grants, and a
+  log of the access denials. The system parameter `perodua.access.enforce`
+  stays `off`, so the roles change the rights of no user. `on` is refused in
+  this release. The Roles page is not on this line, and the Users page shows
+  no Access roles field. Do not change this parameter in the database or as
+  superuser: only the switch of the app changes it, with the password and an
+  audit line.
+- **The fixes of Test Outcome 10.12** (app PR #1601, 40 work packages). Among
+  them:
+  - lists, forms, line tables and prints show numbers with thousands commas;
+  - a date is a day of the company time zone (Kuala Lumpur), also for a user
+    without a time zone;
+  - Products has a Model tab and Print Barcode (a 50 x 25 mm label with a
+    barcode or a QR code);
+  - an order line in a Package UOM takes the package price of the price rule
+    with that Package UOM, and the order line tables have no Unit column;
+  - Save of a new warehouse adds no parts: Load Warehouse Parts lists the
+    open parts to tick and add, and New takes a Branch code;
+  - the Proforma Invoice prints the CIPL AIR layout, and the Commercial
+    Invoice prints the four CIPL parts in the SEA or AIR layout.
+- **The fixes of Test Outcome 10.15** (app PR #1655, 53 work packages). Among
+  them:
+  - quantity cells, boxes and prints show whole numbers, and a quantity box
+    refuses a decimal point;
+  - Products shows the tabs 02 Sales and 03 Purchasing. A changed field of a
+    part keeps dated values, with a Start date and an End date;
+  - a part route (Part Routing) has its days, a transporter, and its
+    customers or suppliers. A job order takes a Part route;
+  - a Manual PO takes the delivery information of a Sales Order, and Confirm
+    makes the IDDIs of its IDDI parts;
+  - a campaign has one Currency, and Campaign prices show the Package UOM
+    only;
+  - Currencies, Parts Categories and Customer Type have a Start date and an
+    End date. A read-only Status follows them, and the Active checkbox is
+    gone.
+- **The fixes of Test Outcome 10.22** (app PR #1860, 70 work packages). Most
+  of them change pages of this line. Among them:
+  - each list ends with Updated By and Updated Date;
+  - calendars have the tabs General, Working time, Off day and Special hour.
+    A calendar uses only the holidays on its own Holiday lines, and each
+    Holiday line has a Status with Submit, Approve and Reject;
+  - on a fixed price rule, Price discount is an amount: Price is Selling
+    price minus Price discount;
+  - the Document Type list of a warehouse has no INVOICE, DTS and TDI, and
+    it has new types. A new order with an order type takes the number of the
+    branch row of its warehouse when there is one, such as
+    `SO-<branch>-YYYY-NNNN`;
+  - Products: Box size is a list of four sizes, and there are Basic unit of
+    measure, one Sales tax, Supplier Lead Time and a Model code list;
+  - SPIS, SPPS and SPN keep their Document No, and Version is a list. A
+    product has one Final Approved document of each type;
+  - Confirm of a packing list gives each item a Box No;
+  - the monthly ECC / ECCT job (below).
+
+  Some of these fixes change pages that this line does not show (Forecast,
+  MVP, IDDI, Public Holiday, ECC and ECCT Generation): they do not show
+  here.
+- **The monthly ECC / ECCT job.** The scheduled action
+  `perodua_supplier_execution.cron_supplier_half_month_cycle` is on in a
+  v1.2.1 system that `--init-db` set up, and the upgrade keeps its on/off
+  flag. The upgrade changes its name to "Perodua: Supplier ECC / ECCT Monthly
+  Cycle". v1.2.1 ran it on the 1st and the 16th of each month, for half a
+  month. v1.2.2 runs it once a month, on the 1st, for the whole month before.
+  That run:
+  - puts the IDDIs that became Closed or Frozen in that month on ECC POs,
+    one for each supplier and warehouse. The upgrade gives each Closed or
+    Frozen IDDI a Closed / Frozen Date. An IDDI that became Closed or Frozen
+    before that month and is on no ECC PO does not go on a PO;
+  - takes the unit price of an ECC PO line from the PROMISE supplier price
+    first, and from the part Cost only without a valid PROMISE price;
+  - puts the job orders of that month that can go on a PO on Draft ECCT POs,
+    one for each transporter;
+  - sends these POs to EBS. The call is a mock while the system parameter
+    `perodua_integration.mode` is not `live` (a value of
+    `perodua_integration.mode.SYSTEM` comes first).
+
+  Its first run after the upgrade is on the next 1st, for the whole month
+  before.
+- **New scheduled actions.** The upgrade shows them as
+  `Cron jobs new with this release: ...`:
+
+  | Scheduled action | State | What it does |
+  | --- | --- | --- |
+  | `perodua_master_data.cron_perodua_apply_planned_part_values` | on | At 00:05 each day, it writes on each part the planned value whose Start date has come. The upgrade plans no value. |
+  | `perodua_audit_security.cron_perodua_end_expired_access` | on | At 00:05 each day, it deactivates the accounts whose access end date has passed. |
+  | `perodua_audit_security.cron_perodua_credentials_mail_cleanup` | on | Every 15 minutes, it deletes a failed or old credentials email, so that no kept email holds a password. |
+  | `perodua_access.cron_perodua_access_apply_groups` | on | It gives the users of an access role the groups of the role. No user has a role after the upgrade. |
+  | `perodua_access.cron_perodua_access_denial_cleanup` | on | At 02:30 each day, it deletes the access denial log rows older than 183 days. |
+  | `perodua_supplier_execution.cron_perodua_inbound_job_orders` | off | The 17:00 Job Order Inbound run. This line has no Job Order Inbound page. |
+
+  None of them sends mail.
+- **Other changes.** A dark mode (the sun and moon button beside the user
+  name), a light blue background and a colour for each workspace card. On a
+  large warehouse, a save of one Warehouse Parts row takes 0.2 seconds, not
+  37 seconds. The IHC / Eng Order pages read IHP / Eng Order. A system
+  administrator gets the Non-OEM BOM rights. The user `planner` gets the
+  Sales right All Documents (owner answer N2 = C).
 - **Only from v1.2.1.** A server on an earlier release must first move to
   v1.2.1: see [From an earlier release](#from-an-earlier-release).
 
@@ -842,6 +965,67 @@ name `perodua`: if yours are others, use them in their place.
   ```bash
   sudo -u postgres psql -X -At -d perodua -c "SELECT count(*) FROM mail_mail WHERE state = 'exception' AND failure_reason LIKE 'Held by deploy-app.sh%' AND id IN (SELECT json_array_elements_text(value::json->'held_mail')::bigint FROM ir_config_parameter WHERE key = 'perodua.kit_upgrade')"
   ```
+- **The data that the upgrade changes.** Count it on the DB server (with one
+  server, on that server), and tell the owner the numbers before the upgrade.
+  These commands change nothing.
+
+  - **Holidays.** The upgrade moves each holiday that has no calendar to the
+    Public Holiday list, a page that this line does not show. An Approved
+    holiday also becomes an Approved Holiday line on the calendars of its
+    year. Then the upgrade deletes the holidays that have no calendar and
+    calculates the planning dates again: `module-upgrade.log` names each
+    date that moves. A calendar that a user makes after the upgrade gets no
+    holiday by itself.
+
+    ```bash
+    sudo -u postgres psql -X -At -d perodua -c "SELECT approval_state, count(*) FROM resource_calendar_leaves WHERE perodua_is_operational_holiday AND calendar_id IS NULL AND resource_id IS NULL GROUP BY 1 ORDER BY 1"
+    ```
+
+    It shows one line for each state, such as `approved|15`. No line: no
+    holiday moves.
+  - **Price discount.** On a fixed price rule, Price discount becomes an
+    amount: the Price of the rule, for order lines and campaigns, is
+    Selling price minus Price discount. In v1.2.1 a fixed price rule did not
+    use its Price discount. A Price discount above the Selling price gives
+    0.00, and a Save of such a rule is refused until its Price discount is
+    between 0 and the Selling price. The upgrade changes no rule, and
+    `module-upgrade.log` names the rules.
+
+    ```bash
+    sudo -u postgres psql -X -At -d perodua -c "SELECT count(*) FILTER (WHERE price_discount > 0), count(*) FILTER (WHERE price_discount > 0 AND price_discount > fixed_price), count(*) FILTER (WHERE price_discount < 0) FROM product_pricelist_item WHERE compute_price = 'fixed'"
+    ```
+
+    It shows three numbers, such as `0|0|0`: the rules whose price goes
+    down, the rules whose price becomes 0.00, and the rules whose price goes
+    up. When a number is not 0, the owner decides about these rules before
+    the upgrade.
+  - **The branch running series.** The upgrade deletes the INVOICE
+    (`account.move`), DTS and TDI rows of the branch running series of each
+    warehouse. The numbers that they gave stay. A new customer invoice or
+    credit note of the branch then takes the next number of its journal,
+    and a new DTS or TDI the next number of the global series.
+
+    ```bash
+    sudo -u postgres psql -X -At -d perodua -c "SELECT sequence_code, count(*) FROM perodua_branch_sequence WHERE sequence_code IN ('account.move', 'perodua.dts', 'perodua.tdi') GROUP BY 1 ORDER BY 1"
+    ```
+
+    No line: no row goes. After the upgrade, one click on Provision Branch
+    Sequences of a warehouse adds a row for each new document type (about
+    12). New numbers then start for these types at that warehouse. Tell the
+    owner before the first click.
+  - **The monthly ECC / ECCT job and EBS.** Its next run on the 1st puts the
+    IDDIs and the job orders of the whole month before on POs, and sends
+    the POs to EBS (see "The monthly ECC / ECCT job" in
+    [What v1.2.2 changes](#what-v122-changes)). This shows whether the job
+    is on (`t`) and its next time (UTC), then the integration mode:
+
+    ```bash
+    sudo -u postgres psql -X -At -d perodua -c "SELECT c.active, c.nextcall FROM ir_cron c JOIN ir_model_data d ON d.model = 'ir.cron' AND d.res_id = c.id WHERE d.module = 'perodua_supplier_execution' AND d.name = 'cron_supplier_half_month_cycle'"
+    sudo -u postgres psql -X -At -d perodua -c "SELECT key, value FROM ir_config_parameter WHERE key LIKE 'perodua_integration.mode%' ORDER BY key"
+    ```
+
+    No line for the mode is `mock`. With `live`, the POs go to the real
+    EBS. The owner decides whether this job runs on this system.
 - **The way back is the backup.** After the upgrade, the release that ran
   before cannot run on the database. See "The way back" at the end.
 - **The lock table of the DB server.** The way back restores the database in
@@ -925,8 +1109,9 @@ folders. Keep them: the way back uses the folder of the release that runs now.
    grep -E '^(RELEASE|REVISION)=' deploy-app.sh
    ```
 
-   It shows `RELEASE=client-stable-uiux-v1.2.2`. If it shows another release,
-   stop: these steps are for v1.2.2.
+   It shows `RELEASE=client-stable-uiux-v1.2.2` and
+   `REVISION=ecd966496435b9999da2624ba8cdc349bce3f852`. If it shows another
+   release, stop: these steps are for v1.2.2.
 
 With git, in place of steps 2 to 5:
 `git clone https://github.com/jhchong0405/perodua-server-dependencies.git perodua-v1.2.2`,
@@ -1004,8 +1189,9 @@ of v1.2.1. These steps make sure that they are still correct.
       (`Upgrade of /opt/perodua-app from client-stable-uiux-v1.2.1 (...) to client-stable-uiux-v1.2.2 (...)`)
       and pulls the v1.2.2 images;
     - checks the database with them. It shows
-      `Database perodua has the modules of client-stable-uiux-v1.2.1 (fingerprint d7335a5c60803bc8be0f227d80c21639). client-stable-uiux-v1.2.2 has other modules: this upgrade runs a module upgrade (-u) of N modules. M attachments.`
-      The first release is the one that runs now;
+      `Database perodua has the modules of client-stable-uiux-v1.2.1 (fingerprint d7335a5c60803bc8be0f227d80c21639). client-stable-uiux-v1.2.2 has other modules: this upgrade runs a module upgrade (-u) of 30 modules. N attachments.`
+      The first release is the one that runs now. A database that `--init-db`
+      set up has 30 modules to upgrade;
     - counts the locks of the way back. It shows
       `Locks for the way back: restore.txt step 3 restores database perodua in one transaction and can lock up to N objects (...). With a margin of 1000 it can need M. The DB server has room for R: max_locks_per_transaction ...`.
       When R is less than M, it stops with
@@ -1066,7 +1252,7 @@ of v1.2.1. These steps make sure that they are still correct.
     `Warning: PUBLIC_BASE_URL` line:
 
     ```
-    Deployment verified: client-stable-uiux-v1.2.2 (...)
+    Deployment verified: client-stable-uiux-v1.2.2 (ecd966496435b9999da2624ba8cdc349bce3f852)
     Upgraded from client-stable-uiux-v1.2.1. The data as it was before: /opt/perodua-app/backups/TIME-client-stable-uiux-v1.2.1 (restore.txt explains how to put it back).
     The Odoo modules were upgraded (-u). client-stable-uiux-v1.2.1 cannot run on this database any more: the backup is the only way back, and only until users write data (the point of no return).
     Held mail: N that the module upgrade queued, M that waited in the queue before the upgrade.
