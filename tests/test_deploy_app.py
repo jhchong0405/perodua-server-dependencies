@@ -394,7 +394,8 @@ sys.exit(93)
         self.assert_original_auth_unchanged()
 
     def interactive_run(self, host_answers, choices, port=b""):
-        """The first interactive run: database questions, web port, who may open the page."""
+        """The first interactive run: database questions, web port, who may open
+        the page, and no outgoing email (the pinned release has the mail code)."""
         self.env["FAKE_DOCKER_MODE"] = "auth"
         (self.base / "fake-state").write_text("authenticated")  # pulls succeed without a login
         host = [(b"Database server IP / hostname []: ", answer, True) for answer in host_answers]
@@ -404,6 +405,7 @@ sys.exit(93)
             (b"Database username [odoo]: ", b"", True),
             (b"Web port that browsers open on this server [8110]: ", port, True),
             *choices,
+            (b"Configure outgoing email now? [y/N]: ", b"", True),
             (b"Database password (hidden): ", b"fixture-password", False),
         ], command=["bash", str(SCRIPT), "--dir", str(self.deploy_dir)])
 
@@ -1069,7 +1071,7 @@ sys.exit(93)
         # container for a compose.yml that did not change.
         self.pulls_succeed()
         written = []
-        for script in (SCRIPT, self.mail_copy()):
+        for script in (self.mail_copy(supported=False), self.mail_copy()):
             with self.subTest(script=script):
                 shutil.rmtree(self.deploy_dir, ignore_errors=True)
                 self.write_config()
@@ -1315,7 +1317,7 @@ sys.exit(93)
         self.assertNotIn("smtp", (self.deploy_dir / "compose.yml").read_text().lower())
         # A release without mail does not ask.
         shutil.rmtree(self.deploy_dir)
-        code, output = self.interactive_run([b"192.0.2.20"], [(b"Choose [2]: ", b"", True)])
+        code, output = self.mail_first_run(self.mail_copy(supported=False), [])
         self.assertIn("Fixture stopped before", output)
         self.assertNotIn("outgoing email", output.lower())
 

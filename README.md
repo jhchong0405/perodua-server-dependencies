@@ -456,10 +456,10 @@ See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#sign-in-once-on-stgiss-v105).
 ## Outgoing email (v1.2.2 or later)
 
 Odoo sends no email until outgoing email is configured. **It needs Client
-Stable UIUX v1.2.2 or later.** v1.2.1, the release of this kit, has no mail
-code: its `deploy-app.sh` does not ask, and stops with `needs
-client-stable-uiux v1.2.2 or later` on the settings below, `--mail` and
-`--send-test-mail`. Outgoing email stays off until the kit deploys v1.2.2.
+Stable UIUX v1.2.2 or later**, the release of this kit. v1.2.1 has no mail
+code: the `deploy-app.sh` of its `scripts` folder does not ask, and stops with
+`needs client-stable-uiux v1.2.2 or later` on the settings below, `--mail` and
+`--send-test-mail`. Configure outgoing email after the upgrade to v1.2.2.
 
 Get these from the mail administrator (for the client: client IT):
 

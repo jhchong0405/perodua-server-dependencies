@@ -1491,13 +1491,13 @@ the connection for them, and for every other name that is not in its table.
 Odoo sends email only through an SMTP server that `deploy-app.sh` configures.
 Outgoing email needs Client Stable UIUX v1.2.2 or later: its Odoo image reads
 the settings below (the image contract `PERODUA_SMTP_*`), and sends every email
-to one test address unless that is switched off. v1.2.1, which this kit pins,
-has no mail code. Its `deploy-app.sh` has `MAIL_SUPPORTED=0`: it asks no mail
+to one test address unless that is switched off. This kit pins v1.2.2, and its
+`deploy-app.sh` has `MAIL_SUPPORTED=1`. v1.2.1 has no mail code: the
+`deploy-app.sh` of its `scripts` folder has `MAIL_SUPPORTED=0`. It asks no mail
 question, and it stops with `needs client-stable-uiux v1.2.2 or later` before
 any Docker call when a mail setting is set (also in `--check-config`), and on
-`--mail` and `--send-test-mail`. Outgoing email stays off until the kit pins
-v1.2.2. A deployment without mail settings gets the same `app.env` and
-`compose.yml`, byte for byte, as before.
+`--mail` and `--send-test-mail`. A deployment without mail settings gets the
+same `app.env` and `compose.yml`, byte for byte, as before.
 
 ### Settings
 

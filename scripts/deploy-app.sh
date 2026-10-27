@@ -25,10 +25,9 @@ HANDOVER_SUPPORTED=1
 HANDOVER_HOST=stgiss.perodua.com.my
 # Whether the pinned Odoo image sends outgoing email with the SMTP settings of
 # app.env (SMTP_HOST and the other mail keys), each to the one test address
-# MAIL_REDIRECT_TO unless it is off: yes from v1.2.2. v1.2.1 has no mail code,
-# so a scripts folder that pins it refuses the mail settings, --mail and
-# --send-test-mail.
-MAIL_SUPPORTED=0
+# MAIL_REDIRECT_TO unless it is off: yes from v1.2.2. The scripts folder of
+# v1.2.1 has 0 here: it refuses the mail settings, --mail and --send-test-mail.
+MAIL_SUPPORTED=1
 # --init-db: a fresh UAT database, the release graph without the client
 # demonstration dataset. Before anything is written, uat_guard.py checks the
 # pinned image: nothing Odoo could install may depend on EXCLUDED_MODULE or
@@ -334,8 +333,8 @@ if [[ -n $CONFIG ]]; then
         esac
     done < "$CONFIG"
 fi
-# Outgoing email needs the mail code of the image, and v1.2.1 has none:
-# refused before any question.
+# Outgoing email needs the mail code of the image (v1.2.2 or later): without
+# it, refused before any question.
 if ((MAIL_SUPPORTED == 0)); then
     for key in "${MAIL_KEYS[@]}"; do
         [[ -z ${!key} ]] || fail "$key is set, but outgoing email $MAIL_NEEDS, or remove the SMTP_ settings and MAIL_REDIRECT_TO from $CONFIG"
