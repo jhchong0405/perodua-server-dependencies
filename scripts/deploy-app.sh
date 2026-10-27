@@ -17,10 +17,13 @@ REGISTRY=${ODOO_IMAGE%%/*}
 # ENVIRONMENT_LABEL: yes from v1.0.4. The scripts folder of v1.0.3 has 0 here.
 PUBLIC_ROOT_SUPPORTED=1
 # Whether the pinned release signs the module host names (stgissrp, stgisssp,
-# stgisscp) in through the sign-in host with a one-time ticket: yes from
-# v1.0.5. Odoo switches it on only when PUBLIC_BASE_URL is https:// on the
-# sign-in host, so without that a run warns. The scripts folder of v1.0.4 has 0
-# here.
+# stgisscp) in through the sign-in host: yes from v1.0.5, with a one-time
+# ticket up to v1.2.1. From v1.2.2 the sign-in host is an OpenID Connect
+# provider for them and for WOM and TMS; the Odoo parameter
+# perodua_client_stable.module_signin is oidc (the default) or ticket, a way
+# back until after SIT (app issue #1658). Odoo switches it on only when
+# PUBLIC_BASE_URL is https:// on the sign-in host, so without that a run
+# warns. The scripts folder of v1.0.4 has 0 here.
 HANDOVER_SUPPORTED=1
 HANDOVER_HOST=stgiss.perodua.com.my
 # Whether the pinned Odoo image sends outgoing email with the SMTP settings of

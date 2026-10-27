@@ -1,6 +1,6 @@
 # Server setup
 
-Client Stable UIUX v1.2.1 on Ubuntu 24.04 amd64 servers with sudo and internet access:
+Client Stable UIUX v1.2.2 on Ubuntu 24.04 amd64 servers with sudo and internet access:
 
 - **DB server**: PostgreSQL 16.
 - **App server**: Odoo and web containers, pulled from `perodua-deploy.novutal.com`.
@@ -15,15 +15,68 @@ servers, allow **App → DB port 5432**. Browsers need **App port 8110**.
 
 The steps below create a **fresh UAT system** with an empty database.
 To restore an existing database instead, see [From a backup](#from-a-backup).
-An App server that runs v1.0.5, v1.0.6, v1.0.7 or v1.0.8 keeps its data
-through a module upgrade: see
-[Upgrade an App server to v1.2.1](#upgrade-an-app-server-to-v121).
-A server on v1.0.3 or v1.0.4 must first move to v1.0.8, with the `scripts`
-folder of kit commit `8867545` (that folder pins v1.0.8): see
-[From v1.0.3 or v1.0.4](#from-v103-or-v104).
+An App server that runs v1.2.1 keeps its data through a module upgrade: see
+[Upgrade an App server to v1.2.2](#upgrade-an-app-server-to-v122).
+A server on v1.0.3 to v1.0.8 must first move to v1.2.1, with the `scripts`
+folder of kit commit `07af48b` (that folder pins v1.2.1): see
+[From an earlier release](#from-an-earlier-release).
 A system set up with v1.0.0 to v1.0.2 cannot keep its data: download this
 version on the App server and run a [reset](#stop-start-and-reset) there. The DB
 server needs no step.
+
+## What v1.2.2 changes
+
+v1.2.2 has the changes of v1.2.1 and the ones below. Its Odoo modules are not
+those of v1.2.1, so `deploy-app.sh --upgrade` runs a **module upgrade** (`-u`)
+on the database, after a backup of the database and the attachments. The steps
+are in [Upgrade an App server to v1.2.2](#upgrade-an-app-server-to-v122).
+
+- **The sign-in hub uses OpenID Connect.** stgiss is the sign-in hub and an
+  OpenID Connect provider (`/uiux/api/oidc/`), for the module names
+  (`stgissrp`, `stgisssp`, `stgisscp`) and for WOM and TMS. A module name
+  sends the user to stgiss, as before. stgiss sends back a signed id_token in
+  place of the one-time ticket of v1.0.5 to v1.2.1. The users see the same
+  pages.
+- **The ticket is only a way back.** The Odoo system parameter
+  `perodua_client_stable.module_signin` selects how the module names sign in:
+  `oidc` (also when it is not set) or `ticket` (the hand-over of v1.0.5 to
+  v1.2.1). Set `ticket` only to go back without a new deployment. Odoo reads
+  the value at each request: no restart is necessary. Any other value stops
+  the sign-in on the module names with an error page. The ticket stays until
+  after SIT: app issue #1658 then removes it.
+- **A binding cookie.** On stgiss and on each module name, a session counts
+  as signed in only with its cookie `__Host-perodua_bind_<env>`. `<env>` is
+  the path of `PUBLIC_BASE_URL`, such as `dev` for `/dev` (`root` without a
+  path). Thus every user signs in one time after the upgrade. The web image of
+  v1.2.2 gives this cookie the path `/`. With the web image of another
+  release, nobody can work: `deploy-app.sh` pins the two images of one
+  revision.
+- **The front.** A WAF, F5 or another front must keep this cookie as it is,
+  and pass the `Origin` and `Sec-Fetch-*` headers unchanged. Otherwise nobody
+  can sign in. See
+  [Behind a WAF or another front proxy](#behind-a-waf-or-another-front-proxy).
+- **WOM and TMS sign in at stgiss.** The hub knows two clients when the Odoo
+  system parameter `perodua_client_stable.oidc_clients` is not set:
+
+  | Client | Address | Sign-in, sign-out and back-channel logout addresses |
+  | --- | --- | --- |
+  | `wom` (WOM) | `https://stgisswom.perodua.com.my` | `/signin-oidc`, `/signout-callback-oidc`, `/backchannel-logout` |
+  | `tms` (TMS) | `https://stgisstms.perodua.com.my` | `/signin-oidc`, `/signout-callback-oidc`, `/backchannel-logout` |
+
+  The issuer is `PUBLIC_BASE_URL` followed by `/uiux/api/oidc`, such as
+  `https://stgiss.perodua.com.my/dev/uiux/api/oidc`. The App server must reach
+  the WOM and TMS servers on port 443: a sign-out on stgiss sends them a
+  back-channel logout. The WOM and TMS servers must reach stgiss on port 443.
+  When the App server cannot resolve their names, or does not trust their
+  certificate, the Odoo container needs an `extra_hosts` entry or a CA bundle:
+  this kit sets neither. See
+  [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#sign-in-once-on-stgiss-v105).
+- **Outgoing email.** v1.2.2 is the first release that sends email. It stays
+  off until you configure it: see [Outgoing email](#outgoing-email-v122-or-later).
+- **Only from v1.2.1.** A server on an earlier release must first move to
+  v1.2.1: see [From an earlier release](#from-an-earlier-release).
+
+A fresh UAT system is set up as before, with `deploy-app.sh --init-db`.
 
 ## What v1.2.1 changes
 
@@ -31,8 +84,8 @@ v1.2.1 (revision `0d4d1aec`) has the changes of v1.2.0 (revision `09d8c712`)
 and the corrections below. It changes the Odoo modules, the menus and the web
 page. Its modules are not those of v1.0.3 to v1.0.8, so
 `deploy-app.sh --upgrade` runs a **module upgrade** (`-u`) on the database,
-after a backup of the database and the attachments. The steps are in
-[Upgrade an App server to v1.2.1](#upgrade-an-app-server-to-v121).
+after a backup of the database and the attachments. The kit of v1.2.1 has the
+steps (see [From an earlier release](#from-an-earlier-release)).
 
 - **Four workspaces,** from the menu arrangement of Outcome 0930: RESOURCES
   PLANNING (MASTER), RESOURCES PLANNING (OPERATION), CUSTOMER PORTAL and
@@ -70,10 +123,10 @@ after a backup of the database and the attachments. The steps are in
   because the uninstall deletes that data. After the
   upgrade, v1.0.8 and earlier cannot run on the database: the only way back is
   the backup, before users write data with v1.2.1.
-- **Only from v1.0.5 to v1.0.8.** A server on v1.0.3 or v1.0.4 must first move
-  to v1.0.8, with the `scripts` folder of kit commit `8867545`: see
-  [From v1.0.3 or v1.0.4](#from-v103-or-v104). These scripts do not upgrade a
-  server that runs v1.2.0: they take only v1.0.5 to v1.0.8.
+- **Only from v1.0.5 to v1.0.8.** A server on v1.0.3 or v1.0.4 had to move
+  to v1.0.8 first, with the `scripts` folder of kit commit `8867545`: see
+  [From an earlier release](#from-an-earlier-release). The scripts of v1.2.1
+  do not upgrade a server that runs v1.2.0: they take only v1.0.5 to v1.0.8.
 - **Owner decisions that the upgrade applies:**
   - **ECC purchase orders (decision D10 = A, accepted).** When the IDDIs of an
     ECC purchase order already received its goods, the upgrade cancels the
@@ -154,7 +207,9 @@ after a backup of the database and the attachments. The steps are in
   from another host by design: the ticket page of the hub posts it to the
   module name. It checks its signed ticket (for this module name, in time,
   used once), and that the `Origin` is the hub and `Sec-Fetch-Site` is
-  `same-site`. The requests of the web page pass these checks. The nginx of
+  `same-site`. From v1.2.2 the hub posts a signed id_token there in place of
+  the ticket, with the same checks (see
+  [What v1.2.2 changes](#what-v122-changes)). The requests of the web page pass these checks. The nginx of
   the web image and `https.sh` pass the host name on, so the servers need no
   change. A front proxy must keep the `Host` header, as before.
 - **How long the upgrade takes.** On the sandbox, with v1.2.0 (the same module
@@ -219,7 +274,8 @@ modules are the same as in v1.0.4: no module version changed, so
   | Any other name, such as `127.0.0.1` or `localhost` (SSH tunnel) | All three |
 
 - **Sign in once:** a module name sends the user to stgiss to sign in, then
-  back, signed in, with a one-time ticket.
+  back, signed in, with a one-time ticket. From v1.2.2 stgiss sends a signed
+  id_token (OpenID Connect) in place of the ticket.
 - **One sign-out ends every name.** A new password sign-in of the same user
   elsewhere also ends them: one sign-in per user, as before.
 - **The hand-over needs `PUBLIC_BASE_URL` on the sign-in host:**
@@ -450,6 +506,11 @@ Portal) and `stgisscp` (Customer Portal). Each name shows only its own module.
 - **Support:** sign in at stgiss, or through the SSH tunnel
   (`http://localhost:8110/dev/app/`). The tunnel keeps the password sign-in and
   shows all modules.
+- **From v1.2.2:** stgiss signs the module names in with OpenID Connect, and
+  also WOM and TMS. The ticket of v1.0.5 to v1.2.1 is only a way back, until
+  after SIT. A front must keep the cookie `__Host-perodua_bind_<env>` and pass
+  the `Origin` and `Sec-Fetch-*` headers unchanged. See
+  [What v1.2.2 changes](#what-v122-changes).
 
 See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#sign-in-once-on-stgiss-v105).
 
@@ -610,8 +671,8 @@ and run it again.
 
 ## Upgrade to a new release
 
-An upgrade keeps the data. For the move to v1.2.1, follow
-[the steps below](#upgrade-an-app-server-to-v121). Put the `scripts`
+An upgrade keeps the data. For the move to v1.2.2, follow
+[the steps below](#upgrade-an-app-server-to-v122). Put the `scripts`
 folder of the new release next to the old one, and keep the old one. Then run
 this on the App server, from the new folder:
 
@@ -628,9 +689,8 @@ come from `app.env` there. The upgrade goes ahead only when:
 - the new release has the same Odoo modules (the database check with the new
   image reports `READY` with the same module fingerprint), or the release
   upgrades the modules of this database. See
-  [Module upgrade](#module-upgrade--u). v1.0.3 to v1.0.8 have the same
-  modules, so no module upgrade runs between them. v1.2.1 has other modules:
-  the move to it runs a module upgrade.
+  [Module upgrade](#module-upgrade--u). v1.2.2 has other modules than
+  v1.2.1: the move to it runs a module upgrade.
 
 Then it stops the App and saves the database (`pg_dump -Fc`) and the
 attachments in `/opt/perodua-app/backups/TIME-OLD_RELEASE/` (or in a folder
@@ -652,7 +712,7 @@ it stops later, it tells you the state of the server and the ways back:
 - To also put back the data from before the upgrade, follow `restore.txt`
   instead. It also ends every sign-in: all users sign in again.
 
-After a module upgrade, such as the move to v1.2.1, the first way does not
+After a module upgrade, such as the move to v1.2.2, the first way does not
 exist: the old release cannot run on the upgraded database, and `restore.txt`
 is the only way back. See [Module upgrade](#module-upgrade--u).
 
@@ -669,9 +729,8 @@ first. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#upgrade-to-a-new-release-keep
 A release with other Odoo modules (from v1.2.0) upgrades the modules of the
 database in the same `--upgrade`. It does this only when:
 
-- the database has the modules of v1.0.3 to v1.0.8 (module fingerprint
-  `3b62a97697d2974ef37328de7f3d034d`), and the directory runs v1.0.5, v1.0.6,
-  v1.0.7 or v1.0.8;
+- the database has the modules of v1.2.1 (module fingerprint
+  `d7335a5c60803bc8be0f227d80c21639`), and the directory runs v1.2.1;
 - the database is a UAT database that `--init-db` set up, without sample data
   and without `perodua_demo_client`. A restored database is refused;
 - the DB server has room for the locks of the way back: `restore.txt`
@@ -715,14 +774,14 @@ while `MAIL_REDIRECT_TO` names one. This hold is a step of the upgrade. Odoo
 itself holds the queue when the outgoing email settings change
 ([Outgoing email](#outgoing-email-v122-or-later)).
 
-## Upgrade an App server to v1.2.1
+## Upgrade an App server to v1.2.2
 
-These steps move a server from v1.0.5, v1.0.6, v1.0.7 or v1.0.8 to v1.2.1.
-v1.2.1 has other Odoo modules than these releases, so the upgrade runs a
-**module upgrade** (`-u`): it saves the database and the attachments, upgrades
-the modules of the database one time, checks the result and starts v1.2.1. The
-data stays. Do the steps on the App server. The DB server needs a step only
-when its lock table is too small for the way back (see "Before you start").
+These steps move a server from v1.2.1 to v1.2.2. v1.2.2 has other Odoo modules
+than v1.2.1, so the upgrade runs a **module upgrade** (`-u`): it saves the
+database and the attachments, upgrades the modules of the database one time,
+checks the result and starts v1.2.2. The data stays. Do the steps on the App
+server. The DB server needs a step only when its lock table is too small for
+the way back (see "Before you start").
 The commands use the deployment directory `/opt/perodua-app` and the database
 name `perodua`: if yours are others, use them in their place.
 [Upgrade to a new release](#upgrade-to-a-new-release) and
@@ -736,31 +795,33 @@ name `perodua`: if yours are others, use them in their place.
   sudo grep -E '^(release|revision)=' /opt/perodua-app/.deployment-identity
   ```
 
-  It must show `release=client-stable-uiux-v1.0.5`, `-v1.0.6`, `-v1.0.7` or
-  `-v1.0.8`. For v1.0.3 or v1.0.4, first do
-  [From v1.0.3 or v1.0.4](#from-v103-or-v104).
+  It must show `release=client-stable-uiux-v1.2.1`. For an earlier release,
+  first do [From an earlier release](#from-an-earlier-release).
 - **The database.** The module upgrade takes only a UAT database that
   `deploy-app.sh --init-db` set up, without sample data. It refuses a restored
   database.
 - **The registry account** for `perodua-deploy.novutal.com`: the upgrade can
   ask for it.
-- **The owner's agreement.** The upgrade applies the two owner decisions in
-  [What v1.2.1 changes](#what-v121-changes). When step 11 lists retired data,
-  the owner must also agree that the upgrade deletes it.
+- **The owner's agreement.** The upgrade applies the changes in
+  [What v1.2.2 changes](#what-v122-changes). After the upgrade, every user
+  signs in one time again.
+- **The front.** When a WAF, F5 or another front is between the browsers and
+  this server, its owner must confirm the two items of v1.2.2 in
+  [Behind a WAF or another front proxy](#behind-a-waf-or-another-front-proxy):
+  the cookie `__Host-perodua_bind_<env>` stays as it is, and the `Origin` and
+  `Sec-Fetch-*` headers pass unchanged. Otherwise nobody can sign in after the
+  upgrade.
 - **A time when nobody works in the system.** The App is down during step 12:
-  for the backup, the module upgrade and the start of v1.2.1. On the sandbox,
-  with v1.2.0 (the same module upgrade), the upgrade took about 2.5 minutes,
-  with the App down for about 1.5 minutes of it; a larger database takes
-  longer. The backup time increases with the size of the database and of the
-  attachments. The module upgrade loads every installed `perodua_*` module
-  again; the script stops it after `INIT_TIMEOUT` seconds (3600, one hour,
-  unless `app.env` has another value). Tell the users before you start.
+  for the backup, the module upgrade and the start of v1.2.2. The backup time
+  increases with the size of the database and of the attachments. The module
+  upgrade loads every installed `perodua_*` module again; the script stops it
+  after `INIT_TIMEOUT` seconds (3600, one hour, unless `app.env` has another
+  value). Tell the users before you start.
 - **The mail queue.** After the module upgrade, every mail that waits in the
   mail queue (state Outgoing) is held until the owner's review (step 13): the
   mail that the upgrade queues, and the mail that waits in the queue before
-  the upgrade. v1.2.1 gives a waiting IDDI release mail that has no address
-  the address of its supplier: this mail is held too. This counts the mail
-  that waits now, on the DB server (with one server, on that server):
+  the upgrade. This counts the mail that waits now, on the DB server (with
+  one server, on that server):
 
   ```bash
   sudo -u postgres psql -X -At -d perodua -c "SELECT count(*) FROM mail_mail WHERE state = 'outgoing'"
@@ -826,43 +887,42 @@ folders. Keep them: the way back uses the folder of the release that runs now.
 2. Download the new release:
 
    ```bash
-   curl -fL https://api.github.com/repos/jhchong0405/perodua-server-dependencies/tarball/main -o setup-v1.2.1.tar.gz
+   curl -fL https://api.github.com/repos/jhchong0405/perodua-server-dependencies/tarball/main -o setup-v1.2.2.tar.gz
    ```
 
 3. Make a new folder for it, next to the old ones:
 
    ```bash
-   mkdir setup-v1.2.1
+   mkdir setup-v1.2.2
    ```
 
 4. Unpack the release into the new folder:
 
    ```bash
-   tar -xzf setup-v1.2.1.tar.gz -C setup-v1.2.1 --strip-components=1
+   tar -xzf setup-v1.2.2.tar.gz -C setup-v1.2.2 --strip-components=1
    ```
 
 5. Go to its `scripts` folder. All the commands below run there.
 
    ```bash
-   cd setup-v1.2.1/scripts
+   cd setup-v1.2.2/scripts
    ```
 
-6. Make sure that the folder pins v1.2.1:
+6. Make sure that the folder pins v1.2.2:
 
    ```bash
    grep -E '^(RELEASE|REVISION)=' deploy-app.sh
    ```
 
-   It shows `RELEASE=client-stable-uiux-v1.2.1` and
-   `REVISION=0d4d1aec10e7e6a54b03ca423be4348751d769ea`. If it shows another
-   release, stop: these steps are for v1.2.1.
+   It shows `RELEASE=client-stable-uiux-v1.2.2`. If it shows another release,
+   stop: these steps are for v1.2.2.
 
 With git, in place of steps 2 to 5:
-`git clone https://github.com/jhchong0405/perodua-server-dependencies.git perodua-v1.2.1`,
-then `cd perodua-v1.2.1/scripts`. Do not run `git pull` in an old folder.
+`git clone https://github.com/jhchong0405/perodua-server-dependencies.git perodua-v1.2.2`,
+then `cd perodua-v1.2.2/scripts`. Do not run `git pull` in an old folder.
 
-**The settings and HTTPS.** v1.2.1 uses the settings and the four host names
-of v1.0.5 to v1.0.8. These steps make sure that they are still correct.
+**The settings and HTTPS.** v1.2.2 uses the settings and the four host names
+of v1.2.1. These steps make sure that they are still correct.
 
 7. Show the address that browsers use:
 
@@ -875,9 +935,9 @@ of v1.0.5 to v1.0.8. These steps make sure that they are still correct.
    is missing or has another value, edit the file
    (`sudo nano /opt/perodua-app/app.env`) and set
    `PUBLIC_BASE_URL=https://stgiss.perodua.com.my/dev`. Its path must be the
-   same as `PUBLIC_ROOT`. Keep another value only if the hand-over must stay
+   same as `PUBLIC_ROOT`. Keep another value only if the sign-in hub must stay
    off, for example without HTTPS: then each host name keeps its own password
-   sign-in.
+   sign-in, and WOM and TMS cannot sign in through stgiss.
 
 8. Check the settings with the new scripts. This changes nothing:
 
@@ -885,7 +945,7 @@ of v1.0.5 to v1.0.8. These steps make sure that they are still correct.
    sudo bash deploy-app.sh --check-config --dir /opt/perodua-app
    ```
 
-   It shows `Configuration valid for client-stable-uiux-v1.2.1. Nothing was changed.`
+   It shows `Configuration valid for client-stable-uiux-v1.2.2. Nothing was changed.`
    A line `Warning: PUBLIC_BASE_URL ...` tells you that the hand-over stays
    off, and why. Correct the value (step 7) and do this step again.
 
@@ -898,7 +958,7 @@ of v1.0.5 to v1.0.8. These steps make sure that they are still correct.
    The routes must send all four names, `stgiss`, `stgissrp`, `stgisssp` and
    `stgisscp` (`.perodua.com.my`), with the path `/dev/`, to the App's port
    (`8110`), each with `port listening: yes`. The certificate must cover them:
-   there is no `does NOT cover` line. v1.2.1 needs no other route. If a name
+   there is no `does NOT cover` line. v1.2.2 needs no other route. If a name
    is missing, see [HTTPS](#https) first. The `nginx:` line can end with
    `(the routes or https.sh changed since: apply)`: the `https.sh` of this
    folder is newer than the one that wrote the configuration.
@@ -930,32 +990,31 @@ of v1.0.5 to v1.0.8. These steps make sure that they are still correct.
     changes nothing, and the App keeps running. The script:
 
     - names the two releases
-      (`Upgrade of /opt/perodua-app from client-stable-uiux-v1.0.8 (...) to client-stable-uiux-v1.2.1 (...)`)
-      and pulls the v1.2.1 images;
+      (`Upgrade of /opt/perodua-app from client-stable-uiux-v1.2.1 (...) to client-stable-uiux-v1.2.2 (...)`)
+      and pulls the v1.2.2 images;
     - checks the database with them. It shows
-      `Database perodua has the modules of client-stable-uiux-v1.0.8 (fingerprint 3b62a97697d2974ef37328de7f3d034d). client-stable-uiux-v1.2.1 has other modules: this upgrade runs a module upgrade (-u) of 30 modules. N attachments.`
-      The release is the one that runs now. A database that `--init-db` set
-      up has 30 modules to upgrade;
+      `Database perodua has the modules of client-stable-uiux-v1.2.1 (fingerprint d7335a5c60803bc8be0f227d80c21639). client-stable-uiux-v1.2.2 has other modules: this upgrade runs a module upgrade (-u) of N modules. M attachments.`
+      The first release is the one that runs now;
     - counts the locks of the way back. It shows
       `Locks for the way back: restore.txt step 3 restores database perodua in one transaction and can lock up to N objects (...). With a margin of 1000 it can need M. The DB server has room for R: max_locks_per_transaction ...`.
       When R is less than M, it stops with
       `Database preflight: module upgrade refused: the way back can fail. ...`,
       followed by the steps that set the value it names on the DB server (as
       in "Before you start"). Do them, then do step 11 again;
-    - counts the data of the retired modules. `Retired data: none.` is the
-      usual answer. If it lists tables, columns or attachments with a count,
-      it stops with `The module upgrade deletes the retired data above`: get
+    - counts the data of the modules that v1.2.0 retired. v1.2.1 removed them,
+      so `Retired data: none.` is the usual answer. If it lists tables,
+      columns or attachments with a count, it stops with `The module upgrade deletes the retired data above`: get
       the owner's agreement, then run the same command again with
       `--drop-retired-data` at the end. The rows are then saved as CSV in the
       backup folder (`retired-data.tar.gz`) before the upgrade deletes them;
-    - checks the modules of v1.2.1. It shows
+    - checks the modules of v1.2.2. It shows
       `UAT guard: accepted: of at most N modules Odoo could install, none is perodua_demo_client and none relies on it`;
     - prints the plan of the module upgrade, with the point of no return, and
       asks `Type perodua to start the module upgrade:`.
 
     A line `Database preflight: module upgrade refused: ...` gives a reason
     why this database cannot take the module upgrade. A stop in this part
-    ends with `Nothing was changed: /opt/perodua-app still runs client-stable-uiux-v1.0.8.`
+    ends with `Nothing was changed: /opt/perodua-app still runs client-stable-uiux-v1.2.1.`
     To stop at the question, press Enter without the name: the same line
     shows.
 
@@ -966,13 +1025,13 @@ of v1.0.5 to v1.0.8. These steps make sure that they are still correct.
     - saves the database (`database.dump`, `pg_dump -Fc`), the attachments
       (`filestore.tar.gz`), the old `deployment-identity` and `app.env`, and
       `restore.txt` in `/opt/perodua-app/backups/TIME-OLD_RELEASE/`, for
-      example `TIME-client-stable-uiux-v1.0.8/`. It shows
+      example `TIME-client-stable-uiux-v1.2.1/`. It shows
       `Backup complete in ...` and prints `restore.txt`;
     - checks the database again, now that nothing writes to it
       (`Database perodua: the same modules to upgrade, and still no retired data.`).
       If this check refuses, the old App starts again and the backup stays;
     - marks the database and removes the containers of the old release
-      (`Removing the containers of client-stable-uiux-v1.0.8 ...`). **From
+      (`Removing the containers of client-stable-uiux-v1.2.1 ...`). **From
       here on the old release cannot run on the database**, and the script
       does not start it again;
     - upgrades the modules one time
@@ -989,22 +1048,24 @@ of v1.0.5 to v1.0.8. These steps make sure that they are still correct.
       (`Mail held (state exception) until deploy-app.sh --release-queued-mail: N that the upgrade queued, M that waited in the queue before it.`).
       Between the stop of the App and this hold, Odoo's mail queue does not
       run: the module upgrade runs no scheduled action;
-    - writes the files of v1.2.1 into the directory, starts v1.2.1 and does
+    - writes the files of v1.2.2 into the directory, starts v1.2.2 and does
       the usual self-check.
 
     When the upgrade is successful, the output shows these lines, and no
     `Warning: PUBLIC_BASE_URL` line:
 
     ```
-    Deployment verified: client-stable-uiux-v1.2.1 (0d4d1aec10e7e6a54b03ca423be4348751d769ea)
-    Upgraded from client-stable-uiux-v1.0.8. The data as it was before: /opt/perodua-app/backups/TIME-client-stable-uiux-v1.0.8 (restore.txt explains how to put it back).
-    The Odoo modules were upgraded (-u). client-stable-uiux-v1.0.8 cannot run on this database any more: the backup is the only way back, and only until users write data (the point of no return).
+    Deployment verified: client-stable-uiux-v1.2.2 (...)
+    Upgraded from client-stable-uiux-v1.2.1. The data as it was before: /opt/perodua-app/backups/TIME-client-stable-uiux-v1.2.1 (restore.txt explains how to put it back).
+    The Odoo modules were upgraded (-u). client-stable-uiux-v1.2.1 cannot run on this database any more: the backup is the only way back, and only until users write data (the point of no return).
     Held mail: N that the module upgrade queued, M that waited in the queue before the upgrade.
-    Review the held mail: README.md, "Upgrade an App server to v1.2.1", step 13 lists it with psql on the DB server (in Odoo: Settings > Technical > Emails, status Delivery Failed). Then send it with: sudo bash deploy-app.sh --release-queued-mail --dir /opt/perodua-app
+    Review the held mail: README.md, "Upgrade an App server to v1.2.2", step 13 lists it with psql on the DB server (in Odoo: Settings > Technical > Emails, status Delivery Failed). Then send it with: sudo bash deploy-app.sh --release-queued-mail --dir /opt/perodua-app
     ```
 
     The second and third lines name the release that ran before. Write down
-    the backup folder of the second line: the way back needs it.
+    the backup folder of the second line: the way back needs it. The output
+    also shows `Outgoing email: off. Configure it with: ...`: v1.2.2 sends no
+    email until you configure it (step 13).
 
     Without a terminal, add `--non-interactive --confirm perodua` to the
     command of step 11: it then does steps 11 and 12 in one run. Log in to the
@@ -1014,11 +1075,9 @@ of v1.0.5 to v1.0.8. These steps make sure that they are still correct.
 
 13. The held mail. The line `Held mail:` has two numbers:
 
-    - the mail that the module upgrade queued, such as the release email to
-      the supplier of an IDDI that was released without one;
+    - the mail that the module upgrade queued;
     - the mail that waited in the mail queue before the upgrade (state
-      Outgoing), such as an IDDI release mail that had no address: the
-      upgrade gives it the address of its supplier.
+      Outgoing).
 
     When the two numbers are 0, this step is done. If not, the mail is held:
     Odoo does not send it. This lists it, on the DB server (with one server,
@@ -1033,6 +1092,10 @@ of v1.0.5 to v1.0.8. These steps make sure that they are still correct.
     status Delivery Failed (the filter Failed). With `PUBLIC_ROOT` set, the
     public host names do not open Odoo's own pages: use the list above.
 
+    v1.2.2 sends email only through the SMTP server of
+    [Outgoing email](#outgoing-email-v122-or-later). Configure it first, with a
+    test address (`sudo bash deploy-app.sh --mail`), and send a test email.
+
     Review the list with the owner. To send the mail, run this on the App
     server, from the new folder:
 
@@ -1044,9 +1107,9 @@ of v1.0.5 to v1.0.8. These steps make sure that they are still correct.
     The command queues every held mail again, and no other mail. If the owner
     does not want the mail, do not run the command: the mail stays held.
 
-    While the release mail of an IDDI is held, v1.2.1 shows the Release Email
+    While the release mail of an IDDI is held, v1.2.2 shows the Release Email
     of that IDDI as Failed, with the text `Held by deploy-app.sh --upgrade ...`
-    as its error (v1.2.1 reads the state of the mail every 15 minutes). Do
+    as its error (v1.2.2 reads the state of the mail every 15 minutes). Do
     not use **Retry Supplier Email** on such an IDDI before the release: it
     queues a new mail, which is not held, and the supplier then gets the mail
     again after the release.
@@ -1059,7 +1122,7 @@ the server:
 | `Nothing was changed: /opt/perodua-app still runs ...` | The App of the old release runs. No backup was made. | Solve the cause that the lines above give, then do step 11 again. |
 | `The upgrade stopped before the switch: ... still runs ...`, then `The App of ... runs again.` | The App of the old release runs again. A complete backup stays (`The backup in ... is complete and kept.`). | Solve the cause, then do step 11 again. It makes a new backup. |
 | `The module upgrade from ... to ... stopped ...`, then the text of `restore.txt` | The database carries the mark of the upgrade, or is partly upgraded. The containers of the old release are removed. No App runs. | Follow "The way back". Then solve the cause (`module-upgrade.log` in the backup folder has the log of `-u`) and do step 11 again. |
-| `The module upgrade from ... to ... stopped after the switch.` | The modules are upgraded and checked. The directory names v1.2.1. The start or the self-check of v1.2.1 failed. | Solve the cause, then run `sudo bash deploy-app.sh --dir /opt/perodua-app` from the new folder, without `--upgrade`. It runs no module upgrade again. |
+| `The module upgrade from ... to ... stopped after the switch.` | The modules are upgraded and checked. The directory names v1.2.2. The start or the self-check of v1.2.2 failed. | Solve the cause, then run `sudo bash deploy-app.sh --dir /opt/perodua-app` from the new folder, without `--upgrade`. It runs no module upgrade again. |
 
 A lost SSH session or Ctrl-C stops the upgrade in the same way. If the module
 upgrade stopped at `INIT_TIMEOUT`, follow "The way back", then set a higher
@@ -1075,19 +1138,20 @@ does not use an earlier sign-in.
     sudo docker compose -p perodua-client-uiux -f /opt/perodua-app/compose.yml ps
     ```
 
-15. Open `https://stgiss.perodua.com.my/dev/app/` and sign in. stgiss shows a
-    card for each of the four workspaces, with its icon, name and
-    description: RESOURCES PLANNING (MASTER), RESOURCES PLANNING (OPERATION),
-    CUSTOMER PORTAL and SUPPLIER PORTAL. Each card shows its icon, not a
-    letter. A workspace that the user may not open shows "No permission". The
+15. Open `https://stgiss.perodua.com.my/dev/app/` and sign in. A browser that
+    was signed in before the upgrade must sign in again: this is correct
+    (the binding cookie of v1.2.2). stgiss shows a card for each of the four
+    workspaces, with its icon, name and description: RESOURCES PLANNING
+    (MASTER), RESOURCES PLANNING (OPERATION), CUSTOMER PORTAL and SUPPLIER
+    PORTAL. A workspace that the user may not open shows "No permission". The
     left rail shows one icon for each workspace that the user may open.
 16. Open each workspace with its card. Each card opens its own workspace,
     directly on a page of it: RESOURCES PLANNING (MASTER) and RESOURCES
     PLANNING (OPERATION) on `stgissrp`, SUPPLIER PORTAL on `stgisssp` and
     CUSTOMER PORTAL on `stgisscp`. The two RESOURCES PLANNING cards do not
     open the same page. No name asks for the password again, and no page shows
-    "Something went wrong". In each workspace, open some pages of the left
-    menu: each one shows its list.
+    "Something went wrong" or `binding_missing`. In each workspace, open some
+    pages of the left menu: each one shows its list.
 17. Open a record that was in the system before the upgrade, for example a
     customer or a part: its data is there.
 18. Sign out on one name. Then reload the page of another name: it sends you
@@ -1101,24 +1165,28 @@ does not use an earlier sign-in.
     Each of the four names shows `port listening: yes`. After step 10, the
     `nginx:` line does not end with
     `(the routes or https.sh changed since: apply)`.
-20. Only when steps 14 to 19 are correct: as a user who is not an
+20. Only when WOM or TMS is set up for this hub (see
+    [What v1.2.2 changes](#what-v122-changes)): open WOM or TMS and sign in.
+    It sends you to stgiss and back, signed in. A sign-out on stgiss also
+    ends the sign-in on WOM and TMS.
+21. Only when steps 14 to 20 are correct: as a user who is not an
     administrator, make a new record on one page and save it.
 
-Step 20 writes data with v1.2.1: it is the point of no return. From then on,
-fix forward. Keep the backup folders until v1.2.1 is accepted.
+Step 21 writes data with v1.2.2: it is the point of no return. From then on,
+fix forward. Keep the backup folders until v1.2.2 is accepted.
 
-**The way back.** v1.0.5 to v1.0.8 cannot run on a database that carries the
-mark of the upgrade or has the modules of v1.2.1. The only way back is to put
-the backup back: the database and the attachments are then as they were when
-the App stopped in step 12, and everything written after that is lost. Do it
-only before users write data with v1.2.1. Do not copy only
+**The way back.** v1.2.1 cannot run on a database that carries the mark of
+the upgrade or has the modules of v1.2.2. The only way back is to put the
+backup back: the database and the attachments are then as they were when the
+App stopped in step 12, and everything written after that is lost. Do it only
+before users write data with v1.2.2. Do not copy only
 `deployment-identity` and `app.env` back, as after an upgrade with the same
 modules: the old release then refuses the database.
 
 Follow `restore.txt` in the backup folder of step 12
-(`/opt/perodua-app/backups/TIME-client-stable-uiux-v1.0.8/restore.txt`), all
+(`/opt/perodua-app/backups/TIME-client-stable-uiux-v1.2.1/restore.txt`), all
 of its steps, in order, one command at a time. It has the commands with the
-real paths. Run steps 1 to 4 in the `scripts` folder of v1.2.1 (`restore.txt`
+real paths. Run steps 1 to 4 in the `scripts` folder of v1.2.2 (`restore.txt`
 names it) or of the old release: `service.sh` and `reset_database.py` do the
 same in both. Each command must end without an error, with exit status 0
 (`echo $?` shows `0`). If one fails, stop: do not run the next step. A failed
@@ -1143,7 +1211,7 @@ step 3, for example, leaves the database empty.
    sign in again. It shows only the Docker lines.
 5. Copy `deployment-identity` and `app.env` from the backup folder back into
    the directory. Then go to the old `scripts` folder of the release that ran
-   before (for v1.0.8, for example `../../setup-v1.0.8/scripts`) and deploy
+   before (for v1.2.1, for example `../../setup-v1.2.1/scripts`) and deploy
    that release, without `--upgrade`:
 
    ```bash
@@ -1161,32 +1229,38 @@ The time grows with the size of the database (step 3) and of the attachments
 longer when it must pull the images. Meanwhile the HTTPS names show an error
 such as `502 Bad Gateway`.
 
-The HTTPS configuration of step 10 can stay: v1.0.5 to v1.0.8 work with it,
-and no nginx step is needed. nginx keeps closing port 443 for a host name that
-is not in the table and for the server's IP address, as after step 10.
-When the cause is solved, do step 11 again from the folder of v1.2.1.
+The HTTPS configuration of step 10 can stay: v1.2.1 works with it, and no
+nginx step is needed. nginx keeps closing port 443 for a host name that is not
+in the table and for the server's IP address, as after step 10. With v1.2.1
+the module names use the one-time ticket again, and WOM and TMS cannot sign in
+through stgiss. When the cause is solved, do step 11 again from the folder of
+v1.2.2.
 
-### From v1.0.3 or v1.0.4
+### From an earlier release
 
-v1.2.1 upgrades the modules only in a directory that runs v1.0.5 to v1.0.8. A
-server on v1.0.3 or v1.0.4 first moves to v1.0.8, which has the same modules
-and keeps the data, with the `scripts` folder of kit commit `8867545` (it pins
-v1.0.8). Get that folder, next to the old `setup` folder:
+v1.2.2 upgrades the modules only in a directory that runs v1.2.1. A server on
+an earlier release first moves to v1.2.1, with the `scripts` folder of kit
+commit `07af48b` (it pins v1.2.1). Get that folder, next to the old `setup`
+folder:
 
 ```bash
-curl -fL https://api.github.com/repos/jhchong0405/perodua-server-dependencies/tarball/886754540c8d6f3204e29b1960b49220c86da3e2 -o setup-v1.0.8.tar.gz
-mkdir setup-v1.0.8
-tar -xzf setup-v1.0.8.tar.gz -C setup-v1.0.8 --strip-components=1
+curl -fL https://api.github.com/repos/jhchong0405/perodua-server-dependencies/tarball/07af48b442ad5abea5b2c011aa47481c9fa3854b -o setup-v1.2.1.tar.gz
+mkdir setup-v1.2.1
+tar -xzf setup-v1.2.1.tar.gz -C setup-v1.2.1 --strip-components=1
 ```
 
-With git: `git clone https://github.com/jhchong0405/perodua-server-dependencies.git perodua-v1.0.8`,
-then `git -C perodua-v1.0.8 checkout 886754540c8d6f3204e29b1960b49220c86da3e2`.
+With git: `git clone https://github.com/jhchong0405/perodua-server-dependencies.git perodua-v1.2.1`,
+then `git -C perodua-v1.2.1 checkout 07af48b442ad5abea5b2c011aa47481c9fa3854b`.
 
-Then follow "Upgrade an App server to v1.0.8" in the `README.md` of that
-folder (`setup-v1.0.8/README.md`), without its steps 2 to 4: they download the
-newest release, which is now v1.2.1. Its step 6 must show
-`RELEASE=client-stable-uiux-v1.0.8`. When v1.0.8 runs and is accepted, do the
-steps above for v1.2.1.
+- **v1.0.5 to v1.0.8:** follow "Upgrade an App server to v1.2.1" in the
+  `README.md` of that folder (`setup-v1.2.1/README.md`), without its steps 2
+  to 4: they download the newest release, which is now v1.2.2. Its step 6
+  must show `RELEASE=client-stable-uiux-v1.2.1`.
+- **v1.0.3 or v1.0.4:** first move to v1.0.8: follow "From v1.0.3 or v1.0.4"
+  in `setup-v1.2.1/README.md`. Then do the step for v1.0.5 to v1.0.8 above.
+- **v1.2.0:** no upgrade path. The scripts of v1.2.1 and v1.2.2 refuse it.
+
+When v1.2.1 runs and is accepted, do the steps above for v1.2.2.
 
 ## Uninstall
 
@@ -1685,6 +1759,8 @@ before you choose B.
 | `Host` header | The original host name, such as `stgiss.perodua.com.my` |
 | TLS server name (SNI) | Setup A: the same host name is recommended. A front without SNI still works: the `Host` header selects the host name (see `apply` above). |
 | Query string and `Location` headers | Unchanged. The sign-in hand-over sends absolute `https://` addresses of the other host names. |
+| The cookie `__Host-perodua_bind_<env>` (v1.2.2 or later) | Unchanged, with `Path=/`: no other path, name or flags, and not removed. `<env>` is the path of `PUBLIC_BASE_URL`, such as `dev`. Without it nobody can sign in: the App answers `binding_missing`. |
+| The `Origin` and `Sec-Fetch-*` headers (v1.2.2 or later) | Passed unchanged. The module names refuse a sign-in whose `Origin` is not stgiss, so a changed header stops every sign-in. |
 | Redirects (3xx) | Not cached |
 | Read and write timeouts to this server | 720 seconds or more, for long reports and imports |
 | Upload size | 128 MB or more |
