@@ -760,9 +760,11 @@ restore. After that point, fix forward.
 
 After the module upgrade, every mail that waits in the mail queue (state
 Outgoing) is held: the mail that the upgrade queued, and the mail that waited
-in the queue before it. Mail in another state stays as it is. Review the held
-mail (step 13 below lists it without the web page; in Odoo it is in Settings >
-Technical > Emails, with the status Delivery Failed), then send it:
+in the queue before it. Mail in another state stays as it is. The mail that
+the upgrade to v1.2.1 held, when its `--release-queued-mail` did not run,
+stays held with it. Review the held mail (step 13 below lists it without the
+web page; in Odoo it is in Settings > Technical > Emails, with the status
+Delivery Failed), then send it:
 
 ```bash
 sudo bash deploy-app.sh --release-queued-mail
@@ -831,6 +833,15 @@ name `perodua`: if yours are others, use them in their place.
   Odoo does not send this mail until the owner releases it. The count can
   change until the App stops in step 12, because the old release works on
   its mail queue while it runs.
+
+  The mail that the upgrade to v1.2.1 held is still held when its
+  `--release-queued-mail` did not run (v1.2.1 has no outgoing email). The
+  upgrade keeps it held, and step 13 sends it with the mail of this upgrade.
+  This counts it:
+
+  ```bash
+  sudo -u postgres psql -X -At -d perodua -c "SELECT count(*) FROM mail_mail WHERE state = 'exception' AND failure_reason LIKE 'Held by deploy-app.sh%' AND id IN (SELECT json_array_elements_text(value::json->'held_mail')::bigint FROM ir_config_parameter WHERE key = 'perodua.kit_upgrade')"
+  ```
 - **The way back is the backup.** After the upgrade, the release that ran
   before cannot run on the database. See "The way back" at the end.
 - **The lock table of the DB server.** The way back restores the database in
@@ -1077,7 +1088,8 @@ of v1.2.1. These steps make sure that they are still correct.
 
     - the mail that the module upgrade queued;
     - the mail that waited in the mail queue before the upgrade (state
-      Outgoing).
+      Outgoing), and the mail that the upgrade to v1.2.1 held and that was
+      still held.
 
     When the two numbers are 0, this step is done. If not, the mail is held:
     Odoo does not send it. This lists it, on the DB server (with one server,

@@ -979,7 +979,8 @@ cat > "$TEMP_DIR/preflight.py" <<'PY'
 #                        refusal (also of mark-upgrading)
 #   retired-export       the rows the upgrade deletes, as CSV in a tar.gz
 #   mark-upgrading FROM OLD NEW
-#                        saves the cron flags and the last mail id, and sets
+#                        saves the cron flags and the last mail id, keeps the
+#                        mail an earlier module upgrade still holds, and sets
 #                        perodua.image_modhash to 'upgrading:FROM'. Neither the
 #                        old release's check nor this one's accepts that.
 #   verify-upgrade       after -u: puts the cron flags back (a mock intake pull
@@ -1129,6 +1130,25 @@ def held_counts(record):
     # one that mark-upgrading saved) and the mail that waited before it.
     queued = sum(1 for mail in record['held_mail'] if mail > record['mail_max_id'])
     return queued, len(record['held_mail']) - queued
+def earlier_hold(cur):
+    # The rows that the hold of an earlier module upgrade lists and that are
+    # still held, or None when its record does not list the held rows.
+    cur.execute('SELECT value FROM ir_config_parameter WHERE key = %s', (KIT_PARAM,))
+    row = cur.fetchone()
+    if row is None:
+        return []
+    try:
+        held = json.loads(row[0])['held_mail']
+    except (ValueError, KeyError, TypeError):
+        return None
+    if not isinstance(held, list) or not all(type(mail) is int for mail in held):
+        return None
+    if not held or not table_exists(cur, 'mail_mail'):
+        return []
+    where, values = in_list('id', held)
+    cur.execute("SELECT id FROM mail_mail WHERE state = 'exception' AND failure_reason = %s AND " + where + ' ORDER BY id',
+                (HOLD_REASON,) + values)
+    return [row[0] for row in cur.fetchall()]
 def system_mode(params, system):
     # perodua.connector.mixin._resolve_mode, from the parameters alone.
     for key in ('perodua_integration.mode.' + system, 'perodua_integration.mode'):
@@ -1209,6 +1229,9 @@ def module_upgrade_problems(cur, modules, installed, uat, excluded_rows):
         if other:
             problems.append('%s.%s names a deleted record, and record %s of %s has its code %s: the upgrade would create it again and stop on the unique code'
                             % (module, name, other[0], table, code))
+    if earlier_hold(cur) is None:
+        problems.append(KIT_PARAM + ', the record of an earlier module upgrade, does not list the mail that it held (held_mail):'
+                        ' this upgrade cannot keep that mail held for deploy-app.sh --release-queued-mail')
     return problems
 # The way back, restore.txt step 3, restores the backup in one transaction. Up
 # to its commit it keeps a lock on each relation that it creates or reads and,
@@ -1388,7 +1411,8 @@ def retired_export(cur):
         add(archive, 'attachments.csv', [d[0] for d in cur.description], cur.fetchall())
     sys.stdout.buffer.write(buffer.getvalue())
 def mark_upgrading(cn, cur, installed, fingerprint):
-    # Before -u: the cron flags, the last mail and the modules, then the mark.
+    # Before -u: the cron flags, the last mail, the modules and the mail that
+    # an earlier module upgrade still holds, then the mark.
     old_fingerprint, old_release, new_release = sys.argv[2:5]
     cur.execute('SELECT id, active FROM ir_cron ORDER BY id')
     crons = {str(cron): bool(active) for cron, active in cur.fetchall()}
@@ -1396,11 +1420,12 @@ def mark_upgrading(cn, cur, installed, fingerprint):
     if table_exists(cur, 'mail_mail'):
         cur.execute('SELECT max(id) FROM mail_mail')
         mail = cur.fetchone()[0] or 0
+    held = earlier_hold(cur)
     cur.execute("SELECT count(*) FROM res_users WHERE login = 'agent'")
     record = {'from_fingerprint': old_fingerprint, 'to_fingerprint': fingerprint, 'from_release': old_release,
               'to_release': new_release, 'marked_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
               'modules': upgrade_modules(installed, image_versions()), 'crons': crons, 'mail_max_id': mail,
-              'agent_login': cur.fetchone()[0] > 0, 'held_mail': [], 'released_mail': []}
+              'agent_login': cur.fetchone()[0] > 0, 'held_mail': held, 'released_mail': []}
     put(cur, KIT_PARAM, json.dumps(record, sort_keys=True))
     put(cur, 'perodua.image_modhash', UPGRADING + old_fingerprint)
     cn.commit()
@@ -1483,9 +1508,10 @@ def verify_upgrade(cn, cur, modules, stored, fingerprint):
     print('UPGRADE_VERIFIED %d %d' % (held_queued, held_before))
     sys.exit(0)
 def release_mail(cn, cur):
-    # Only the rows verify-upgrade held and that are still held: a row the
-    # owner deleted, cancelled or sent again since stays as it is. Two
-    # updates, so that each number is the count of the rows it changed.
+    # Only the rows verify-upgrade held (with those of an earlier hold that
+    # the mark kept) and that are still held: a row the owner deleted,
+    # cancelled or sent again since stays as it is. Two updates, so that each
+    # number is the count of the rows it changed.
     record = kit_record(cur)
     held = (record or {}).get('held_mail') or []
     released = [0, 0]
@@ -1929,6 +1955,8 @@ The module upgrade of database $DB_NAME on $DB_HOST, from $OLD_RELEASE to $RELEA
   3. Upgrade the modules once (-u, no -i, cron jobs off). Then hold every mail
      of the mail queue: the mail the upgrade queues, and the mail that waits
      in the queue before it. Release it after review with --release-queued-mail.
+     The mail that an earlier module upgrade held stays held: the same command
+     releases it.
   4. Check the result, put the cron flags back, deploy $RELEASE.
 Point of no return: once users write data with $RELEASE, going back to the
 backup loses that data. After that point, fix forward.

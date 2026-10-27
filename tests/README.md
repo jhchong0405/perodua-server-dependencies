@@ -354,9 +354,15 @@ held: not a held row that was cancelled or deleted since, and not a row with
 the same reason that this upgrade did not hold), a second `verify-upgrade` on
 the same database (after a first one that held the mail and refused the
 result: the held rows and the counts stay the same, and a row that entered
-the queue in between is counted once), the refusals of `verify-upgrade`
-(which still writes the cron flags and the hold), and the CSV files of
-`retired-export`.
+the queue in between is counted once), the mail that an earlier module
+upgrade still holds (the mark keeps the rows of its record that are still
+held, not those cancelled, deleted or sent since; they count with the mail
+that waited before the upgrade, and one release sends them with the mail of
+this upgrade; no record, or a record whose hold was released, adds none; a
+record that does not list its held mail as ids refuses `upgrade-check`, and
+`mark-upgrading` with exit 3 and nothing written), the refusals of
+`verify-upgrade` (which still writes the cron flags and the hold), and the
+CSV files of `retired-export`.
 
 The lock check of the way back: `upgrade-check` prints `RESTORE_LOCKS` before
 `READY` and before `MODULES`. With SQLite the lock table comes from

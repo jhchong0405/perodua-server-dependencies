@@ -290,7 +290,9 @@ class ModuleUpgradeTests(ModuleUpgradeFixture, unittest.TestCase):
                        'perodua_custom is installed but is not a module of this release',
                        'perodua_client_stable.hosts names the workspace codes xx; this release knows only rp, sp, cp',
                        'neither perodua_demo.seed_mode nor a <module>.sample_data parameter is set, so nothing keeps the sample data of the new release out',
-                       'perodua_master_data.holiday_type_public names a deleted record, and record 4 of perodua_holiday_type has its code PUBLIC'):
+                       'perodua_master_data.holiday_type_public names a deleted record, and record 4 of perodua_holiday_type has its code PUBLIC',
+                       'perodua.kit_upgrade, the record of an earlier module upgrade, does not list the mail that it held (held_mail):'
+                       ' this upgrade cannot keep that mail held for deploy-app.sh --release-queued-mail'):
             with self.subTest(reason=reason):
                 self.log.unlink(missing_ok=True)
                 result = self.upgrade(refuse=reason + '|perodua_e2e is installed')

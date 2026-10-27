@@ -972,6 +972,7 @@ upgrade-check`) of the new image lists every problem it finds:
 | The host table | `perodua_client_stable.hosts` is not a host table, or names workspace codes other than `rp`, `sp` and `cp`. |
 | No sample data | Neither `perodua_demo.seed_mode` nor a `MODULE.sample_data` parameter is set; `perodua_demo.seed_mode` is not `none`; a `MODULE.sample_data` is not `none`; or `perodua_demo.seeded` is set. |
 | Reference codes | The XML ID of a shipped holiday type, order cycle or customer category still exists, its record was deleted, and another record has its code. The upgrade would create the record again and stop on the unique code. (A user's record with the code and no XML ID is adopted by the new release.) |
+| The mail of an earlier hold | `perodua.kit_upgrade`, the record of an earlier module upgrade (to v1.2.1), does not list the mail that it held (`held_mail`, a list of `mail_mail` ids). The upgrade could not keep that mail held for `--release-queued-mail` (see "The held mail" below). |
 | Retired data | The retired modules left data (below), and `--drop-retired-data` is not given. The second count, with the App stopped, also finds the data that users wrote after the first check. |
 | The lock table of the way back | The locks that step 3 of `restore.txt` takes, plus a margin of 1,000, do not fit in `max_locks_per_transaction` x (`max_connections` + `max_prepared_transactions`) of the DB server. See [The lock table of the way back](#the-lock-table-of-the-way-back). |
 | The modules of the upgrade | `uat_guard.py guard`, with the modules that `-u` upgrades, finds that one of them needs `perodua_demo_client`. |
@@ -1020,10 +1021,14 @@ the App stopped, and the rows are saved as CSV in
 6. `mark-upgrading`: check the database once more (the problems of
    `upgrade-check`). A refusal exits with code 3 and writes nothing: the old
    App starts again, and the backup stays. Then save the cron flags, the last
-   `mail_mail` id and the modules in `perodua.kit_upgrade`, and set
-   `perodua.image_modhash` to `upgrading:FINGERPRINT`. The database check of
-   every release refuses this value: `service.sh start` of the old release
-   (v1.2.1) stops with "the database check failed".
+   `mail_mail` id, the modules and the held mail of the earlier module
+   upgrade in `perodua.kit_upgrade`, and set `perodua.image_modhash` to
+   `upgrading:FINGERPRINT`. The held mail of the earlier module upgrade is
+   the rows that its record lists (`held_mail`) and that are still held
+   (state `exception` with the reason of the hold): the record of this
+   upgrade replaces that record and starts with these rows. The database
+   check of every release refuses the mark: `service.sh start` of the old
+   release (v1.2.1) stops with "the database check failed".
 7. **Remove the containers of the old release** (`docker compose rm --stop
    --force odoo web` with the directory's own `compose.yml`; the file and the
    images stay). Its `restart: unless-stopped` can no longer start it. A
@@ -1058,9 +1063,11 @@ the App stopped, and the rows are saved as CSV in
      state (`sent`, `cancel`,
      `exception` with another reason) is not changed. The output gives the
      two counts, and `perodua.kit_upgrade` keeps the ids of the held rows
-     (`held_mail`) next to the saved id (`mail_max_id`). A second run of
-     `verify-upgrade` on the same database finds no row in state `outgoing`:
-     it changes no held row and prints the same counts;
+     (`held_mail`, with those of the earlier hold that step 6 kept) next to
+     the saved id (`mail_max_id`). The held mail of the earlier module
+     upgrade counts with the mail that waited before the upgrade. A second
+     run of `verify-upgrade` on the same database finds no row in state
+     `outgoing`: it changes no held row and prints the same counts;
    - **checks:** no module is in a `to ...` state; the retired modules and
      `perodua_demo_client`, `perodua_reporting` and `perodua_e2e` are not
      installed; every installed `perodua_*` module has the version of the new
@@ -1102,6 +1109,15 @@ upgrade stops after the mark (step 6) and before the end of step 9, the
 database keeps the mark, and neither `deploy-app.sh` nor `service.sh` starts
 a release on it.
 
+**The held mail of the earlier module upgrade.** The upgrade to v1.2.1 held
+mail in the same way. When its `--release-queued-mail` did not run, that mail
+is still held: v1.2.1 has no outgoing email, so the mail can wait for v1.2.2.
+Step 6 keeps it in the record of this upgrade, and the release below sends it
+with the mail of this upgrade: one review, one command. A row of that hold
+that was deleted, cancelled or sent since is not kept. When the earlier record
+does not list its held mail, the upgrade is refused before anything changes
+(the table above).
+
 Step 13 of [Upgrade an App server to v1.2.2](../README.md#upgrade-an-app-server-to-v122)
 lists the held mail with `psql`, and tells which mail the upgrade queued and
 which mail waited before it. In Odoo the mail is in Settings > Technical >
@@ -1113,10 +1129,11 @@ review, send it:
 sudo bash deploy-app.sh --release-queued-mail --dir DIR    # from the new scripts folder
 ```
 
-It sets the held rows back to `outgoing`, only those that the upgrade held and
-that are still held (a row deleted or changed since stays as it is), and only
-after the deployment finished (`READY`). It prints the two counts. It does not
-pull, stop or start anything.
+It sets the held rows back to `outgoing`, only those that the upgrade held
+(with the earlier hold that it kept) and that are still held (a row deleted
+or changed since stays as it is), and only after the deployment finished
+(`READY`). It prints the two counts. It does not pull, stop or start
+anything.
 
 The hold is a state of the mail, not a lock. After the start, a user can
 queue a held mail again in Odoo (Retry on the mail). v1.2.2 also shows the
