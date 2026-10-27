@@ -93,12 +93,12 @@ def module_db(cmd):
         with open(os.environ['FAKE_DB'], 'w') as f:
             json.dump(db, f)
     state = db['modhash']
-    if mode in ('check', 'upgrade-check') and not (STAGED or deployed_preflight_is_new()):
-        # The preflight.py of v1.0.5 to v1.0.8: READY for its own modules only.
-        if state == 'from': reply('READY 3')
-        reply(code=1, err='Database preflight: database module fingerprint does not match this release; upgrades require a separate plan')
     if state == 'upgrading' and mode != 'verify-upgrade':
         reply(code=1, err='Database preflight: database is marked by a module upgrade that did not finish (perodua.image_modhash upgrading:fixture): no release can run on it.')
+    if mode in ('check', 'upgrade-check') and not (STAGED or deployed_preflight_is_new()):
+        # The preflight.py of v1.2.1: READY for its own modules only.
+        if state == 'from': reply('READY 3')
+        reply(code=1, err='Database preflight: database module fingerprint does not match this release; upgrades require a separate plan')
     if mode == 'upgrade-check':
         # The second check of a run (with the App stopped) answers from the
         # FAKE_*_AGAIN values when they are set: what users changed in between.
@@ -367,7 +367,7 @@ class UpgradeTests(UpgradeHarness, unittest.TestCase):
 
     def test_a_module_fingerprint_mismatch_is_refused_before_the_app_stops(self):
         result = self.run_script(check='', check_err=FINGERPRINT)
-        self.assert_nothing_changed(result, 'It upgrades modules (-u) only from the modules of v1.0.3 to v1.0.8')
+        self.assert_nothing_changed(result, 'It upgrades modules (-u) only from the modules of v1.2.1')
         self.assertIn(FINGERPRINT, result.stdout)
         # The new release's image checks the database; the App keeps running.
         self.assertEqual(self.step_names(), ['pull', 'pull', 'staged preflight upgrade-check'])

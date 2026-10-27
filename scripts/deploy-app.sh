@@ -40,12 +40,12 @@ EXCLUDED_MODULE=perodua_demo_client
 RESTORED_MODULES=perodua_client_stable,perodua_demo_client,perodua_gateway,perodua_forecast_workbook,perodua_supplier_execution,perodua_uiux_api
 # --upgrade to a release whose Odoo modules differ from the database's runs a
 # module upgrade (-u) only on a database stamped with this module fingerprint
-# (v1.0.3 to v1.0.8 have the same modules), and only in a deployment directory
-# of one of these releases. Any other fingerprint is refused before anything
+# (the modules of v1.2.1), and only in a deployment directory of a release that
+# OLD_RELEASES_ACCEPTED names. Any other fingerprint is refused before anything
 # changes. While the pinned image has this fingerprint itself, every --upgrade
 # keeps the modules and runs no -u.
-MODULE_UPGRADE_FROM=3b62a97697d2974ef37328de7f3d034d
-OLD_RELEASES_ACCEPTED=client-stable-uiux-v1.0.5,client-stable-uiux-v1.0.6,client-stable-uiux-v1.0.7,client-stable-uiux-v1.0.8
+MODULE_UPGRADE_FROM=d7335a5c60803bc8be0f227d80c21639
+OLD_RELEASES_ACCEPTED=client-stable-uiux-v1.2.1
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 DEPLOY_DIR=/opt/perodua-app
 CONFIG='' NON_INTERACTIVE=0 INIT_DB=0 CHECK_ONLY=0 TEMP_DIR='' AUTH_DIR='' STARTED=0
@@ -117,13 +117,13 @@ App, saves the database (pg_dump -Fc) and the attachments in --dir/backups/ (or
 --backup-dir), then deploys this release. If anything fails before that, the
 directory and its App stay as they were. With the same Odoo modules no module
 upgrade (-u) runs. With other modules it runs one only from the modules of
-v1.0.3 to v1.0.8 and a directory of v1.0.5 to v1.0.8: after the backup it
-removes the old App's containers (from then on the backup is the only way
-back), upgrades the modules once, checks the result, holds every mail of the
-mail queue (the mail the upgrade queued and the mail that waited before it)
-and puts the cron flags back. It asks to type the database name, or takes
---confirm DATABASE. --drop-retired-data agrees to delete the data of retired
-modules; it is saved as CSV in the backup folder first.
+v1.2.1 and a directory of v1.2.1: after the backup it removes the old App's
+containers (from then on the backup is the only way back), upgrades the
+modules once, checks the result, holds every mail of the mail queue (the mail
+the upgrade queued and the mail that waited before it) and puts the cron flags
+back. It asks to type the database name, or takes --confirm DATABASE.
+--drop-retired-data agrees to delete the data of retired modules; it is saved
+as CSV in the backup folder first.
 --release-queued-mail queues the held mail again, after its review.
 HTTP only: default 0.0.0.0:8110. Odoo ports are private to the Compose network.
 Optional keys, read only from --config or app.env: PUBLIC_ROOT (such as /dev,
@@ -1765,7 +1765,7 @@ upgrade_check_database() {
             </dev/null 2> "$TEMP_DIR/check.log"); then
         cat "$TEMP_DIR/check.log" >&2
         if grep -q 'module fingerprint does not match' "$TEMP_DIR/check.log"; then
-            fail "$RELEASE has other Odoo modules than the release that set up database $DB_NAME. It upgrades modules (-u) only from the modules of v1.0.3 to v1.0.8 (fingerprint $MODULE_UPGRADE_FROM)"
+            fail "$RELEASE has other Odoo modules than the release that set up database $DB_NAME. It upgrades modules (-u) only from the modules of v1.2.1 (fingerprint $MODULE_UPGRADE_FROM)"
         fi
         if grep -q 'marked by a module upgrade that did not finish' "$TEMP_DIR/check.log"; then
             DB_MARKED=1

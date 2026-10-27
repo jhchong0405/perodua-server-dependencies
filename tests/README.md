@@ -254,7 +254,7 @@ directory's own, or the staged one of the new release) and the release that
   directory there again, with a second backup.
 
 `test_deploy_app_module_upgrade.py` runs `deploy-app.sh --upgrade` with a module
-upgrade (`-u`) against the same fake Docker, in a directory of v1.0.6. The fake
+upgrade (`-u`) against the same fake Docker, in a directory of v1.2.1. The fake
 keeps the database's module fingerprint in a file (`from`, `upgrading`,
 `upgraded`, `new`) and answers each preflight mode as the real one does; the
 directory's `preflight.py` is the old release's until the switch, and accepts
@@ -281,8 +281,8 @@ only `from`. It checks:
   quotes are those of the script. An answer of `verify-upgrade` or
   `release-mail` without the two numbers is refused. `restore.txt` names
   the module upgrade and the point of no return;
-- each accepted old release (v1.0.5 to v1.0.8) goes
-  through; v1.0.4, another fingerprint, every refusal of `upgrade-check` (the
+- the accepted old release (v1.2.1) goes
+  through; v1.0.8, v1.2.0, another fingerprint, every refusal of `upgrade-check` (the
   lock table of the way back included), a lock count that cannot be read,
   retired data without `--drop-retired-data`, a refusal of the guard and a
   missing or wrong confirmation stop before the App stops, and nothing changes;
@@ -323,17 +323,16 @@ only `from`. It checks:
 - `--release-queued-mail` runs only `preflight.py release-mail` with the
   directory's compose file, and only from the folder of the release the
   directory runs; it prints the two numbers of the released mail;
-- as root on Linux: the `service.sh` of v1.0.5 to v1.0.8
-  (`fixtures/service-v1.0.5-v1.0.8.sh`, pinned by its sha256) refuses `start`
+- as root on Linux: the `service.sh` of v1.2.1
+  (`fixtures/service-v1.2.1.sh`, pinned by its sha256) refuses `start`
   and `restart` on a marked database, before and after the switch, without
-  `up` and without its advice to reset. The `service.sh` of this kit differs
-  from it only in `db_start` (its readiness probe runs as the OS user
-  `postgres`), and `reset_database.py` is pinned by its sha256: `restore.txt`
+  `up` and without its advice to reset. The `service.sh` of this kit is the
+  same file, and `reset_database.py` is pinned by its sha256: `restore.txt`
   says that both do the same in the folders of the old and the new release.
 
 `test_preflight_module_upgrade.py` runs the exact `preflight.py` that
-`deploy-app.sh` writes, and the one of v1.0.5 to v1.0.8
-(`fixtures/preflight-v1.0.5-v1.0.8.py`, identical in kit 4198af8 to 8867545),
+`deploy-app.sh` writes, and the one of v1.2.1
+(`fixtures/preflight-v1.2.1.py`, identical in kit 7045544 and 07af48b),
 against a database: SQLite behind a small stand-in for `psycopg2` by default,
 or real PostgreSQL 16 with `PREFLIGHT_TEST_PG='HOST PORT USER PASSWORD DATABASE'`
 (the user owns the database; each test drops and creates its `public` schema).

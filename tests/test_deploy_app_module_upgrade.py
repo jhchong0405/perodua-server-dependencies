@@ -2,12 +2,12 @@
 test_deploy_app_upgrade.py.
 
 The fake keeps the database of the upgrade as a JSON file (FAKE_DB): its module
-fingerprint is 'from' (the modules of v1.0.3 to v1.0.8), 'upgrading' (marked
-before -u), 'upgraded' (checked after -u) or 'new' (stamped). Each preflight
-mode answers as the real one does for that state; the real modes run against a
-database in test_preflight_module_upgrade.py. The directory's preflight.py is
-the fixture of the old release until the switch: as the real one of v1.0.5 to
-v1.0.8, it accepts only the 'from' state. These tests pin the order of the
+fingerprint is 'from' (the modules of v1.2.1), 'upgrading' (marked before -u),
+'upgraded' (checked after -u) or 'new' (stamped). Each preflight mode answers
+as the real one does for that state; the real modes run against a database in
+test_preflight_module_upgrade.py. The directory's preflight.py is the fixture
+of the old release until the switch: as the real one of v1.2.1, it accepts only
+the 'from' state. These tests pin the order of the
 steps, every refusal before the App stops, the second check with the App
 stopped and the refused mark (both start the old App again), that nothing
 starts the old App once the database may carry the mark, the mail hold, and
@@ -32,14 +32,13 @@ TEXT = SCRIPT.read_text(encoding='utf-8')
 README = (SCRIPTS.parent / 'README.md').read_text(encoding='utf-8')
 MODULE_UPGRADE_FROM = re.search(r'^MODULE_UPGRADE_FROM=([0-9a-f]{32})$', TEXT, re.M).group(1)
 ACCEPTED = re.search(r'^OLD_RELEASES_ACCEPTED=(\S+)$', TEXT, re.M).group(1).split(',')
-OLD = 'client-stable-uiux-v1.0.6'
+OLD = 'client-stable-uiux-v1.2.1'
 OLD_REVISION = 'b' * 40
 CONTAINER = 'perodua-upgrade-fixture-module-upgrade'
-# service.sh of v1.0.5, v1.0.6, v1.0.7 and v1.0.8 (kit 4198af8 to 8867545),
-# byte for byte: what the old scripts folder runs after the mark. The
-# service.sh of this kit differs from it only in db_start.
-OLD_SERVICE = Path(__file__).resolve().parent / 'fixtures' / 'service-v1.0.5-v1.0.8.sh'
-OLD_SERVICE_SHA256 = 'b3c2533b5f2f7b78c6e2b2c036ce215dc8e306f56b96058ef8a4ddb13f1ce26c'
+# service.sh of v1.2.1 (kit 7045544 and 07af48b), byte for byte: what the old
+# scripts folder runs after the mark.
+OLD_SERVICE = Path(__file__).resolve().parent / 'fixtures' / 'service-v1.2.1.sh'
+OLD_SERVICE_SHA256 = '4d4407d7cfea6f1883ca7399253523a2bfdde15eef805311e5fad7a5e667506f'
 # reset_database.py of the same kit versions. restore.txt runs both in a
 # scripts folder of the old or the new release, and says that they are the same.
 OLD_RESET_SHA256 = 'c752cb12030caf3928c66475640fb8803983dd2815e3c10230691f7e340f05c4'
@@ -68,7 +67,7 @@ DEPLOY = ['preflight check --accept-pending', 'filestore check', 'stop web odoo'
 
 
 class ModuleUpgradeFixture(UpgradeHarness):
-    """A directory of v1.0.6 on a database with the modules of v1.0.3 to v1.0.8."""
+    """A directory of v1.2.1 on a database with the modules of v1.2.1."""
     def setUp(self):
         super().setUp()
         self.deployed(OLD, OLD_REVISION)
@@ -250,7 +249,7 @@ class ModuleUpgradeTests(ModuleUpgradeFixture, unittest.TestCase):
         self.assertIn(f'Then, from a scripts folder of {OLD}: sudo bash deploy-app.sh --dir {self.deploy_dir}', hint)
 
     def test_every_accepted_old_release(self):
-        self.assertEqual(ACCEPTED, [f'client-stable-uiux-v1.0.{n}' for n in (5, 6, 7, 8)])
+        self.assertEqual(ACCEPTED, ['client-stable-uiux-v1.2.1'])
         for old in ACCEPTED:
             if old == RELEASE:
                 continue  # the directory already runs it
@@ -264,18 +263,22 @@ class ModuleUpgradeTests(ModuleUpgradeFixture, unittest.TestCase):
 
     # ── refused before the App stops ────────────────────────────────────────
     def test_another_old_release_is_refused(self):
-        self.deployed('client-stable-uiux-v1.0.4', OLD_REVISION)
-        result = self.upgrade()
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn(f'{RELEASE} upgrades the Odoo modules only of a deployment of {", ".join(ACCEPTED)}, '
-                      f'and {self.deploy_dir} runs client-stable-uiux-v1.0.4', result.stdout)
-        self.assertNotIn('stop web odoo', self.names())
-        self.assertEqual(self.backups(), [])
+        # v1.0.8 was a start of the module upgrade of v1.2.1, and v1.2.0 never was.
+        for old in ('client-stable-uiux-v1.0.8', 'client-stable-uiux-v1.2.0'):
+            with self.subTest(old=old):
+                self.deployed(old, OLD_REVISION)
+                self.log.unlink(missing_ok=True)
+                result = self.upgrade()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(f'{RELEASE} upgrades the Odoo modules only of a deployment of {", ".join(ACCEPTED)}, '
+                              f'and {self.deploy_dir} runs {old}', result.stdout)
+                self.assertNotIn('stop web odoo', self.names())
+                self.assertEqual(self.backups(), [])
 
     def test_another_fingerprint_is_refused(self):
         result = self.upgrade(other_fingerprint=1)
         self.assert_refused_before_the_stop(
-            result, f'It upgrades modules (-u) only from the modules of v1.0.3 to v1.0.8 (fingerprint {MODULE_UPGRADE_FROM})')
+            result, f'It upgrades modules (-u) only from the modules of v1.2.1 (fingerprint {MODULE_UPGRADE_FROM})')
         self.assertEqual(self.names(), ['pull', 'pull', 'staged preflight upgrade-check'])
 
     def test_each_refusal_of_the_database_check(self):
@@ -678,7 +681,7 @@ class ModuleUpgradeTests(ModuleUpgradeFixture, unittest.TestCase):
 @unittest.skipUnless(hasattr(os, 'geteuid') and os.geteuid() == 0 and Path('/proc/self/fd').is_dir(),
                      'service.sh needs root on Linux (the test image)')
 class OldServiceShTests(ModuleUpgradeFixture, unittest.TestCase):
-    """service.sh of v1.0.5 to v1.0.8 never starts the App after the mark."""
+    """service.sh of v1.2.1 never starts the App after the mark."""
 
     def service(self, action):
         return subprocess.run(['bash', str(OLD_SERVICE), '--role', 'app', '--dir', str(self.deploy_dir), action],
@@ -700,12 +703,8 @@ class OldServiceShTests(ModuleUpgradeFixture, unittest.TestCase):
         import hashlib
         self.assertEqual(hashlib.sha256(OLD_SERVICE.read_bytes()).hexdigest(), OLD_SERVICE_SHA256)
         self.assertEqual(hashlib.sha256((SCRIPTS / 'reset_database.py').read_bytes()).hexdigest(), OLD_RESET_SHA256)
-        # Only the readiness probe of db_start runs as the OS user postgres.
-        def without_db_start(text):
-            return re.sub(r'\ndb_start\(\) \{\n.*?\n\}\n', '\n', text, count=1, flags=re.S)
-        new, old = (SCRIPTS / 'service.sh').read_text(), OLD_SERVICE.read_text()
-        self.assertNotEqual(new, old)
-        self.assertEqual(without_db_start(new), without_db_start(old))
+        # The service.sh of this kit is the one of v1.2.1.
+        self.assertEqual((SCRIPTS / 'service.sh').read_text(), OLD_SERVICE.read_text())
 
     def test_old_service_sh_refuses_a_marked_database(self):
         # Before the switch: the directory's own preflight.py is the old one.

@@ -12,9 +12,9 @@ the script's SQL keeps to what both understand. With
 the same tests run against that PostgreSQL 16 database with the real psycopg2;
 USER must own DATABASE, whose public schema each test drops and creates again.
 
-The preflight.py of v1.0.5 to v1.0.8 (tests/fixtures, identical in the four
-kit versions 4198af8 to 8867545) runs against the same database to show that
-the old release refuses it from the mark on.
+The preflight.py of v1.2.1 (tests/fixtures, identical in the kit versions
+7045544 and 07af48b) runs against the same database to show that the old
+release refuses it from the mark on.
 
 The lock check of the way back (RESTORE_LOCKS): with SQLite the lock table of
 the server comes from FAKE_PG_LOCK_TABLE, so both answers are tested. On
@@ -41,7 +41,7 @@ import unittest
 TESTS = Path(__file__).resolve().parent
 SCRIPT = (TESTS.parent / 'scripts' / 'deploy-app.sh').read_text(encoding='utf-8')
 NEW = SCRIPT.split('cat > "$TEMP_DIR/preflight.py" <<\'PY\'\n', 1)[1].split('\nPY\n', 1)[0] + '\n'
-OLD = (TESTS / 'fixtures' / 'preflight-v1.0.5-v1.0.8.py').read_text(encoding='utf-8')
+OLD = (TESTS / 'fixtures' / 'preflight-v1.2.1.py').read_text(encoding='utf-8')
 INIT = ['perodua_client_stable', 'perodua_gateway', 'perodua_forecast_workbook', 'perodua_supplier_execution',
         'perodua_uiux_api']
 EXCLUDED = 'perodua_demo_client'
@@ -614,7 +614,7 @@ class PreflightModuleUpgradeTests(unittest.TestCase):
 
     # ── the mark ────────────────────────────────────────────────────────────
     def test_from_the_mark_on_neither_release_accepts_the_database(self):
-        self.assertEqual(self.run_preflight('check', script='old'), 'READY 1')  # v1.0.6 before
+        self.assertEqual(self.run_preflight('check', script='old'), 'READY 1')  # the old release before
         self.sql("INSERT INTO ir_cron (id, active) VALUES (1, %s), (2, %s)", (True, False))
         self.sql("INSERT INTO mail_mail (id, state) VALUES (40, 'sent')")
         self.mark()
@@ -624,8 +624,8 @@ class PreflightModuleUpgradeTests(unittest.TestCase):
         self.assertEqual(record['modules'], sorted(INIT + ['perodua_demo', 'perodua_ui']))
         self.assertEqual((record['from_release'], record['to_release'], record['to_fingerprint']),
                          ('client-stable-uiux-v1.0.6', 'client-stable-uiux-v1.2.0', self.new_fp))
-        # service.sh and deploy-app.sh of v1.0.5 to v1.0.8 run this check.
-        self.assertIn('database module fingerprint does not match this release', self.run_preflight('check', script='old', ok=False))
+        # service.sh and deploy-app.sh of v1.2.1 run this check.
+        self.assertIn('marked by a module upgrade that did not finish', self.run_preflight('check', script='old', ok=False))
         for args in (('check',), ('check', '--accept-pending'), ('upgrade-check', self.from_fp), ('public-urls', ''),
                      ('stamp-upgrade',), ('release-mail',),
                      ('mark-upgrading', self.from_fp, 'client-stable-uiux-v1.0.6', 'client-stable-uiux-v1.2.0')):
@@ -634,7 +634,7 @@ class PreflightModuleUpgradeTests(unittest.TestCase):
         # a partly run -u leaves modules to upgrade or remove: the same answer
         self.module('perodua_hw_sim', state='to remove')
         self.assertIn('marked by a module upgrade that did not finish', self.run_preflight('check', ok=False))
-        self.assertIn('database contains pending module changes', self.run_preflight('check', script='old', ok=False))
+        self.assertIn('marked by a module upgrade that did not finish', self.run_preflight('check', script='old', ok=False))
 
     def test_a_refused_mark_exits_3_and_writes_nothing(self):
         # What changed while the old App ran: the refusal exits 3 before any
