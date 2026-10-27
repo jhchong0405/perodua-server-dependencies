@@ -943,9 +943,11 @@ The pinned release, v1.2.2, has other modules than v1.2.1. After the upgrade,
 `perodua.image_modhash` holds the fingerprint of v1.2.2. No module upgrade
 starts from the fingerprint of v1.0.3 to v1.0.8
 (`3b62a97697d2974ef37328de7f3d034d`) or of v1.2.0
-(`c4b1b3383aa17134cdd42b3cee9dbf55`): such a server first moves to v1.2.1 with
-the kit of v1.2.1 (the README:
-[From an earlier release](../README.md#from-an-earlier-release)).
+(`c4b1b3383aa17134cdd42b3cee9dbf55`). A server on v1.0.3 to v1.0.8 first
+moves to v1.2.1 with the kit of v1.2.1 (the README:
+[From an earlier release](../README.md#from-an-earlier-release)). v1.2.0 has
+no supported upgrade path: the kit of v1.2.1 upgrades only v1.0.5 to v1.0.8,
+and this kit only v1.2.1.
 
 **Point of no return.** After the backup, the upgrade marks the database and
 removes the containers of the old release. From then on the old release cannot
