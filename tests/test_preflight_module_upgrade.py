@@ -12,9 +12,9 @@ the script's SQL keeps to what both understand. With
 the same tests run against that PostgreSQL 16 database with the real psycopg2;
 USER must own DATABASE, whose public schema each test drops and creates again.
 
-The preflight.py of v1.0.5 to v1.0.8 (tests/fixtures, identical in the four
-kit versions 4198af8 to 8867545) runs against the same database to show that
-the old release refuses it from the mark on.
+The preflight.py of v1.2.1 (tests/fixtures, identical in the kit versions
+7045544 and 07af48b) runs against the same database to show that the old
+release refuses it from the mark on.
 
 The lock check of the way back (RESTORE_LOCKS): with SQLite the lock table of
 the server comes from FAKE_PG_LOCK_TABLE, so both answers are tested. On
@@ -41,7 +41,7 @@ import unittest
 TESTS = Path(__file__).resolve().parent
 SCRIPT = (TESTS.parent / 'scripts' / 'deploy-app.sh').read_text(encoding='utf-8')
 NEW = SCRIPT.split('cat > "$TEMP_DIR/preflight.py" <<\'PY\'\n', 1)[1].split('\nPY\n', 1)[0] + '\n'
-OLD = (TESTS / 'fixtures' / 'preflight-v1.0.5-v1.0.8.py').read_text(encoding='utf-8')
+OLD = (TESTS / 'fixtures' / 'preflight-v1.2.1.py').read_text(encoding='utf-8')
 INIT = ['perodua_client_stable', 'perodua_gateway', 'perodua_forecast_workbook', 'perodua_supplier_execution',
         'perodua_uiux_api']
 EXCLUDED = 'perodua_demo_client'
@@ -614,7 +614,7 @@ class PreflightModuleUpgradeTests(unittest.TestCase):
 
     # ── the mark ────────────────────────────────────────────────────────────
     def test_from_the_mark_on_neither_release_accepts_the_database(self):
-        self.assertEqual(self.run_preflight('check', script='old'), 'READY 1')  # v1.0.6 before
+        self.assertEqual(self.run_preflight('check', script='old'), 'READY 1')  # the old release before
         self.sql("INSERT INTO ir_cron (id, active) VALUES (1, %s), (2, %s)", (True, False))
         self.sql("INSERT INTO mail_mail (id, state) VALUES (40, 'sent')")
         self.mark()
@@ -624,8 +624,8 @@ class PreflightModuleUpgradeTests(unittest.TestCase):
         self.assertEqual(record['modules'], sorted(INIT + ['perodua_demo', 'perodua_ui']))
         self.assertEqual((record['from_release'], record['to_release'], record['to_fingerprint']),
                          ('client-stable-uiux-v1.0.6', 'client-stable-uiux-v1.2.0', self.new_fp))
-        # service.sh and deploy-app.sh of v1.0.5 to v1.0.8 run this check.
-        self.assertIn('database module fingerprint does not match this release', self.run_preflight('check', script='old', ok=False))
+        # service.sh and deploy-app.sh of v1.2.1 run this check.
+        self.assertIn('marked by a module upgrade that did not finish', self.run_preflight('check', script='old', ok=False))
         for args in (('check',), ('check', '--accept-pending'), ('upgrade-check', self.from_fp), ('public-urls', ''),
                      ('stamp-upgrade',), ('release-mail',),
                      ('mark-upgrading', self.from_fp, 'client-stable-uiux-v1.0.6', 'client-stable-uiux-v1.2.0')):
@@ -634,7 +634,7 @@ class PreflightModuleUpgradeTests(unittest.TestCase):
         # a partly run -u leaves modules to upgrade or remove: the same answer
         self.module('perodua_hw_sim', state='to remove')
         self.assertIn('marked by a module upgrade that did not finish', self.run_preflight('check', ok=False))
-        self.assertIn('database contains pending module changes', self.run_preflight('check', script='old', ok=False))
+        self.assertIn('marked by a module upgrade that did not finish', self.run_preflight('check', script='old', ok=False))
 
     def test_a_refused_mark_exits_3_and_writes_nothing(self):
         # What changed while the old App ran: the refusal exits 3 before any
@@ -845,6 +845,82 @@ class PreflightModuleUpgradeTests(unittest.TestCase):
         self.assertTrue(self.run_preflight('verify-upgrade').endswith('UPGRADE_VERIFIED 2 1'))
         self.assertEqual(self.kit()['held_mail'], [1, 2, 3])
         self.assertEqual(self.mail(), {mail: ('exception', HOLD, None) for mail in (1, 2, 3)})
+
+    def earlier_hold(self, held, released=()):
+        """The record of the module upgrade to v1.2.1, as its preflight.py writes it."""
+        self.param('perodua.kit_upgrade', json.dumps(
+            {'agent_login': False, 'crons': {}, 'from_fingerprint': 'e' * 32, 'from_release': 'client-stable-uiux-v1.0.8',
+             'held_mail': list(held), 'mail_max_id': 2, 'marked_at': '2026-10-14T02:00:00Z', 'modules': sorted(INIT),
+             'released_mail': list(released), 'to_fingerprint': self.from_fp, 'to_release': 'client-stable-uiux-v1.2.1'},
+            sort_keys=True))
+
+    def test_the_mail_an_earlier_upgrade_still_holds_is_released_with_this_hold(self):
+        # The upgrade to v1.2.1 held mail 1 to 4, and nothing released them.
+        # Since then the owner cancelled mail 2, deleted mail 3, and mail 4 was
+        # sent after a Retry: only mail 1 is still held. Mail 5 waits in the
+        # queue, mail 6 failed on its own.
+        self.sql("INSERT INTO mail_mail (id, state, failure_reason, email_to) VALUES "
+                 "(1, 'exception', %s, 'a@example.com'), (2, 'cancel', %s, 'b@example.com'), "
+                 "(4, 'sent', NULL, 'd@example.com'), (5, 'outgoing', NULL, 'e@example.com'), "
+                 "(6, 'exception', 'SMTP: connection refused', 'f@example.com')", (HOLD, HOLD))
+        self.earlier_hold([1, 2, 3, 4])
+        self.assertTrue(self.check().endswith('MODULE_UPGRADE 1'))
+        self.mark()
+        record = self.kit()
+        self.assertEqual((record['held_mail'], record['mail_max_id'], record['to_release']),
+                         ([1], 6, 'client-stable-uiux-v1.2.0'))
+        self.sql("INSERT INTO mail_mail (id, state, email_to) VALUES (7, 'outgoing', 'g@example.com')")
+        self.after_module_upgrade()
+        output = self.run_preflight('verify-upgrade')
+        # Mail 1 counts with the mail that waited before the upgrade.
+        self.assertIn('Mail held (state exception) until deploy-app.sh --release-queued-mail: '
+                      '1 that the upgrade queued, 2 that waited in the queue before it.', output)
+        self.assertTrue(output.endswith('UPGRADE_VERIFIED 1 2'), output)
+        self.assertEqual(self.kit()['held_mail'], [1, 5, 7])
+        self.assertEqual(self.run_preflight('stamp-upgrade'), 'READY 1')
+        self.assertEqual(self.run_preflight('release-mail'), 'RELEASED 1 2')
+        self.assertEqual(self.mail(), {1: ('outgoing', None, 'a@example.com'), 2: ('cancel', HOLD, 'b@example.com'),
+                                       4: ('sent', None, 'd@example.com'), 5: ('outgoing', None, 'e@example.com'),
+                                       6: ('exception', 'SMTP: connection refused', 'f@example.com'),
+                                       7: ('outgoing', None, 'g@example.com')})
+        self.assertEqual((self.kit()['held_mail'], self.kit()['released_mail']), ([], [1, 5, 7]))
+
+    def test_without_an_earlier_hold_the_mark_keeps_no_mail(self):
+        # No record: a database that --init-db set up. A released hold: the
+        # --release-queued-mail of v1.2.1 ran. Mail 4 has the reason of the
+        # hold, but no record lists it: it stays as it is.
+        for name, record in (('no record', None), ('a released hold', ([], [1, 2]))):
+            with self.subTest(name):
+                self.setUp()  # a fresh database and folder for each case
+                self.sql("INSERT INTO mail_mail (id, state, failure_reason) VALUES "
+                         "(1, 'sent', NULL), (2, 'sent', NULL), (3, 'outgoing', NULL), (4, 'exception', %s)", (HOLD,))
+                if record:
+                    self.earlier_hold(*record)
+                self.mark()
+                self.assertEqual(self.kit()['held_mail'], [])
+                self.after_module_upgrade()
+                self.assertTrue(self.run_preflight('verify-upgrade').endswith('UPGRADE_VERIFIED 0 1'))
+                self.assertEqual(self.run_preflight('stamp-upgrade'), 'READY 1')
+                self.assertEqual(self.run_preflight('release-mail'), 'RELEASED 0 1')
+                self.assertEqual(self.mail(), {1: ('sent', None, None), 2: ('sent', None, None),
+                                               3: ('outgoing', None, None), 4: ('exception', HOLD, None)})
+
+    def test_a_record_that_does_not_list_its_held_mail_is_refused(self):
+        # Without the list, the mark cannot keep that mail held: the module
+        # upgrade is refused before anything is written.
+        for name, value in (('not JSON', '{held'), ('no list', json.dumps({'mail_max_id': 2})),
+                            ('not a list', json.dumps({'held_mail': '1,2'})),
+                            ('not ids', json.dumps({'held_mail': [1, '2']})), ('a flag', json.dumps({'held_mail': [True]}))):
+            with self.subTest(name):
+                self.setUp()  # a fresh database and folder for each case
+                self.param('perodua.kit_upgrade', value)
+                self.assertIn('Database preflight: module upgrade refused: perodua.kit_upgrade, the record of an earlier '
+                              'module upgrade, does not list the mail that it held (held_mail)', self.check(ok=False))
+                result = self.process('mark-upgrading', self.from_fp, 'client-stable-uiux-v1.0.6', 'client-stable-uiux-v1.2.0')
+                self.assertEqual(result.returncode, 3, result.stderr)  # deploy-app.sh starts the old App again
+                self.assertEqual(result.stdout, '')
+                params = self.params()
+                self.assertEqual((params['perodua.image_modhash'], params['perodua.kit_upgrade']), (self.from_fp, value))
 
     def test_a_wrong_result_is_refused_and_keeps_the_mark(self):
         self.cron(1, False, 'perodua_integration.cron_consume_promise_feed')

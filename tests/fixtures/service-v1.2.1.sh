@@ -219,7 +219,9 @@ db_stop() {
 db_start() {
     local attempt=0
     online || pg_ctlcluster 16 "$CLUSTER" start
-    until "$PG_BIN/pg_isready" -q -h /var/run/postgresql -p "$PORT"; do
+    # As the OS user postgres (a peer login, as in connections()): as root,
+    # each probe left 'FATAL: role "root" does not exist' in the server log.
+    until runuser -u postgres -- "$PG_BIN/pg_isready" -q -h /var/run/postgresql -p "$PORT" -U postgres -d postgres; do
         ((++attempt < 30)) || die "PostgreSQL 16 ($CLUSTER) did not become ready; see /var/log/postgresql/postgresql-16-$CLUSTER.log"
         sleep 1
     done

@@ -66,32 +66,36 @@ REVIEWED_REFERENCES = (
     {
         'file': 'perodua_demo/hooks.pyc',
         'finding': "constant 'perodua_demo_client.loaded'",
-        'sha256': '853d3bd13a94f38d8b6f1c6390af24f04cdf74b18bdd71a6cf792681f0453777',
+        'sha256': 'e33ac1c570ca2838e76157cce108b00acf80932b309a52256dd0825c4d18b46c',
         'reason': (
-            'A system-parameter key, not an XML ID: one function reads it with SQL, a '
-            'missing row means "not loaded", and the value only words a log line and an '
-            'error text; no branch tests it. The surrounding code detects the '
-            'client_data column and handles the dataset being absent. post_init_hook '
-            'calls that function only when perodua_demo.seeded is set, and the function '
-            'returns before the read without it, so a fresh UAT initialization (no '
-            'sample data: the hook only configures the company) never reads the key. '
-            'Optional detection, not reliance. Reviewed against the pinned '
-            'client-stable-uiux-v1.2.1 image '
-            '(sha256:f8fdd18614a7a2d29c0aa622e74f3e3fa72a09f56698d6934e3798645c0e7d30), '
+            'A system-parameter key, not an XML ID: one function '
+            '(reconcile_fixture_identifiers) reads it with SQL, a missing row means '
+            '"not loaded", and the value only words a log line and an error text; no '
+            'branch tests it. The surrounding code detects the client_data column and '
+            'handles the dataset being absent. post_init_hook calls that function only '
+            'when perodua_demo.seeded is set, and the function returns before the read '
+            'without it, so a fresh UAT initialization (no sample data: the hook only '
+            'configures the company) never reads the key. The 19.0.1.12.0 migration of '
+            'perodua_demo also calls it; the module upgrade from v1.2.1 (perodua_demo '
+            '19.0.1.46.0) does not run that migration. Optional detection, not reliance. '
+            'Reviewed against the pinned client-stable-uiux-v1.2.2 image '
+            '(sha256:772500ec34d45c24cf9f66aa2bf26c3287d5c81ce8b8173f82ffed282d18bdfb), '
             'whose hooks.pyc is the compiled perodua_demo/hooks.py of revision '
-            '0d4d1aec10e7e6a54b03ca423be4348751d769ea. The source is the same as in '
-            'client-stable-uiux-v1.2.0 (hooks.pyc sha256 '
-            '2c6904080d91b0a72be46d5b8a6d4bca5893c6c30d9e1f757fec4c4884d78978): the two '
-            'files differ only in the source time in the .pyc header. The code that '
-            'uses this key is the same as in the file reviewed for '
-            'client-stable-uiux-v1.0.0 to v1.0.8 (sha256 '
+            'ecd966496435b9999da2624ba8cdc349bce3f852. The function that reads the key '
+            'and post_init_hook are the same as in client-stable-uiux-v1.2.1 (hooks.pyc '
+            'sha256 853d3bd13a94f38d8b6f1c6390af24f04cdf74b18bdd71a6cf792681f0453777); '
+            'the other changes of the file (such as the Perodua logo of the demo company, '
+            'which configure_company leaves out, and the warehouse addresses and part '
+            'prices of the sample data) do not use the key. The code that uses this '
+            'key is the same as in the file reviewed for client-stable-uiux-v1.0.0 to '
+            'v1.0.8 (sha256 '
             'db90973ddb2b77efd08746d109a5ce22c6043ee3be20effe2143537af53f7269), except '
             'one error text.'),
     },
     {
         'file': 'perodua_demo/supply_seed.pyc',
         'finding': "constant 'perodua_demo_client'",
-        'sha256': 'a15b9f326ccadf0c7a3574b5feec59e8a9198d7e7524969ba9412047a70a4fa1',
+        'sha256': '0ee305b0244e20230b8c068b4c05ff393e657a8c2c8197616e127e7e3624650d',
         'reason': (
             'A module name as a search value, not an import, an XML ID or a path: '
             'mvp_demo_parts() searches ir.model.data for the product rows of that '
@@ -103,14 +107,18 @@ REVIEWED_REFERENCES = (
             'perodua_demo.seeded is not set (the post_init_hook and the 19.0.1.50.0 and '
             '19.0.1.71.0 migrations of perodua_demo_profile, the gallery pass of '
             'perodua_demo_ui, the 19.0.1.7.0 and 19.0.1.8.0 migrations of '
-            'perodua_demo), except seed_all, which runs only with sample data. So '
-            'neither a fresh UAT initialization nor the module upgrade from v1.0.8 '
-            'reads the rows. Optional detection, not reliance. New in '
-            'client-stable-uiux-v1.2.1 (Test Outcome 10.05 R16). Reviewed against the '
-            'pinned client-stable-uiux-v1.2.1 image '
-            '(sha256:f8fdd18614a7a2d29c0aa622e74f3e3fa72a09f56698d6934e3798645c0e7d30), '
+            'perodua_demo), except seed_all, which runs only with sample data. No other '
+            'caller is new in v1.2.2, and the module upgrade from v1.2.1 '
+            '(perodua_demo_profile 19.0.1.71.0, perodua_demo 19.0.1.46.0) runs none of '
+            'these migrations. So neither a fresh UAT initialization nor the module '
+            'upgrade from v1.2.1 reads the rows. Optional detection, not reliance. '
+            'Reviewed against the pinned client-stable-uiux-v1.2.2 image '
+            '(sha256:772500ec34d45c24cf9f66aa2bf26c3287d5c81ce8b8173f82ffed282d18bdfb), '
             'whose supply_seed.pyc is the compiled perodua_demo/supply_seed.py of '
-            'revision 0d4d1aec10e7e6a54b03ca423be4348751d769ea.'),
+            'revision ecd966496435b9999da2624ba8cdc349bce3f852. The source is the same '
+            'as in client-stable-uiux-v1.2.1 (supply_seed.pyc sha256 '
+            'a15b9f326ccadf0c7a3574b5feec59e8a9198d7e7524969ba9412047a70a4fa1): the two '
+            'files differ only in the source time in the .pyc header.'),
     },
 )
 

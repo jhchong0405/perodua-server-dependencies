@@ -460,14 +460,16 @@ class UatOrchestrationTests(unittest.TestCase):
     def test_outgoing_email_adds_no_step(self):
         # The mail settings reach Odoo through compose.yml, which every run
         # recreates the containers with: no preflight mode and no step is new.
+        # A release without the mail code says nothing about outgoing email.
+        self.script = release_copy(Path(self.temp.name) / 'no-mail', supported=True)
+        text = self.script.read_text(encoding='utf-8')
+        self.assertEqual(len(MAIL_LINE.findall(text)), 1)
+        self.script.write_text(MAIL_LINE.sub('MAIL_SUPPORTED=0', text), encoding='utf-8')
         result = self.run_script('READY 0')
         self.assertEqual(result.returncode, 0, result.stdout)
         steps = self.container_steps()
-        self.assertNotIn('Outgoing email', result.stdout)  # the pinned release has no mail code
-        self.script = release_copy(Path(self.temp.name) / 'mail', supported=True)
-        text = self.script.read_text(encoding='utf-8')
-        self.assertEqual(len(MAIL_LINE.findall(text)), 1)
-        self.script.write_text(MAIL_LINE.sub('MAIL_SUPPORTED=1', text), encoding='utf-8')
+        self.assertNotIn('Outgoing email', result.stdout)
+        self.script = SCRIPT  # the pinned release has the mail code
         smtp_password = Path(self.temp.name) / 'smtp-password'
         smtp_password.write_text('fake-app-password\n', encoding='utf-8')
         self.configure(SMTP_HOST='smtp.example.com', SMTP_USER='sender@example.com', SMTP_PASSWORD_FILE=str(smtp_password),

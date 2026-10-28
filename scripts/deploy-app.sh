@@ -5,30 +5,32 @@ set -Eeuo pipefail
 export LC_ALL=C
 umask 077
 
-RELEASE=client-stable-uiux-v1.2.1
-REVISION=0d4d1aec10e7e6a54b03ca423be4348751d769ea
+RELEASE=client-stable-uiux-v1.2.2
+REVISION=ecd966496435b9999da2624ba8cdc349bce3f852
 # Built by CI from REVISION and published to GHCR, then copied to the private
 # registry, registry to registry, with no new build: the digests are the ones
 # CI built. The Odoo image loads no sample data; both images name REVISION.
-ODOO_IMAGE=perodua-deploy.novutal.com/perodua-odoo:client-stable-uiux-v1.2.1@sha256:f8fdd18614a7a2d29c0aa622e74f3e3fa72a09f56698d6934e3798645c0e7d30
-WEB_IMAGE=perodua-deploy.novutal.com/perodua-odoo:client-stable-uiux-web-v1.2.1@sha256:b1b8c7d4a4d65342d974df7cfe2e38010446c3a1d630844bc606af3111091060
+ODOO_IMAGE=perodua-deploy.novutal.com/perodua-odoo:client-stable-uiux-v1.2.2@sha256:772500ec34d45c24cf9f66aa2bf26c3287d5c81ce8b8173f82ffed282d18bdfb
+WEB_IMAGE=perodua-deploy.novutal.com/perodua-odoo:client-stable-uiux-web-v1.2.2@sha256:477ec3df5878069319f029eb076f317aa3a8b2192b75550ec560f41c5b74619f
 REGISTRY=${ODOO_IMAGE%%/*}
 # Whether the pinned web image serves the page under PUBLIC_ROOT and shows
 # ENVIRONMENT_LABEL: yes from v1.0.4. The scripts folder of v1.0.3 has 0 here.
 PUBLIC_ROOT_SUPPORTED=1
 # Whether the pinned release signs the module host names (stgissrp, stgisssp,
-# stgisscp) in through the sign-in host with a one-time ticket: yes from
-# v1.0.5. Odoo switches it on only when PUBLIC_BASE_URL is https:// on the
-# sign-in host, so without that a run warns. The scripts folder of v1.0.4 has 0
-# here.
+# stgisscp) in through the sign-in host: yes from v1.0.5, with a one-time
+# ticket up to v1.2.1. From v1.2.2 the sign-in host is an OpenID Connect
+# provider for them and for WOM and TMS; the Odoo parameter
+# perodua_client_stable.module_signin is oidc (the default) or ticket, a way
+# back until after SIT (app issue #1658). Odoo switches it on only when
+# PUBLIC_BASE_URL is https:// on the sign-in host, so without that a run
+# warns. The scripts folder of v1.0.4 has 0 here.
 HANDOVER_SUPPORTED=1
 HANDOVER_HOST=stgiss.perodua.com.my
 # Whether the pinned Odoo image sends outgoing email with the SMTP settings of
 # app.env (SMTP_HOST and the other mail keys), each to the one test address
-# MAIL_REDIRECT_TO unless it is off: yes from v1.2.2. v1.2.1 has no mail code,
-# so a scripts folder that pins it refuses the mail settings, --mail and
-# --send-test-mail.
-MAIL_SUPPORTED=0
+# MAIL_REDIRECT_TO unless it is off: yes from v1.2.2. The scripts folder of
+# v1.2.1 has 0 here: it refuses the mail settings, --mail and --send-test-mail.
+MAIL_SUPPORTED=1
 # --init-db: a fresh UAT database, the release graph without the client
 # demonstration dataset. Before anything is written, uat_guard.py checks the
 # pinned image: nothing Odoo could install may depend on EXCLUDED_MODULE or
@@ -40,12 +42,12 @@ EXCLUDED_MODULE=perodua_demo_client
 RESTORED_MODULES=perodua_client_stable,perodua_demo_client,perodua_gateway,perodua_forecast_workbook,perodua_supplier_execution,perodua_uiux_api
 # --upgrade to a release whose Odoo modules differ from the database's runs a
 # module upgrade (-u) only on a database stamped with this module fingerprint
-# (v1.0.3 to v1.0.8 have the same modules), and only in a deployment directory
-# of one of these releases. Any other fingerprint is refused before anything
+# (the modules of v1.2.1), and only in a deployment directory of a release that
+# OLD_RELEASES_ACCEPTED names. Any other fingerprint is refused before anything
 # changes. While the pinned image has this fingerprint itself, every --upgrade
 # keeps the modules and runs no -u.
-MODULE_UPGRADE_FROM=3b62a97697d2974ef37328de7f3d034d
-OLD_RELEASES_ACCEPTED=client-stable-uiux-v1.0.5,client-stable-uiux-v1.0.6,client-stable-uiux-v1.0.7,client-stable-uiux-v1.0.8
+MODULE_UPGRADE_FROM=d7335a5c60803bc8be0f227d80c21639
+OLD_RELEASES_ACCEPTED=client-stable-uiux-v1.2.1
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 DEPLOY_DIR=/opt/perodua-app
 CONFIG='' NON_INTERACTIVE=0 INIT_DB=0 CHECK_ONLY=0 TEMP_DIR='' AUTH_DIR='' STARTED=0
@@ -92,7 +94,7 @@ Usage: bash deploy-app.sh [--config PATH] [--dir PATH] [--non-interactive] [--in
        bash deploy-app.sh --release-queued-mail [--dir PATH]
        bash deploy-app.sh --mail [--dir PATH] [--init-db]
        bash deploy-app.sh --send-test-mail ADDRESS [--dir PATH]
-Deploy the pinned Client Stable UIUX v1.2.1 Odoo + Web images using Docker Compose.
+Deploy the pinned Client Stable UIUX v1.2.2 Odoo + Web images using Docker Compose.
 Requires a reachable external PostgreSQL 16 server; does not install or configure it.
 Default: use an already initialized, matching Client Stable UIUX database.
 --init-db initializes a NEW or EMPTY database as a fresh UAT system without
@@ -117,13 +119,13 @@ App, saves the database (pg_dump -Fc) and the attachments in --dir/backups/ (or
 --backup-dir), then deploys this release. If anything fails before that, the
 directory and its App stay as they were. With the same Odoo modules no module
 upgrade (-u) runs. With other modules it runs one only from the modules of
-v1.0.3 to v1.0.8 and a directory of v1.0.5 to v1.0.8: after the backup it
-removes the old App's containers (from then on the backup is the only way
-back), upgrades the modules once, checks the result, holds every mail of the
-mail queue (the mail the upgrade queued and the mail that waited before it)
-and puts the cron flags back. It asks to type the database name, or takes
---confirm DATABASE. --drop-retired-data agrees to delete the data of retired
-modules; it is saved as CSV in the backup folder first.
+v1.2.1 and a directory of v1.2.1: after the backup it removes the old App's
+containers (from then on the backup is the only way back), upgrades the
+modules once, checks the result, holds every mail of the mail queue (the mail
+the upgrade queued and the mail that waited before it) and puts the cron flags
+back. It asks to type the database name, or takes --confirm DATABASE.
+--drop-retired-data agrees to delete the data of retired modules; it is saved
+as CSV in the backup folder first.
 --release-queued-mail queues the held mail again, after its review.
 HTTP only: default 0.0.0.0:8110. Odoo ports are private to the Compose network.
 Optional keys, read only from --config or app.env: PUBLIC_ROOT (such as /dev,
@@ -334,8 +336,8 @@ if [[ -n $CONFIG ]]; then
         esac
     done < "$CONFIG"
 fi
-# Outgoing email needs the mail code of the image, and v1.2.1 has none:
-# refused before any question.
+# Outgoing email needs the mail code of the image (v1.2.2 or later): without
+# it, refused before any question.
 if ((MAIL_SUPPORTED == 0)); then
     for key in "${MAIL_KEYS[@]}"; do
         [[ -z ${!key} ]] || fail "$key is set, but outgoing email $MAIL_NEEDS, or remove the SMTP_ settings and MAIL_REDIRECT_TO from $CONFIG"
@@ -977,7 +979,8 @@ cat > "$TEMP_DIR/preflight.py" <<'PY'
 #                        refusal (also of mark-upgrading)
 #   retired-export       the rows the upgrade deletes, as CSV in a tar.gz
 #   mark-upgrading FROM OLD NEW
-#                        saves the cron flags and the last mail id, and sets
+#                        saves the cron flags and the last mail id, keeps the
+#                        mail an earlier module upgrade still holds, and sets
 #                        perodua.image_modhash to 'upgrading:FROM'. Neither the
 #                        old release's check nor this one's accepts that.
 #   verify-upgrade       after -u: puts the cron flags back (a mock intake pull
@@ -1127,6 +1130,25 @@ def held_counts(record):
     # one that mark-upgrading saved) and the mail that waited before it.
     queued = sum(1 for mail in record['held_mail'] if mail > record['mail_max_id'])
     return queued, len(record['held_mail']) - queued
+def earlier_hold(cur):
+    # The rows that the hold of an earlier module upgrade lists and that are
+    # still held, or None when its record does not list the held rows.
+    cur.execute('SELECT value FROM ir_config_parameter WHERE key = %s', (KIT_PARAM,))
+    row = cur.fetchone()
+    if row is None:
+        return []
+    try:
+        held = json.loads(row[0])['held_mail']
+    except (ValueError, KeyError, TypeError):
+        return None
+    if not isinstance(held, list) or not all(type(mail) is int for mail in held):
+        return None
+    if not held or not table_exists(cur, 'mail_mail'):
+        return []
+    where, values = in_list('id', held)
+    cur.execute("SELECT id FROM mail_mail WHERE state = 'exception' AND failure_reason = %s AND " + where + ' ORDER BY id',
+                (HOLD_REASON,) + values)
+    return [row[0] for row in cur.fetchall()]
 def system_mode(params, system):
     # perodua.connector.mixin._resolve_mode, from the parameters alone.
     for key in ('perodua_integration.mode.' + system, 'perodua_integration.mode'):
@@ -1207,6 +1229,9 @@ def module_upgrade_problems(cur, modules, installed, uat, excluded_rows):
         if other:
             problems.append('%s.%s names a deleted record, and record %s of %s has its code %s: the upgrade would create it again and stop on the unique code'
                             % (module, name, other[0], table, code))
+    if earlier_hold(cur) is None:
+        problems.append(KIT_PARAM + ', the record of an earlier module upgrade, does not list the mail that it held (held_mail):'
+                        ' this upgrade cannot keep that mail held for deploy-app.sh --release-queued-mail')
     return problems
 # The way back, restore.txt step 3, restores the backup in one transaction. Up
 # to its commit it keeps a lock on each relation that it creates or reads and,
@@ -1386,7 +1411,8 @@ def retired_export(cur):
         add(archive, 'attachments.csv', [d[0] for d in cur.description], cur.fetchall())
     sys.stdout.buffer.write(buffer.getvalue())
 def mark_upgrading(cn, cur, installed, fingerprint):
-    # Before -u: the cron flags, the last mail and the modules, then the mark.
+    # Before -u: the cron flags, the last mail, the modules and the mail that
+    # an earlier module upgrade still holds, then the mark.
     old_fingerprint, old_release, new_release = sys.argv[2:5]
     cur.execute('SELECT id, active FROM ir_cron ORDER BY id')
     crons = {str(cron): bool(active) for cron, active in cur.fetchall()}
@@ -1394,11 +1420,12 @@ def mark_upgrading(cn, cur, installed, fingerprint):
     if table_exists(cur, 'mail_mail'):
         cur.execute('SELECT max(id) FROM mail_mail')
         mail = cur.fetchone()[0] or 0
+    held = earlier_hold(cur)
     cur.execute("SELECT count(*) FROM res_users WHERE login = 'agent'")
     record = {'from_fingerprint': old_fingerprint, 'to_fingerprint': fingerprint, 'from_release': old_release,
               'to_release': new_release, 'marked_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
               'modules': upgrade_modules(installed, image_versions()), 'crons': crons, 'mail_max_id': mail,
-              'agent_login': cur.fetchone()[0] > 0, 'held_mail': [], 'released_mail': []}
+              'agent_login': cur.fetchone()[0] > 0, 'held_mail': held, 'released_mail': []}
     put(cur, KIT_PARAM, json.dumps(record, sort_keys=True))
     put(cur, 'perodua.image_modhash', UPGRADING + old_fingerprint)
     cn.commit()
@@ -1481,9 +1508,10 @@ def verify_upgrade(cn, cur, modules, stored, fingerprint):
     print('UPGRADE_VERIFIED %d %d' % (held_queued, held_before))
     sys.exit(0)
 def release_mail(cn, cur):
-    # Only the rows verify-upgrade held and that are still held: a row the
-    # owner deleted, cancelled or sent again since stays as it is. Two
-    # updates, so that each number is the count of the rows it changed.
+    # Only the rows verify-upgrade held (with those of an earlier hold that
+    # the mark kept) and that are still held: a row the owner deleted,
+    # cancelled or sent again since stays as it is. Two updates, so that each
+    # number is the count of the rows it changed.
     record = kit_record(cur)
     held = (record or {}).get('held_mail') or []
     released = [0, 0]
@@ -1765,7 +1793,7 @@ upgrade_check_database() {
             </dev/null 2> "$TEMP_DIR/check.log"); then
         cat "$TEMP_DIR/check.log" >&2
         if grep -q 'module fingerprint does not match' "$TEMP_DIR/check.log"; then
-            fail "$RELEASE has other Odoo modules than the release that set up database $DB_NAME. It upgrades modules (-u) only from the modules of v1.0.3 to v1.0.8 (fingerprint $MODULE_UPGRADE_FROM)"
+            fail "$RELEASE has other Odoo modules than the release that set up database $DB_NAME. It upgrades modules (-u) only from the modules of v1.2.1 (fingerprint $MODULE_UPGRADE_FROM)"
         fi
         if grep -q 'marked by a module upgrade that did not finish' "$TEMP_DIR/check.log"; then
             DB_MARKED=1
@@ -1927,6 +1955,8 @@ The module upgrade of database $DB_NAME on $DB_HOST, from $OLD_RELEASE to $RELEA
   3. Upgrade the modules once (-u, no -i, cron jobs off). Then hold every mail
      of the mail queue: the mail the upgrade queues, and the mail that waits
      in the queue before it. Release it after review with --release-queued-mail.
+     The mail that an earlier module upgrade held stays held: the same command
+     releases it.
   4. Check the result, put the cron flags back, deploy $RELEASE.
 Point of no return: once users write data with $RELEASE, going back to the
 backup loses that data. After that point, fix forward.
