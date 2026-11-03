@@ -1004,11 +1004,16 @@ compose file, `app.env` and identity get no line settings.
   list and `perodua_sso_hub`); the guard call with `--line demo-uiux`; the
   compose settings (`PERODUA_IMAGE_PROFILE`, `PERODUA_DEMO_PERSONAS`,
   `PERODUA_MAIL: "off"` without `SMTP_HOST`, `uat_demo.py` mounted); that
-  `uat_demo.py` runs in `odoo shell` without a Docker log; that
+  `uat_demo.py` runs in `odoo shell` in two steps (the plan, then the apply
+  step with the plan on file descriptor 3), without a Docker log; that
   `seeded-accounts.txt` gets mode 0600 and one row per account, and that no
   seeded password is in the output, on a Docker command line or in another
   file of the directory (`uat-demo.log` included); a failed or incomplete `uat_demo.py` run and its resume; the upgrade
-  mode, which appends; `--replace` (the order of the stops, `rollback.sh` and
+  mode, which appends; a stop right after the commit of the apply step, which
+  keeps `seeded-accounts.pending` (0600, the only other file with the
+  passwords), and its rerun: after a module upgrade it gives the same
+  passwords again, lists them once and removes the file, and a rerun of
+  `--init-db` replaces the file with a new plan; `--replace` (the order of the stops, `rollback.sh` and
   its syntax, the old App started again after a failure, unless it was not
   running) and its refusals before Docker; and that the deploy-app.sh has one
   plain `RELEASE=`, `REVISION=`, `DEMO_RELEASE=` and `DEMO_REVISION=` line.
@@ -1017,7 +1022,11 @@ compose file, `app.env` and identity get no line settings.
   the comma list, the refusal without it, each line refusing the database of
   the other, an unknown profile, `perodua_client_stable` and `perodua_e2e` in a
   demo database, and `mark-upgrading`, `verify-upgrade` and `stamp-upgrade` of a
-  demo database with its demo seed and its seeded accounts.
+  demo database with its demo seed and its seeded accounts; that
+  `verify-upgrade` of a demo database gives the four mock intake pulls the
+  flags they had before (on, while every system resolves to mock); and that
+  the demo line accepts the seven workspace codes of `perodua_sso_hub` in the
+  host table, while the client line still knows only `rp`, `sp` and `cp`.
 - `test_uat_guard.py` checks the excluded module of each line, that the demo
   reviews are placeholders that never accept a finding, that a real hash
   accepts it, that the demo line keeps `perodua_client_stable` out, and that an
@@ -1025,7 +1034,7 @@ compose file, `app.env` and identity get no line settings.
 - `test_service_app.py` checks that `reset` of a demo directory reads
   `DEMO_RELEASE=` and `DEMO_REVISION=`, and that it changes nothing while the
   demo block holds placeholders. `test_uninstall_app.py` checks that the plan
-  names `seeded-accounts.txt` and `rollback.sh`.
+  names `seeded-accounts.txt`, `seeded-accounts.pending` and `rollback.sh`.
 
 These cases use fakes only. A real `odoo shell` run of `uat_demo.py`, the hooks
 of the demo seed and `--replace` on two real deployments need a lab rehearsal

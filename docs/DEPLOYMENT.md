@@ -1060,7 +1060,9 @@ the App stopped, and the rows are saved as CSV in
      `cron_pull_pcircle_orders`) are never switched on while their system
      resolves to mock (`perodua_integration.mode.PROMISE`, `.PSS`, `.PSOS`,
      `.PCircle`, else `perodua_integration.mode`, else mock): such a pull
-     stays off. A pull whose system is `live` gets its flag back;
+     stays off. A pull whose system is `live` gets its flag back. On the
+     demo-uiux line each pull gets its flag back, as every other action
+     ([The demo-uiux line](#the-demo-uiux-line));
    - **mail hold:** every `mail_mail` row in state `outgoing` goes to state
      `exception` with the reason "Held by deploy-app.sh --upgrade (module
      upgrade) ...". Odoo's mail queue does not send it. This holds the mail
@@ -1951,8 +1953,9 @@ by the image profile that `compose.yml` sets:
 | Rule | client-stable-uiux | demo-uiux |
 | --- | --- | --- |
 | Modules that are never installed | `perodua_demo_client`, `perodua_reporting`, `perodua_e2e` | `perodua_client_stable`, `perodua_e2e` |
-| Workspace codes of the host table `perodua_client_stable.hosts` | `rp`, `sp`, `cp` | `rp`, `sp`, `cp`; **placeholder**: the first pin adds the codes that `perodua_sso_hub` gives the four workspaces without a host of their own, on the rp host |
+| Workspace codes of the host table `perodua_client_stable.hosts` | `rp`, `sp`, `cp` | `rp`, `sp`, `cp`, `forecast`, `agent_portal`, `system_generation`, `reporting`: the codes of `perodua_sso_hub` (`WORKSPACE_CODES`); its default table puts the last four, the workspaces without a host of their own, on the rp host (owner answer d03 A) |
 | Sample data | a module upgrade needs a database without it, and its result must have none | the demo seed is part of the database |
+| The four mock intake pulls after a module upgrade (`verify-upgrade`) | off while their system resolves to mock | the flag that each one had before the upgrade, as every other scheduled action: a new demo database has them on, as the demo line does |
 | `perodua.runtime_profile` | `client-stable-uiux` | `demo-uiux` |
 
 **The line of a directory.** The first deployment of a directory chooses the
@@ -2008,6 +2011,19 @@ stopped in between, as on the client line.
   account, `login<TAB>password<TAB>account` (internal or portal, archived).
   No terminal output, log or Docker log shows them. `sudo cat
   DIR/seeded-accounts.txt` lists them.
+- **Two steps, so that no password is lost.** `uat_demo.py plan` changes
+  nothing: it chooses the accounts and their new passwords, and
+  `deploy-app.sh` writes them to `DIR/seeded-accounts.pending` (mode 0600)
+  before the database has them. Then `uat_demo.py apply` reads that file on
+  its standard input, gives the passwords, makes the steps below, checks them
+  and commits. Only then does `deploy-app.sh` add the lines to
+  `seeded-accounts.txt` and remove `seeded-accounts.pending`. A run that
+  stops between the commit and the list keeps `seeded-accounts.pending`, and
+  says so. The rerun finishes the job: a rerun of `--init-db` gives every
+  account a new password again (its plan replaces the file); a rerun after
+  a module upgrade first gives the accounts of the file the same passwords
+  again and lists them. Do not delete the file by hand: until a run lists
+  them, it is the only record of those passwords.
 - **The portal mode** is `off`, through its own switch
   (`perodua.portal.mode`, with its audit line): a portal account without a
   role gets 403 "no workspace", as on the client line, until portal users
@@ -2016,6 +2032,10 @@ stopped in between, as on the client line.
   (`perodua_supplier_execution.cron_perodua_inbound_job_orders`) is off
   (owner decision w4d). A module upgrade puts the cron flags back as before
   it, so it stays off.
+- **The mock intake pulls** (PROMISE, PSS, PSOS and P-Circle) do not change:
+  on a new demo-uiux database they are on and read the mock feeds, as on the
+  demo line. A module upgrade gives each one the flag that it had before the
+  upgrade.
 
 **Outgoing email.** The grey Odoo image has no mail password. Without
 `SMTP_HOST`, `compose.yml` sets `PERODUA_MAIL: "off"`, so a mail setting that
@@ -2029,6 +2049,18 @@ changes: its directory, its containers, its database and its attachments stay.
 Only its App stops. Before the switch: phase 1 of option A (the module
 `perodua_sso_hub`) is merged and in the pinned grey release, the lab
 rehearsal of these steps passed, and the owner said yes to the step.
+
+**New names, the same addresses.** Because the old deployment stays, the new
+one needs a new directory, a new Compose project (its attachments volume is
+`PROJECT_NAME_filestore`) and a new database: `--replace` refuses the
+project and the database of the old one. So the demo-uiux line has its own
+defaults, `PROJECT_NAME=perodua-demo-uiux` and `DB_NAME=perodua_demo`, which
+`app.env` can change to other new names. Only these names change. These stay
+as they are: the page under `/dev/` (`PUBLIC_ROOT=/dev`), `HTTP_PORT=8110`,
+the four host names (`stgiss`, `stgissrp`, `stgisssp` and
+`stgisscp.perodua.com.my`), the certificate and the HTTPS front with its
+routes file (`https.sh` needs no step), and the issuer
+`https://stgiss.perodua.com.my/dev` (`PUBLIC_BASE_URL`).
 
 1. On the DB server, a new empty database. In a copy of `deploy.conf`, set
    `DB_MODE=empty` and a new `DB_NAME` (such as `perodua_demo`), with the same
@@ -2089,10 +2121,16 @@ folder of a newer kit version works as on the client line (the backup,
 - The demo seed does not stop it. `perodua_client_stable` or `perodua_e2e`
   installed does, and so does a host table with codes that the release does
   not know.
+- The cron flags go back as before the upgrade, the four mock intake pulls
+  too: `verify-upgrade` does not keep them off on this line, so a pull that
+  ran on the mock feed before the upgrade runs after it.
 - After the upgrade, `uat_demo.py upgrade` gives each account that still has
   the seed password `perodua` (such as a persona that the new release adds) a
   new random password and adds it to `seeded-accounts.txt`. `whadmin`,
-  `admin1` and `admin2` keep their passwords.
+  `admin1` and `admin2` keep their passwords. If the run stops after the
+  database has the new passwords and before the list has them, they stay in
+  `seeded-accounts.pending` (root only), and the next run of `deploy-app.sh
+  --dir DIR` lists them first.
 - A directory of the client line never moves to the demo-uiux line with
   `--upgrade`: use the switch above.
 
@@ -2116,6 +2154,8 @@ Each pin of a grey release (a change of this kit, after the owner's yes):
    not confirm. A placeholder (no sha256) never accepts a finding.
 4. `preflight.py`, `LINE_RULES['demo-uiux']['host_codes']`: the keys of
    `WORKSPACE_CODES` in `perodua_sso_hub/controllers/hosts.py` of the release.
+   This kit version lists the seven of option A phase 1; check that the
+   release has no other code.
 5. From the second pin on: add the fingerprint of the previous grey release
    to `DEMO_MODULE_UPGRADE_FROM` and its name to `DEMO_OLD_RELEASES_ACCEPTED`.
    The fingerprint is the md5 of the `perodua_*` manifests of its image, as

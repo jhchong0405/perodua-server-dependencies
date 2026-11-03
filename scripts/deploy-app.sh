@@ -192,8 +192,10 @@ grey release of the demo line with the sign-in hub). Later runs, --upgrade
 too, keep the line of the directory (PERODUA_LINE in app.env). On the
 demo-uiux line, --init-db gives the new database the demo seed (sample data,
 mock screens and personas) and each seeded account a new random password,
-listed only in --dir/seeded-accounts.txt (root only); the portal mode is off
-and the 17:00 Job Order Inbound run stays off. Without SMTP_HOST, mail is off.
+listed only in --dir/seeded-accounts.txt (root only; a run that stops before
+it lists them keeps them in --dir/seeded-accounts.pending, root only, and a
+rerun lists them); the portal mode is off and the 17:00 Job Order Inbound run
+stays off. Without SMTP_HOST, mail is off.
 --replace DIR: this deployment takes the place of the one in DIR, which has
 another project and another database, such as the client-stable-uiux line on
 the same port. Right before this App starts, the App of DIR stops; nothing of
@@ -1167,8 +1169,9 @@ cat > "$TEMP_DIR/preflight.py" <<'PY'
 #                        perodua.image_modhash to 'upgrading:<the stored
 #                        fingerprint>'. Neither the old release's check nor
 #                        this one's accepts that.
-#   verify-upgrade       after -u: puts the cron flags back (a mock intake pull
-#                        stays off), holds every outgoing mail (the mail -u
+#   verify-upgrade       after -u: puts the cron flags back (on the
+#                        client-stable-uiux line a mock intake pull stays
+#                        off), holds every outgoing mail (the mail -u
 #                        queued and the mail that waited before it), checks
 #                        the result and sets 'upgraded:<fingerprint>'. Prints
 #                        UPGRADE_VERIFIED <queued by -u> <waited before>
@@ -1253,16 +1256,22 @@ ALLOWED_ABSENT = ('perodua_demo_client_ui',)
 #                    on both lines);
 #   demo_seed        whether a database of the line has the demo seed. Without
 #                    it (client-stable-uiux), a module upgrade needs a database
-#                    without sample data, and its result must have none.
-# PLACEHOLDER of the demo-uiux line until its first pin: host_codes holds only
-# rp, sp and cp. The first pin adds the codes that perodua_sso_hub gives the
-# four workspaces without a host of their own (on the rp host, owner answer
-# d03 A); until then, a host table that names them refuses a module upgrade.
+#                    without sample data, and its result must have none;
+#   mock_intake_off  whether verify-upgrade keeps a mock intake pull
+#                    (MOCK_INTAKE_CRONS) off while its system resolves to
+#                    mock. Without it (demo-uiux, whose mock feeds run as on
+#                    the demo line), such a pull gets the flag it had before
+#                    the upgrade, as every other cron does.
+# The demo-uiux codes are those of WORKSPACE_CODES in
+# perodua_sso_hub/controllers/hosts.py: rp, sp and cp, and the four workspaces
+# without a host of their own, which its default table puts on the rp host
+# (owner answer d03 A).
 LINE_RULES = {
     'client-stable-uiux': {'never_installed': ('perodua_demo_client', 'perodua_reporting', 'perodua_e2e'),
-                           'host_codes': ('rp', 'sp', 'cp'), 'demo_seed': False},
+                           'host_codes': ('rp', 'sp', 'cp'), 'demo_seed': False, 'mock_intake_off': True},
     'demo-uiux': {'never_installed': ('perodua_client_stable', 'perodua_e2e'),
-                  'host_codes': ('rp', 'sp', 'cp'), 'demo_seed': True},
+                  'host_codes': ('rp', 'sp', 'cp', 'forecast', 'agent_portal', 'system_generation', 'reporting'),
+                  'demo_seed': True, 'mock_intake_off': False},
 }
 if PROFILE not in LINE_RULES:
     fail('the image profile ' + PROFILE + ' is not a line of this scripts folder')
@@ -1305,7 +1314,8 @@ REFERENCE_RECORDS = (
 HOST_CODES = LINE['host_codes']
 # The scheduled pulls that read a mock feed while their system resolves to
 # mock (perodua_integration.mode.<SYSTEM>, else perodua_integration.mode, else
-# mock). verify-upgrade never switches one of them on in that case.
+# mock). On a line with mock_intake_off, verify-upgrade never switches one of
+# them on in that case.
 MOCK_INTAKE_CRONS = {
     'perodua_integration.cron_consume_promise_feed': 'PROMISE',
     'perodua_orders_ext.cron_pull_pss_orders': 'PSS',
@@ -1652,7 +1662,8 @@ def verify_upgrade(cn, cur, modules, stored, fingerprint):
         fail('the module upgrade was marked for other modules than this release has')
     # First what keeps the running App safe, whatever the checks below find.
     # The cron flags as they were before -u. A cron the upgrade created keeps
-    # its flag. A mock intake pull never goes on while its system is mock.
+    # its flag. On the client-stable-uiux line, a mock intake pull never goes
+    # on while its system is mock.
     params = params_like(cur, 'perodua_integration.mode%')
     cur.execute("SELECT res_id, module, name FROM ir_model_data WHERE model = 'ir.cron'")
     xmlids = {res_id: module + '.' + name for res_id, module, name in cur.fetchall()}
@@ -1661,7 +1672,7 @@ def verify_upgrade(cn, cur, modules, stored, fingerprint):
     for cron, active in cur.fetchall():
         before = record['crons'].get(str(cron))
         target = bool(active) if before is None else before
-        system = MOCK_INTAKE_CRONS.get(xmlids.get(cron))
+        system = MOCK_INTAKE_CRONS.get(xmlids.get(cron)) if LINE['mock_intake_off'] else None
         if system and system_mode(params, system) == 'mock' and target:
             target = False
             kept_off.append(xmlids[cron])
@@ -2511,56 +2522,110 @@ uat_setup() {
     state=$(preflight verify-fresh)
     [[ $state == VERIFIED\ * ]] || fail 'Fresh UAT database failed its post-initialization checks'
 }
-SEEDED=''
+SEEDED='' UAT_DEMO_RERUN=''
 uat_demo() {
     # The demo-uiux line: uat_demo.py with PERODUA_UAT_DEMO=$1 (install or
-    # upgrade). Its standard output holds the new passwords: it goes to a file
-    # in TEMP_DIR (0700), never to the terminal, a log or a Docker log (the
-    # no-log override), and only its SEEDED_ACCOUNT lines go on, to
-    # seeded-accounts.txt (0600 in the 0700 deployment directory).
-    local mode=$1 output=$TEMP_DIR/uat-demo.out list=$TEMP_DIR/seeded-accounts.txt ready count rerun
-    # uat_demo.py commits only after its own checks. A rerun of install gives
-    # every seeded account a new password again; a rerun of upgrade, each one
-    # that still has the seed password.
-    if [[ $mode == install ]]; then rerun='Rerun with --init-db to retry it; modules are not reinstalled'; else rerun='Run deploy-app.sh again to retry it'; fi
+    # upgrade), in two steps, so that this server has the new passwords before
+    # the database has them. The plan step changes nothing and prints them:
+    # its standard output goes to a file in TEMP_DIR (0700), never to the
+    # terminal, a log or a Docker log (the no-log override), and only its
+    # SEEDED_ACCOUNT lines go on, to seeded-accounts.pending (0600 in the 0700
+    # deployment directory). The apply step reads that file, gives the
+    # passwords and commits. Then the lines go to seeded-accounts.txt (0600),
+    # and seeded-accounts.pending goes. The cleanup does not remove it: after a
+    # stop between the commit and the list, it is the only record of them.
+    local mode=$1 pending=$DEPLOY_DIR/seeded-accounts.pending
+    if [[ $mode == install ]]; then
+        UAT_DEMO_RERUN='Rerun with --init-db to retry it; modules are not reinstalled'
+    else
+        UAT_DEMO_RERUN='Run deploy-app.sh again to retry it'
+    fi
+    [[ ! -L $pending ]] || fail "$pending is a symbolic link. Remove the link, then run deploy-app.sh again"
     printf 'services:\n  odoo:\n    logging:\n      driver: none\n' > "$TEMP_DIR/no-log.yml"
+    # A rerun of upgrade chooses only the accounts that still have the seed
+    # password, so it finishes the record of an earlier run first: the same
+    # passwords again, and the list. A rerun of install gives every seeded
+    # account a new password again, so its plan replaces the record.
+    if [[ $mode == upgrade && -f $pending ]]; then
+        printf 'An earlier run gave seeded accounts new passwords and stopped before it listed them in %s/seeded-accounts.txt. Giving them the same passwords again and listing them...\n' "$DEPLOY_DIR"
+        uat_demo_apply "$mode" "$pending"
+    fi
     if [[ $mode == install ]]; then
         printf 'Giving each account of the demo seed a new random password, and switching the portal mode and the 17:00 Job Order Inbound run off...\n'
     else
         printf 'Giving each account that still has the seed password a new random password...\n'
     fi
+    uat_demo_plan "$mode" "$pending"
+    [[ -f $pending ]] || return 0
+    uat_demo_apply "$mode" "$pending"
+}
+uat_demo_run() {  # uat_demo.py, job $1, step $2, with the standard input and output of the caller
+    # File descriptor 3 keeps the standard input of the container (the record,
+    # for the apply step): odoo shell reads the script on its own.
     # shellcheck disable=SC2016
     timeout --foreground "$INIT_TIMEOUT" docker compose --project-name "$PROJECT_NAME" --file "$DEPLOY_DIR/compose.yml" \
-        --file "$TEMP_DIR/no-log.yml" run --rm --no-deps -T -e PERODUA_UAT_DEMO="$mode" odoo \
-        bash -c 'PGPASSWORD="$DB_PASSWORD" exec odoo shell -c /etc/odoo/odoo.conf -d "$DB_NAME" --db_host="$DB_HOST" --db_port="$DB_PORT" --db_user="$DB_USER" < /opt/deploy/uat_demo.py' \
-        </dev/null > "$output" 2>> "$DEPLOY_DIR/uat-demo.log" \
-        || fail "The UAT setup of the demo-uiux line failed; see $DEPLOY_DIR/uat-demo.log. $rerun"
-    ready=$(grep -m 1 -E '^UAT demo: ready: [0-9]+ ' "$output") \
-        || fail "The UAT setup of the demo-uiux line did not confirm completion; see $DEPLOY_DIR/uat-demo.log. $rerun"
-    printf '%s\n' "$ready" | tee -a "$DEPLOY_DIR/uat-demo.log"
-    [[ $ready =~ ^UAT\ demo:\ ready:\ ([0-9]+)\  ]] || fail "Unexpected answer from the UAT setup of the demo-uiux line: $ready"
+        --file "$TEMP_DIR/no-log.yml" run --rm --no-deps -T -e PERODUA_UAT_DEMO="$1" -e PERODUA_UAT_DEMO_STEP="$2" odoo \
+        bash -c 'exec 3<&0; PGPASSWORD="$DB_PASSWORD" exec odoo shell -c /etc/odoo/odoo.conf -d "$DB_NAME" --db_host="$DB_HOST" --db_port="$DB_PORT" --db_user="$DB_USER" < /opt/deploy/uat_demo.py' \
+        2>> "$DEPLOY_DIR/uat-demo.log"
+}
+uat_demo_plan() {  # job $1: its new passwords to the record $2; none when an upgrade finds no account
+    local mode=$1 pending=$2 output=$TEMP_DIR/uat-demo.out plan=$TEMP_DIR/seeded-accounts.pending planned count
+    uat_demo_run "$mode" plan </dev/null > "$output" \
+        || fail "The UAT setup of the demo-uiux line failed; see $DEPLOY_DIR/uat-demo.log. $UAT_DEMO_RERUN"
+    planned=$(grep -m 1 -E '^UAT demo: planned: [0-9]+$' "$output") \
+        || fail "The UAT setup of the demo-uiux line did not confirm its plan; see $DEPLOY_DIR/uat-demo.log. $UAT_DEMO_RERUN"
     count=$(awk -F '\t' '$1 == "SEEDED_ACCOUNT" && NF == 4' "$output" | wc -l | tr -d ' ')
-    [[ $count == "${BASH_REMATCH[1]}" ]] || fail "The UAT setup of the demo-uiux line reported ${BASH_REMATCH[1]} new passwords and listed $count. $rerun"
-    SEEDED=$count
+    [[ $count == "${planned##* }" ]] \
+        || fail "The UAT setup of the demo-uiux line reported ${planned##* } new passwords and listed $count. $UAT_DEMO_RERUN"
     if [[ $mode == upgrade ]] && ((count == 0)); then rm -f -- "$output"; return 0; fi
     {
-        if [[ $mode == install || ! -f $DEPLOY_DIR/seeded-accounts.txt ]]; then
+        printf '# New passwords of the seeded accounts of database %s, before the database has them. Only root may read this file.\n' "$DB_NAME"
+        printf '# deploy-app.sh gives them, lists them in seeded-accounts.txt and removes this file (%s of %s).\n' "$mode" "$RELEASE"
+        awk -F '\t' '$1 == "SEEDED_ACCOUNT" && NF == 4' "$output"
+    } > "$plan"
+    rm -f -- "$output"
+    chmod 0600 "$plan"
+    mv -f -- "$plan" "$pending"
+    # On the disk before the database commits them on the DB server.
+    sync
+}
+uat_demo_apply() {  # job $1: the passwords of the record $2 into the database, then into seeded-accounts.txt
+    local mode=$1 pending=$2 output=$TEMP_DIR/uat-demo.out list=$TEMP_DIR/seeded-accounts.txt listed=/dev/null ready count stays
+    stays="The new passwords stay in $pending (root only) until a run lists them"
+    uat_demo_run "$mode" apply < "$pending" > "$output" \
+        || fail "The UAT setup of the demo-uiux line failed; see $DEPLOY_DIR/uat-demo.log. $stays. $UAT_DEMO_RERUN"
+    ready=$(grep -m 1 -E '^UAT demo: ready: [0-9]+ ' "$output") \
+        || fail "The UAT setup of the demo-uiux line did not confirm completion; see $DEPLOY_DIR/uat-demo.log. $stays. $UAT_DEMO_RERUN"
+    rm -f -- "$output"
+    printf '%s\n' "$ready" | tee -a "$DEPLOY_DIR/uat-demo.log"
+    [[ $ready =~ ^UAT\ demo:\ ready:\ ([0-9]+)\  ]] || fail "Unexpected answer from the UAT setup of the demo-uiux line: $ready"
+    count=$(awk -F '\t' '$1 == "SEEDED_ACCOUNT" && NF == 4' "$pending" | wc -l | tr -d ' ')
+    [[ $count == "${BASH_REMATCH[1]}" ]] \
+        || fail "The UAT setup of the demo-uiux line gave ${BASH_REMATCH[1]} of the $count new passwords of $pending. $stays. $UAT_DEMO_RERUN"
+    [[ $mode == install || ! -f $DEPLOY_DIR/seeded-accounts.txt ]] || listed=$DEPLOY_DIR/seeded-accounts.txt
+    {
+        if [[ $listed == /dev/null ]]; then
             printf '# The seeded accounts of database %s and their passwords. Only root may read this file.\n' "$DB_NAME"
             printf '# deploy-app.sh gave each one a new random password. whadmin, admin1 and admin2 keep "perodua".\n'
             printf '# login\tpassword\taccount\n'
         else
-            cat -- "$DEPLOY_DIR/seeded-accounts.txt"
+            cat -- "$listed"
         fi
         if [[ $mode == install ]]; then
             printf '# %s, --init-db of %s:\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$RELEASE"
         else
             printf '# %s, module upgrade to %s:\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$RELEASE"
         fi
-        awk -F '\t' '$1 == "SEEDED_ACCOUNT" && NF == 4 { print $2 "\t" $3 "\t" $4 }' "$output"
+        # Not again the rows that the list has: a run that stopped after the
+        # list, before it removed the record, listed them already.
+        awk -F '\t' 'FILENAME == ARGV[1] { if ($0 !~ /^#/) seen[$1 FS $2] = 1; next }
+            $1 == "SEEDED_ACCOUNT" && NF == 4 && !(($2 FS $3) in seen) { print $2 "\t" $3 "\t" $4 }' "$listed" "$pending"
     } > "$list"
-    rm -f -- "$output"
     chmod 0600 "$list"
     mv -f -- "$list" "$DEPLOY_DIR/seeded-accounts.txt"
+    sync
+    rm -f -- "$pending"
+    if [[ $mode == install ]]; then SEEDED=$count; else SEEDED=$((${SEEDED:-0} + count)); fi
     printf 'Seeded accounts: %s got a new random password. They are listed in %s/seeded-accounts.txt, which only root may read; no output shows them.\n' \
         "$count" "$DEPLOY_DIR"
 }

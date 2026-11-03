@@ -228,6 +228,8 @@ uninstall_app() {
     # and the way back of a deploy-app.sh --replace.
     [[ ! -f $DEPLOY_DIR/seeded-accounts.txt ]] \
         || printf '  - and with it seeded-accounts.txt, the only list of the passwords of the seeded accounts of the demo seed\n'
+    [[ ! -f $DEPLOY_DIR/seeded-accounts.pending ]] \
+        || printf '  - and with it seeded-accounts.pending, the new passwords of seeded accounts that a stopped deploy-app.sh run did not list yet\n'
     [[ ! -f $DEPLOY_DIR/rollback.sh ]] \
         || printf '  - and with it rollback.sh, the way back to the deployment that this one took the place of (deploy-app.sh --replace); that deployment stays as it is\n'
     if ((PURGE)); then

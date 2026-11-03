@@ -1020,6 +1020,53 @@ class PreflightModuleUpgradeTests(unittest.TestCase):
         self.assertEqual(self.params()['perodua.image_modhash'], 'upgraded:' + self.new_fp)
         self.assertEqual(self.run_preflight('stamp-upgrade'), 'READY 1')
 
+    def test_a_demo_module_upgrade_keeps_the_mock_intake_pulls_as_they_were(self):
+        # A new demo-uiux database runs its four mock intake pulls, as the demo
+        # line does, while every system resolves to mock (no mode is set). The
+        # client-stable-uiux line keeps them off (test_without_a_mode_every_system_is_mock);
+        # the demo-uiux line gives each one the flag it had before the upgrade.
+        self.demo_line()
+        pulls = ('perodua_integration.cron_consume_promise_feed', 'perodua_orders_ext.cron_pull_pss_orders',
+                 'perodua_orders_ext.cron_pull_psos_orders', 'perodua_orders_ext.cron_pull_pcircle_orders')
+        for cron_id, xmlid in enumerate(pulls, 1):
+            self.cron(cron_id, cron_id != 4, xmlid)  # P-Circle was off
+        self.cron(5, False, 'perodua_supplier_execution.cron_perodua_inbound_job_orders')
+        self.assertEqual(self.run_preflight('mark-upgrading', self.from_fp, 'demo-uiux-grey-v0.1.0',
+                                            'demo-uiux-grey-v0.2.0'), 'MARKED')
+        # What -u did: data files switched flags off and on.
+        self.sql('UPDATE ir_cron SET active = %s WHERE id IN (1, 2)', (False,))
+        self.sql('UPDATE ir_cron SET active = %s WHERE id IN (4, 5)', (True,))
+        self.after_module_upgrade()
+        self.module('perodua_client_stable', state='uninstalled')
+        self.module('perodua_sso_hub', version='19.0.2.0.0')
+        output = self.run_preflight('verify-upgrade')
+        self.assertEqual(self.actives(), {1: True, 2: True, 3: True, 4: False, 5: False})
+        self.assertIn('Cron jobs: 4 flags put back as before the upgrade.', output)
+        self.assertNotIn('stays off', output)
+        self.assertTrue(output.endswith('UPGRADE_VERIFIED 0 0'), output)
+
+    def test_the_demo_line_knows_the_workspace_codes_of_the_hub(self):
+        # perodua_sso_hub puts the four workspaces without a host of their own
+        # on the rp host (owner answer d03 A).
+        table = {'signin': 'stgiss.perodua.com.my', 'workspaces': {
+            'stgiss.perodua.com.my': [],
+            'stgissrp.perodua.com.my': ['rp', 'forecast', 'agent_portal', 'system_generation', 'reporting'],
+            'stgisssp.perodua.com.my': ['sp'], 'stgisscp.perodua.com.my': ['cp']}}
+        self.demo_line()
+        self.param('perodua_client_stable.hosts', json.dumps(table))
+        self.assertTrue(self.check().endswith('MODULE_UPGRADE 1'))
+        self.param('perodua_client_stable.hosts', json.dumps(
+            {'signin': 'stgiss.perodua.com.my', 'workspaces': {'stgissrp.perodua.com.my': ['rp', 'ops']}}))
+        self.assertIn('Database preflight: module upgrade refused: perodua_client_stable.hosts names the workspace codes ops;'
+                      ' this release knows only rp, sp, cp, forecast, agent_portal, system_generation, reporting',
+                      self.check(ok=False))
+        # The client-stable-uiux release knows only rp, sp and cp.
+        self.setUp()
+        self.param('perodua_client_stable.hosts', json.dumps(table))
+        self.assertIn('Database preflight: module upgrade refused: perodua_client_stable.hosts names the workspace codes'
+                      ' agent_portal, forecast, reporting, system_generation; this release knows only rp, sp, cp',
+                      self.check(ok=False))
+
     # ── the retired data ────────────────────────────────────────────────────
     def test_retired_export(self):
         self.sql("INSERT INTO perodua_transporter_rate (id, name, rate) VALUES (1, 'KL', 10)")

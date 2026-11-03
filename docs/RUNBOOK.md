@@ -132,14 +132,18 @@ Only for a directory of the demo-uiux line (`PERODUA_LINE=demo-uiux` in its
 ```bash
 sudo grep -x 'line=demo-uiux' /opt/perodua-app-demo/.deployment-identity
 sudo stat -c '%a %U %n' /opt/perodua-app-demo/seeded-accounts.txt
+sudo test ! -e /opt/perodua-app-demo/seeded-accounts.pending && echo 'no pending passwords'
 sudo docker compose -p perodua-demo-uiux -f /opt/perodua-app-demo/compose.yml exec -T odoo \
   python3 -c "import json, urllib.request; print(json.load(urllib.request.urlopen('http://127.0.0.1:8069/uiux/api/version'))['data']['image_profile'])"
 ```
 
 **PASS:** the first command prints `line=demo-uiux`, the second
-`600 root .../seeded-accounts.txt`, the third `demo-uiux`. Do not print or copy
-`seeded-accounts.txt` into a ticket: it holds the passwords of the seeded
-accounts.
+`600 root .../seeded-accounts.txt`, the third `no pending passwords`, the
+fourth `demo-uiux`. Do not print or copy `seeded-accounts.txt` into a ticket:
+it holds the passwords of the seeded accounts. If the third prints nothing, a
+run stopped after it gave new passwords and before it listed them: run
+`deploy-app.sh --dir /opt/perodua-app-demo` again (with `--init-db` if the
+stop was in `--init-db`), and do not delete `seeded-accounts.pending` by hand.
 
 When this deployment took the place of another one (`--replace`),
 `/opt/perodua-app-demo/rollback.sh` exists, and the other one is stopped:

@@ -432,6 +432,7 @@ the top of the script:
 | Accounts of a new database | `whadmin`, `admin1`, `admin2` / `perodua`; the business roles also `perodua` | `whadmin`, `admin1`, `admin2` / `perodua`; each other account a new random password, in `seeded-accounts.txt` (root only) |
 | Portal accounts | refused | portal mode `off` until portal users sign in through the hub |
 | 17:00 Job Order Inbound run | off | off |
+| Mock intake pulls (PROMISE, PSS, PSOS, P-Circle) | off while in mock mode, after `--init-db` and after a module upgrade | on, as on the demo line; a module upgrade keeps the flag that each one had |
 | Outgoing email | off until `SMTP_HOST` is set | the same (`PERODUA_MAIL=off` without `SMTP_HOST`) |
 | Default `PROJECT_NAME` and `DB_NAME` | `perodua-client-uiux`, `perodua` | `perodua-demo-uiux`, `perodua_demo` |
 
@@ -452,8 +453,11 @@ While the demo-uiux block holds placeholders, every run with
 The grey environment keeps `/dev/`, port 8110, the four host names
 (`stgiss`, `stgissrp`, `stgisssp`, `stgisscp.perodua.com.my`), the certificate
 and the issuer `https://stgiss.perodua.com.my/dev`. The HTTPS front and its
-routes file need no change. Each step on grey needs the owner's yes. The full
-steps are in
+routes file need no change. Only the names change: the old directory, project
+and database stay as they are, so the new deployment needs a new directory, a
+new project and a new database. The defaults of the line are those new names,
+`PROJECT_NAME=perodua-demo-uiux` and `DB_NAME=perodua_demo`. Each step on grey
+needs the owner's yes. The full steps are in
 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#switch-an-environment-to-the-demo-uiux-line):
 
 1. On the DB server: a new empty database, such as `perodua_demo`, with
@@ -501,7 +505,10 @@ only from a module fingerprint and a release that its demo-uiux block accepts
 pinned grey release accepts none. After a module upgrade, each account that
 still has the seed password `perodua` (such as a new persona) gets a new
 random password, added to `seeded-accounts.txt`; `whadmin`, `admin1` and
-`admin2` keep their passwords. The held mail is listed with the command of
+`admin2` keep their passwords. A run that stops after the database has those
+passwords keeps them in `seeded-accounts.pending` (root only); the next run
+lists them. The cron flags go back as before the upgrade, the mock intake
+pulls too. The held mail is listed with the command of
 step 13 of [Upgrade an App server to v1.2.2](#upgrade-an-app-server-to-v122),
 with the database name of this directory (`-d perodua_demo`), and released with
 `sudo bash deploy-app.sh --release-queued-mail --dir /opt/perodua-app-demo`.
