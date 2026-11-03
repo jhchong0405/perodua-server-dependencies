@@ -20,6 +20,8 @@ import threading
 import unittest
 import urllib.parse
 
+from test_deploy_app import service_environment
+
 
 SCRIPTS = Path(__file__).resolve().parents[1] / 'scripts'
 SCRIPT = SCRIPTS / 'deploy-app.sh'
@@ -39,6 +41,32 @@ def release_copy(folder, supported):
     (folder / 'deploy-app.sh').write_text(SUPPORT_LINE.sub(f'PUBLIC_ROOT_SUPPORTED={int(supported)}', text),
                                           encoding='utf-8')
     for helper in ('uat_guard.py', 'uat_admins.py'):
+        shutil.copy(SCRIPTS / helper, folder / helper)
+    return folder / 'deploy-app.sh'
+
+
+# The demo-uiux block of this kit version holds placeholders until the first
+# pin of a grey release; the tests pin these fixture values in a copy.
+DEMO_PINS = {
+    'DEMO_RELEASE': 'demo-uiux-grey-v0.99.0',
+    'DEMO_REVISION': '9' * 40,
+    'DEMO_ODOO_IMAGE': 'perodua-deploy.novutal.com/perodua-odoo:demo-uiux-grey-v0.99.0@sha256:' + 'd' * 64,
+    'DEMO_WEB_IMAGE': 'perodua-deploy.novutal.com/perodua-odoo:demo-uiux-grey-web-v0.99.0@sha256:' + 'e' * 64,
+}
+DEMO_MODULES = re.search(r'^DEMO_INIT_MODULES=(\S+)$', SCRIPT.read_text(encoding='utf-8'), re.M).group(1)
+
+
+def demo_release_copy(folder):
+    """deploy-app.sh and its helpers in another folder, as a kit version whose
+    demo-uiux block pins the fixture release DEMO_PINS."""
+    folder.mkdir()
+    text = SCRIPT.read_text(encoding='utf-8')
+    for key, value in DEMO_PINS.items():
+        line = re.compile(rf'^{key}=\S+$', re.M)
+        assert len(line.findall(text)) == 1, f'deploy-app.sh must set {key} once'
+        text = line.sub(f'{key}={value}', text)
+    (folder / 'deploy-app.sh').write_text(text, encoding='utf-8')
+    for helper in ('uat_guard.py', 'uat_admins.py', 'uat_demo.py'):
         shutil.copy(SCRIPTS / helper, folder / helper)
     return folder / 'deploy-app.sh'
 
@@ -62,6 +90,8 @@ if args[:2] == ['volume', 'inspect']: reply(code=0 if os.environ.get('FAKE_LEFTO
 if args[:2] == ['volume', 'rm']: reply()
 if args and args[0] == 'compose':
     if 'config' in args: reply()
+    # FAKE_REPLACE_RUNNING: the container ids that ps of a compose project reports.
+    if 'ps' in args: reply(os.environ.get('FAKE_REPLACE_RUNNING', ''))
     if 'stop' in args: reply()
     if 'up' in args: reply()
     if 'exec' in args:
@@ -77,7 +107,7 @@ if args and args[0] == 'compose':
                 code = int(os.environ.get('FAKE_PUBLIC_URLS_EXIT', '0'))
                 reply('' if code else 'PUBLIC_URLS_SET', code, 'Database preflight: fixture' if code else '')
             reply({'mark-pending': 'PENDING', 'verify-fresh': 'VERIFIED 3',
-                   'stamp': 'READY 3'}[mode])
+                   'stamp': 'READY 3', 'stamp-upgrade': 'READY 3'}[mode])
         if cmd[:2] == ['python3', '/opt/deploy/uat_guard.py']:
             if cmd[2] == 'guard':
                 code = int(os.environ.get('FAKE_GUARD_EXIT', '0'))
@@ -88,6 +118,13 @@ if args and args[0] == 'compose':
         if cmd[:1] == ['odoo']: reply('fake odoo init', int(os.environ.get('FAKE_INIT_EXIT', '0')))
         if cmd[:2] == ['bash', '-c'] and '/var/lib/odoo/filestore' in cmd[2]:
             reply(os.environ.get('FAKE_LEFTOVER_FILES', '0'))
+        if cmd[:2] == ['bash', '-c'] and 'uat_demo.py' in cmd[2]:
+            # uat_demo.py: one line per new password, then its count.
+            code = int(os.environ.get('FAKE_DEMO_EXIT', '0'))
+            accounts = [line.split(':') for line in os.environ.get('FAKE_DEMO_ACCOUNTS', '').split()]
+            lines = ['SEEDED_ACCOUNT\t%s\t%s\t%s' % (login, password, kind) for login, password, kind in accounts]
+            ready = 'UAT demo: ready: %d seeded accounts have a new random password' % int(os.environ.get('FAKE_DEMO_COUNT', len(lines)))
+            reply('\n'.join(lines + ([] if code else [ready])), code, 'odoo shell log line')
         if cmd[:2] == ['bash', '-c'] and 'odoo shell' in cmd[2]:
             code = int(os.environ.get('FAKE_ADMINS_EXIT', '0'))
             reply('UAT admins: ready: whadmin, admin1, admin2' if code == 0 else 'boom', code)
@@ -177,6 +214,8 @@ class UatOrchestrationTests(unittest.TestCase):
                     steps.append('odoo ' + ' '.join(cmd[1:]))
                 elif cmd[:2] == ['bash', '-c'] and '/var/lib/odoo/filestore' in cmd[2]:
                     steps.append('leftover check')
+                elif cmd[:2] == ['bash', '-c'] and 'uat_demo.py' in cmd[2]:
+                    steps.append('odoo shell < uat_demo.py')
                 elif cmd[:2] == ['bash', '-c']:
                     steps.append('odoo shell < uat_admins.py' if 'uat_admins.py' in cmd[2] else 'bash')
                 elif cmd[:2] == ['python3', '-c']:
@@ -420,16 +459,17 @@ class UatOrchestrationTests(unittest.TestCase):
                 if 'preflight verify-fresh' in steps:
                     self.assertLess(steps.index('preflight verify-fresh'), steps.index('preflight public-urls'))
                 self.assertEqual(self.public_urls_arguments(), [[BASE_URL]])
-                # The HTTP verification is given the path, then whether the database is new.
+                # The HTTP verification is given the path, the image profile
+                # of the line, then whether the database is new.
                 fresh = '0' if check.startswith('READY') else '1'
-                self.assertEqual(self.verification_arguments()[0][2:], ['/dev', fresh])
+                self.assertEqual(self.verification_arguments()[0][2:], ['/dev', 'client-stable-uiux', fresh])
 
     def test_without_a_public_base_url_only_the_report_address_is_recorded(self):
         result = self.run_script('READY 0')
         self.assertEqual(result.returncode, 0, result.stdout)
         # An empty argument: preflight writes report.url and leaves web.base.url alone.
         self.assertEqual(self.public_urls_arguments(), [['']])
-        self.assertEqual(self.verification_arguments()[0][2:], ['', '0'])
+        self.assertEqual(self.verification_arguments()[0][2:], ['', 'client-stable-uiux', '0'])
 
     def test_a_failure_to_record_the_addresses_stops_before_the_containers_start(self):
         for check, extra in (('READY 0', ()), ('EMPTY', ('--init-db',))):
@@ -530,6 +570,304 @@ class UatOrchestrationTests(unittest.TestCase):
         self.assertIn('uat_admins.py is missing', result.stdout)
         self.assertEqual(self.calls(), [])
 
+    # ── the demo-uiux line ──────────────────────────────────────────────────
+    # login:password:account, as uat_demo.py lists them. Obvious fakes.
+    DEMO_ACCOUNTS = ('planner:FixturePw2345abcdEFGH:internal', 'portal.cust-001:FixturePw6789wxyzABCD:portal')
+
+    def demo(self, **updates):
+        """A kit version whose demo-uiux block pins the fixture release, and an
+        app.env of that line."""
+        folder = Path(self.temp.name) / 'demo-release'
+        if not folder.exists():
+            demo_release_copy(folder)
+        self.script = folder / 'deploy-app.sh'
+        self.configure(PERODUA_LINE='demo-uiux', **updates)
+
+    def run_commands(self):
+        """The commands of the one-off containers, after the service name."""
+        return [args[args.index('odoo', args.index('run')) + 1:] for args in self.calls()
+                if args[:1] == ['compose'] and 'run' in args]
+
+    def demo_calls(self):
+        return [args for args in self.calls() if args[:1] == ['compose'] and any('uat_demo.py' in a for a in args)]
+
+    def seeded_rows(self):
+        text = (self.deploy_dir / 'seeded-accounts.txt').read_text()
+        return [line.split('\t') for line in text.splitlines() if not line.startswith('#')]
+
+    def assert_passwords_kept_secret(self, result, accounts=DEMO_ACCOUNTS):
+        """The passwords of the seeded accounts are only in seeded-accounts.txt."""
+        for password in (account.split(':')[1] for account in accounts):
+            self.assertNotIn(password, result.stdout + result.stderr)
+            for args in self.calls():
+                self.assertFalse(any(password in arg for arg in args), args)
+            for path in self.deploy_dir.rglob('*'):
+                if path.is_file() and path.name != 'seeded-accounts.txt':
+                    self.assertNotIn(password, path.read_text(errors='replace'), path)
+
+    def test_the_demo_init_list_is_the_one_of_the_entrypoint_and_the_hub(self):
+        # docker/entrypoint.sh, DEFAULT_INIT_MODULES of the demo-uiux profile, and perodua_sso_hub.
+        self.assertEqual(DEMO_MODULES.split(','), [
+            'perodua_demo_ui', 'perodua_portal', 'perodua_portal_workspaces', 'perodua_agent_portal',
+            'perodua_demo_client', 'perodua_gateway', 'perodua_forecast_workbook', 'perodua_demo_profile',
+            'perodua_supplier_execution', 'perodua_uiux_api', 'perodua_sso_hub'])
+        self.assertNotIn('perodua_client_stable', DEMO_MODULES)
+
+    def test_the_real_deploy_app_has_one_plain_release_line_per_block(self):
+        # service.sh reset reads these with sed; each block has one line of each.
+        text = SCRIPT.read_text(encoding='utf-8')
+        for block in ("", "DEMO_"):
+            for name in ("RELEASE", "REVISION"):
+                with self.subTest(line=block + name):
+                    self.assertEqual(len(re.findall(rf"^{block}{name}=\S+$", text, re.M)), 1)
+
+    def test_the_demo_line_stops_while_its_block_holds_placeholders(self):
+        self.configure(PERODUA_LINE='demo-uiux')
+        for extra in ((), ('--init-db',), ('--check-config',)):
+            with self.subTest(extra=extra):
+                result = self.run_script('EMPTY', *extra)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('This scripts folder pins no release of the demo-uiux line yet', result.stdout)
+                self.assertEqual(self.calls(), [])
+                self.assertFalse(self.deploy_dir.exists())
+
+    def test_an_unknown_line_stops_before_docker(self):
+        result = self.run_script('READY 0', '--line', 'demo')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Unknown line demo: the line is client-stable-uiux or demo-uiux', result.stdout)
+        self.assertEqual(self.calls(), [])
+        self.configure(PERODUA_LINE='demo-uiux')
+        result = self.run_script('READY 0', '--line', 'client-stable-uiux')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('--line client-stable-uiux and PERODUA_LINE=demo-uiux in', result.stdout)
+        self.assertEqual(self.calls(), [])
+
+    def test_a_fresh_demo_database_gets_the_demo_seed_and_random_passwords(self):
+        self.demo()
+        result = self.run_script('EMPTY', '--init-db', demo_accounts=' '.join(self.DEMO_ACCOUNTS))
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(self.container_steps(), [
+            'preflight check', 'uat_guard guard', 'uat_guard demo-flag',
+            f'odoo -c /etc/odoo/odoo.conf -d perodua -i {DEMO_MODULES} --without-demo=True --stop-after-init',
+            'preflight mark-pending', 'odoo shell < uat_admins.py', 'odoo shell < uat_demo.py',
+            'preflight verify-fresh', 'filestore check', 'stop web odoo', 'preflight public-urls', 'up',
+            'http verify fresh=1', 'preflight stamp'])
+        self.assertIn('Initializing NEW UAT database perodua of the demo-uiux line, with its demo seed', result.stdout)
+        # The guard keeps the client menu profile out, with the reviews of this line.
+        [guard] = [cmd for cmd in self.run_commands() if cmd[:3] == ['python3', '/opt/deploy/uat_guard.py', 'guard']]
+        self.assertEqual(guard[guard.index('--exclude') + 1], 'perodua_client_stable')
+        self.assertEqual(guard[guard.index('--line') + 1], 'demo-uiux')
+        # uat_demo.py runs once, as the install step, without a Docker log.
+        [demo] = self.demo_calls()
+        self.assertIn('PERODUA_UAT_DEMO=install', demo)
+        self.assertTrue(any(arg.endswith('/no-log.yml') for arg in demo), demo)
+        self.assertEqual(self.verification_arguments()[0][2:], ['', 'demo-uiux', '1'])
+        # Only root may read the list of the new passwords, and nothing else shows them.
+        accounts = self.deploy_dir / 'seeded-accounts.txt'
+        self.assertEqual(accounts.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.seeded_rows(), [account.split(':') for account in self.DEMO_ACCOUNTS])
+        self.assert_passwords_kept_secret(result)
+        self.assertIn(f'Seeded accounts: 2 got a new random password. They are listed in {self.deploy_dir}/seeded-accounts.txt',
+                      result.stdout)
+        self.assertIn('odoo shell log line', (self.deploy_dir / 'uat-demo.log').read_text())
+        self.assertIn('UAT administrators (UAT only, fixed password): whadmin, admin1, admin2 / perodua', result.stdout)
+        self.assertIn('Portal mode: off', result.stdout)
+        # The directory names its line.
+        self.assertIn('line=demo-uiux\n', (self.deploy_dir / '.deployment-identity').read_text())
+        self.assertTrue((self.deploy_dir / 'app.env').read_text().startswith('PERODUA_LINE=demo-uiux\n'))
+        helper = self.deploy_dir / 'uat_demo.py'
+        self.assertEqual(helper.read_bytes(), (SCRIPTS / 'uat_demo.py').read_bytes())
+        self.assertEqual(helper.stat().st_mode & 0o777, 0o444)
+
+    def test_a_failed_demo_setup_is_not_stamped_and_keeps_no_password(self):
+        self.demo()
+        result = self.run_script('EMPTY', '--init-db', demo_accounts=' '.join(self.DEMO_ACCOUNTS), demo_exit=1)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(f'The UAT setup of the demo-uiux line failed; see {self.deploy_dir}/uat-demo.log', result.stdout)
+        steps = self.container_steps()
+        self.assertEqual(steps[-1], 'odoo shell < uat_demo.py')
+        self.assertFalse((self.deploy_dir / 'seeded-accounts.txt').exists())
+        self.assert_passwords_kept_secret(result)
+        # A count that differs from the list is refused as well; the rerun
+        # finishes the interrupted setup.
+        self.log.unlink()
+        result = self.run_script('SETUP_PENDING', '--init-db', demo_exit=0, demo_count=3)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('reported 3 new passwords and listed 2', result.stdout)
+        self.assertFalse((self.deploy_dir / 'seeded-accounts.txt').exists())
+        self.log.unlink()
+        result = self.run_script('SETUP_PENDING', '--init-db', demo_count=2)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(self.container_steps()[:3], ['preflight check', 'odoo shell < uat_admins.py', 'odoo shell < uat_demo.py'])
+        self.assertEqual(len(self.seeded_rows()), 2)
+
+    def test_after_a_module_upgrade_an_account_with_the_seed_password_gets_a_new_one(self):
+        self.demo()
+        self.assertEqual(self.run_script('EMPTY', '--init-db', demo_accounts=self.DEMO_ACCOUNTS[0]).returncode, 0)
+        added = 'persona.new:FixturePw8888zzzzYYYY:portal'
+        self.log.unlink()
+        result = self.run_script('UPGRADE_PENDING 3', demo_accounts=added)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(self.container_steps(), [
+            'preflight check', 'odoo shell < uat_demo.py', 'filestore check', 'stop web odoo',
+            'preflight public-urls', 'up', 'http verify fresh=0', 'preflight stamp-upgrade'])
+        [demo] = self.demo_calls()
+        self.assertIn('PERODUA_UAT_DEMO=upgrade', demo)
+        self.assertEqual(self.seeded_rows(), [self.DEMO_ACCOUNTS[0].split(':'), added.split(':')])
+        self.assertIn(f'Seeded accounts: 1 more, each with a new random password, in {self.deploy_dir}/seeded-accounts.txt',
+                      result.stdout)
+        self.assertIn('README.md, "Upgrade the demo-uiux line", lists it', result.stdout)
+        self.assert_passwords_kept_secret(result, (self.DEMO_ACCOUNTS[0], added))
+        # None left: the list stays as it is.
+        before = (self.deploy_dir / 'seeded-accounts.txt').read_text()
+        self.log.unlink()
+        result = self.run_script('UPGRADE_PENDING 3', demo_accounts='')
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual((self.deploy_dir / 'seeded-accounts.txt').read_text(), before)
+        self.assertNotIn('Seeded accounts:', result.stdout)
+
+    def test_the_demo_line_compose_file(self):
+        self.demo()
+        result = self.run_script('READY 0')
+        self.assertEqual(result.returncode, 0, result.stdout)
+        compose = (self.deploy_dir / 'compose.yml').read_text()
+        odoo = service_environment(compose, 'odoo')
+        self.assertEqual((odoo['PERODUA_IMAGE_PROFILE'], odoo['INIT_MODULES'], odoo['RESTORED_MODULES'], odoo['EXCLUDED_MODULE']),
+                         ('demo-uiux', DEMO_MODULES, DEMO_MODULES, 'perodua_client_stable'))
+        # The personas, mail off (the image may carry settings of its own), and
+        # no PERODUA_DEMO_SEED: the image profile gives the sample data.
+        self.assertEqual((odoo['PERODUA_DEMO_PERSONAS'], odoo['PERODUA_MAIL']), ('1', 'off'))
+        self.assertNotIn('PERODUA_DEMO_SEED', odoo)
+        self.assertIn(f'    image: {DEMO_PINS["DEMO_ODOO_IMAGE"]}\n', compose)
+        self.assertIn(f'    image: {DEMO_PINS["DEMO_WEB_IMAGE"]}\n', compose)
+        self.assertIn('      - ./uat_demo.py:/opt/deploy/uat_demo.py:ro\n', compose)
+        self.assertIn(f'Deployment verified: {DEMO_PINS["DEMO_RELEASE"]} ({DEMO_PINS["DEMO_REVISION"]})', result.stdout)
+        # With an SMTP server, the mail settings of app.env apply as on the client line.
+        self.demo(SMTP_HOST='10.10.0.25', SMTP_ENCRYPTION='none', SMTP_FROM='no-reply@perodua.com.my',
+                  MAIL_REDIRECT_TO='off')
+        result = self.run_script('READY 0')
+        self.assertEqual(result.returncode, 0, result.stdout)
+        odoo = service_environment((self.deploy_dir / 'compose.yml').read_text(), 'odoo')
+        self.assertNotIn('PERODUA_MAIL', odoo)
+        self.assertEqual(odoo['PERODUA_SMTP_HOST'], '10.10.0.25')
+
+    def test_the_client_line_writes_no_line_and_no_demo_setting(self):
+        result = self.run_script('READY 0')
+        self.assertEqual(result.returncode, 0, result.stdout)
+        compose = (self.deploy_dir / 'compose.yml').read_text()
+        for text in ('PERODUA_DEMO_PERSONAS', 'PERODUA_MAIL:', 'uat_demo.py', 'PERODUA_LINE'):
+            self.assertNotIn(text, compose)
+        self.assertIn('      PERODUA_IMAGE_PROFILE: client-stable-uiux\n', compose)
+        self.assertNotIn('line=', (self.deploy_dir / '.deployment-identity').read_text())
+        self.assertNotIn('PERODUA_LINE', (self.deploy_dir / 'app.env').read_text())
+        for name in ('uat_demo.py', 'seeded-accounts.txt', 'rollback.sh'):
+            self.assertFalse((self.deploy_dir / name).exists(), name)
+
+    def test_a_directory_keeps_the_line_of_its_first_deployment(self):
+        self.assertEqual(self.run_script('READY 0').returncode, 0)
+        identity = (self.deploy_dir / '.deployment-identity').read_text()
+        self.demo()
+        self.log.unlink()
+        for extra in ((), ('--line', 'demo-uiux')):
+            with self.subTest(extra=extra):
+                result = self.run_script('READY 0', *extra)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(f'{self.deploy_dir} runs the client-stable-uiux line, and a directory keeps the line of its'
+                              ' first deployment', result.stdout)
+                self.assertIn(f'with --replace {self.deploy_dir}', result.stdout)
+                self.assertEqual(self.calls(), [])
+                self.assertEqual((self.deploy_dir / '.deployment-identity').read_text(), identity)
+        # And the other way: a directory of the demo-uiux line stays on it.
+        self.deploy_dir = Path(self.temp.name) / 'demo-app'
+        self.assertEqual(self.run_script('READY 0').returncode, 0)
+        self.configure()
+        self.log.unlink()
+        result = self.run_script('READY 0')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(f'{self.deploy_dir} runs the demo-uiux line', result.stdout)
+        self.assertEqual(self.calls(), [])
+        # A run that reads only its own app.env keeps its line.
+        result = subprocess.run(['bash', str(self.script), '--dir', str(self.deploy_dir), '--non-interactive'],
+                                env=self.env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn(f'Deployment verified: {DEMO_PINS["DEMO_RELEASE"]}', result.stdout)
+
+    # ── --replace ───────────────────────────────────────────────────────────
+    def replaced(self, name='old-app', **identity):
+        """Another deployment directory as deploy-app.sh leaves it: the client
+        line, on another project and database."""
+        old = Path(self.temp.name) / name
+        old.mkdir()
+        values = dict(release='client-stable-uiux-v1.2.2', revision='e' * 40, project='perodua-client-uiux',
+                      host='192.0.2.20', port='5432', database='perodua_client', user='odoo')
+        values.update(identity)
+        (old / '.deployment-identity').write_text(''.join(f'{key}={value}\n' for key, value in values.items()))
+        (old / 'compose.yml').write_text('# the compose file of the old deployment\n')
+        return old
+
+    def app_steps(self):
+        """(new or old, action) of the calls that stop, start or list an App."""
+        return [('old' if args[2] == 'perodua-client-uiux' else 'new', args[5]) for args in self.calls()
+                if args[:2] == ['compose', '--project-name'] and args[5] in ('ps', 'stop', 'up')]
+
+    def test_replace_stops_the_other_app_right_before_this_one_starts(self):
+        old = self.replaced()
+        self.demo()
+        result = self.run_script('EMPTY', '--init-db', '--replace', str(old), demo_accounts=self.DEMO_ACCOUNTS[0],
+                                 replace_running='0123abcd')
+        self.assertEqual(result.returncode, 0, result.stdout)
+        # The new database is set up first; the old App stops only right before the new one starts.
+        self.assertEqual(self.app_steps(), [('new', 'stop'), ('old', 'ps'), ('old', 'stop'), ('new', 'up')])
+        rollback = self.deploy_dir / 'rollback.sh'
+        self.assertEqual(rollback.stat().st_mode & 0o777, 0o700)
+        text = rollback.read_text()
+        self.assertIn(f'OLD_DIR={old} OLD_PROJECT=perodua-client-uiux OLD_RELEASE=client-stable-uiux-v1.2.2\n', text)
+        self.assertIn(f'NEW_DIR={self.deploy_dir} NEW_PROJECT=perodua-uat-fixture NEW_RELEASE={DEMO_PINS["DEMO_RELEASE"]}\n',
+                      text)
+        self.assertEqual(subprocess.run(['bash', '-n', str(rollback)]).returncode, 0)
+        self.assertIn(f'The way back: sudo bash {rollback}', result.stdout)
+        self.assertIn(f'This deployment takes the place of client-stable-uiux-v1.2.2 in {old}. Its App is stopped, not removed',
+                      result.stdout)
+        # Nothing of the old directory changed.
+        self.assertEqual(sorted(path.name for path in old.iterdir()), ['.deploy.lock', '.deployment-identity', 'compose.yml'])
+        self.assertEqual((old / 'compose.yml').read_text(), '# the compose file of the old deployment\n')
+
+    def test_replace_starts_the_other_app_again_when_this_one_fails(self):
+        old = self.replaced()
+        self.demo()
+        result = self.run_script('READY 0', '--replace', str(old), replace_running='0123abcd', http_exit=1)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.app_steps(), [('new', 'stop'), ('old', 'ps'), ('old', 'stop'), ('new', 'up'),
+                                            ('new', 'stop'), ('old', 'up')])
+        self.assertIn(f'Starting the App of client-stable-uiux-v1.2.2 in {old} again', result.stdout)
+        self.assertIn('runs again, with its own database and attachments', result.stdout)
+        # An App that was not running before stays stopped.
+        self.log.unlink()
+        result = self.run_script('READY 0', '--replace', str(old), replace_running='', http_exit=1)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.app_steps()[-1], ('new', 'stop'))
+        self.assertIn('was not running before this run, and stays stopped', result.stdout)
+
+    def test_replace_refuses_what_it_cannot_keep_before_docker(self):
+        self.demo()
+        missing = Path(self.temp.name) / 'nothing'
+        missing.mkdir()
+        cases = (
+            (str(self.replaced('same-project', project='perodua-uat-fixture')), (),
+             '--replace: ' + str(Path(self.temp.name) / 'same-project') + ' uses the Compose project perodua-uat-fixture as well'),
+            (str(self.replaced('same-database', database='perodua')), (), 'keeps database perodua of'),
+            (str(missing), (), '--replace needs a deployment'),
+            ('relative/old-app', (), '--replace must be an absolute directory path'),
+            (str(self.replaced('with-check')), ('--check-config',), 'not with --upgrade, --check-config'),
+        )
+        for target, extra, message in cases:
+            with self.subTest(message=message):
+                self.log.unlink(missing_ok=True)
+                result = self.run_script('READY 0', '--replace', target, *extra)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stdout)
+                self.assertEqual(self.calls(), [])
+
 
 REVISION = re.search(r'^REVISION=([0-9a-f]{40})$', SCRIPT.read_text(encoding='utf-8'), re.M).group(1)
 PUBLIC_HOST = 'perodua-public-check'
@@ -606,18 +944,18 @@ class HttpVerificationTests(unittest.TestCase):
         self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)
         text = SCRIPT.read_text(encoding='utf-8')
-        start = 'compose exec -T odoo python3 - "$REVISION" "$STARTUP_TIMEOUT" "$PUBLIC_ROOT" "$FRESH" <<\'PY\'\n'
+        start = 'compose exec -T odoo python3 - "$REVISION" "$STARTUP_TIMEOUT" "$PUBLIC_ROOT" "$PROFILE" "$FRESH" <<\'PY\'\n'
         self.assertIn(start, text)
         self.source = text.split(start, 1)[1].split('\nPY\n', 1)[0]
         self.assertIn("'http://web'", self.source)
 
-    def verify(self, root, fresh='0', **changes):
+    def verify(self, root, fresh='0', profile='client-stable-uiux', **changes):
         self.server.routes = web_routes(root)
         self.server.routes.update({('public', path): answer for path, answer in changes.items()})
         env = {k: v for k, v in os.environ.items() if 'proxy' not in k.lower()}
         env['http_proxy'] = f'http://127.0.0.1:{self.server.server_address[1]}'
         # STARTUP_TIMEOUT 0: the first failure is final. fresh '0': no sign-ins.
-        result = subprocess.run(['python3', '-', REVISION, '0', root, fresh], input=self.source, env=env,
+        result = subprocess.run(['python3', '-', REVISION, '0', root, profile, fresh], input=self.source, env=env,
                                 text=True, capture_output=True, timeout=60)
         # Every request went to the Compose service web.
         self.assertEqual(self.server.targets, {'web'})
@@ -645,6 +983,11 @@ class HttpVerificationTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
                 self.assertIn('UAT verification failed', result.stderr)
                 self.assertIn(('internal', 'POST /uiux/api/session/login'), self.server.requests)
+
+    def test_the_backend_reports_the_image_profile_of_the_line(self):
+        # The fake backend reports client-stable-uiux: right for that line only.
+        self.assertEqual(self.verify('/dev').returncode, 0)
+        self.assert_fails(self.verify('/dev', profile='demo-uiux'), 'backend profile mismatch')
 
     def test_a_page_at_the_root_passes_as_on_earlier_releases(self):
         result = self.verify('')

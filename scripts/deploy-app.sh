@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# App-only Client Stable UIUX deployment. Database service stays on its own host.
+# App-only deployment of the Client Stable UIUX line or of the demo-uiux line
+# (the line blocks below). Database service stays on its own host.
 set +x
 set -Eeuo pipefail
 export LC_ALL=C
@@ -42,18 +43,62 @@ EXCLUDED_MODULE=perodua_demo_client
 RESTORED_MODULES=perodua_client_stable,perodua_demo_client,perodua_gateway,perodua_forecast_workbook,perodua_supplier_execution,perodua_uiux_api
 # --upgrade to a release whose Odoo modules differ from the database's runs a
 # module upgrade (-u) only on a database stamped with this module fingerprint
-# (the modules of v1.2.1), and only in a deployment directory of a release that
+# (the modules of v1.2.1; a comma-separated list may name more than one), and
+# only in a deployment directory of a release that
 # OLD_RELEASES_ACCEPTED names. Any other fingerprint is refused before anything
 # changes. While the pinned image has this fingerprint itself, every --upgrade
 # keeps the modules and runs no -u.
 MODULE_UPGRADE_FROM=d7335a5c60803bc8be0f227d80c21639
 OLD_RELEASES_ACCEPTED=client-stable-uiux-v1.2.1
+# ── The demo-uiux line block ────────────────────────────────────────────────
+# The lines above are the block of the client-stable-uiux line, the default.
+# The first deployment of a directory chooses its line: --line demo-uiux, or
+# PERODUA_LINE=demo-uiux in its app.env. Every later run, --upgrade too, keeps
+# that line (app.env and .deployment-identity name it), and the DEMO_ values
+# below then take the place of the ones above. The demo-uiux line is the demo
+# line with the sign-in hub (perodua_sso_hub): all its workspaces, and a fresh
+# database gets its demo seed (sample data, mock screens and the personas).
+# Its release is a numbered grey release, copied registry to registry to the
+# private registry as the client images are: the Odoo image
+# perodua-odoo:demo-uiux-grey-vX.Y.Z (profile demo-uiux, built without the
+# mail password of the demo images) and the web image
+# perodua-odoo:demo-uiux-grey-web-vX.Y.Z (built from the web Dockerfile of the
+# client line: the page under PUBLIC_ROOT, the closed paths, the frame
+# headers). It has PUBLIC_ROOT, the hand-over and the mail code of the client
+# line from its first release.
+# PLACEHOLDERS until the first pin of a grey release: DEMO_RELEASE,
+# DEMO_REVISION and the two image digests name no image, and every run of the
+# demo-uiux line stops before it changes anything until they do.
+DEMO_RELEASE=demo-uiux-grey-vX.Y.Z
+DEMO_REVISION=PLACEHOLDER-the-perodua-odoo-commit-of-the-first-grey-release
+DEMO_ODOO_IMAGE=perodua-deploy.novutal.com/perodua-odoo:demo-uiux-grey-vX.Y.Z@sha256:PLACEHOLDER-digest-of-the-first-pin
+DEMO_WEB_IMAGE=perodua-deploy.novutal.com/perodua-odoo:demo-uiux-grey-web-vX.Y.Z@sha256:PLACEHOLDER-digest-of-the-first-pin
+# --init-db: the modules the entrypoint of the image installs on a new database
+# of the demo-uiux profile (docker/entrypoint.sh, DEFAULT_INIT_MODULES), and
+# perodua_sso_hub, with the demo seed of their install hooks. uat_guard.py
+# keeps perodua_client_stable (the client menu profile, which the image's
+# entrypoint refuses on this profile) out of them.
+DEMO_INIT_MODULES=perodua_demo_ui,perodua_portal,perodua_portal_workspaces,perodua_agent_portal,perodua_demo_client,perodua_gateway,perodua_forecast_workbook,perodua_demo_profile,perodua_supplier_execution,perodua_uiux_api,perodua_sso_hub
+DEMO_EXCLUDED_MODULE=perodua_client_stable
+DEMO_RESTORED_MODULES=perodua_demo_ui,perodua_portal,perodua_portal_workspaces,perodua_agent_portal,perodua_demo_client,perodua_gateway,perodua_forecast_workbook,perodua_demo_profile,perodua_supplier_execution,perodua_uiux_api,perodua_sso_hub
+# --upgrade from an earlier grey release: a module upgrade (-u) starts only
+# from one of these module fingerprints (comma-separated), and only in a
+# directory of one of these releases. Empty until a second grey release is
+# pinned: the first one takes no module upgrade.
+DEMO_MODULE_UPGRADE_FROM=
+DEMO_OLD_RELEASES_ACCEPTED=
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 DEPLOY_DIR=/opt/perodua-app
 CONFIG='' NON_INTERACTIVE=0 INIT_DB=0 CHECK_ONLY=0 TEMP_DIR='' AUTH_DIR='' STARTED=0
 # --upgrade: the release the directory runs before, the backup of its data,
 # whether its App was running, and how far the upgrade got (see cleanup).
 UPGRADE=0 BACKUP_BASE='' BACKUP_DIR='' OLD_RELEASE='' OLD_REVISION='' WAS_RUNNING=0 UPGRADE_STATE=''
+# The line of this deployment (--line, PERODUA_LINE) and its image profile.
+LINE='' LINE_OPTION='' PERODUA_LINE='' PROFILE=''
+# --replace DIR: the deployment of another directory that this one takes the
+# place of (its project, release and compose file), whether its App ran, and
+# whether this run stopped it.
+REPLACE_DIR='' REPLACE_PROJECT='' REPLACE_RELEASE='' REPLACE_RUNNING=0 REPLACE_STOPPED=0
 # A module upgrade: the modules it upgrades, Odoo's demo-data option, the
 # retired rows it deletes (and their lines in the report), the one-off
 # container and its process, whether a database upgraded earlier only waits
@@ -88,6 +133,7 @@ PREPARED=0
 usage() {
     cat <<'HELP'
 Usage: bash deploy-app.sh [--config PATH] [--dir PATH] [--non-interactive] [--init-db]
+                          [--line LINE] [--replace DIR]
        bash deploy-app.sh [--config PATH] [--dir PATH] --check-config
        bash deploy-app.sh --upgrade [--dir PATH] [--backup-dir PATH] [--non-interactive]
                           [--confirm DATABASE] [--drop-retired-data]
@@ -140,6 +186,18 @@ or off). A first run on a terminal asks whether to configure it.
 --mail asks the outgoing email questions again, with the saved answers as
 defaults, then deploys as usual. It needs a terminal.
 --send-test-mail ADDRESS sends one test email through the running deployment.
+--line LINE chooses the release line at the first deployment of a directory:
+client-stable-uiux (the default, the release above) or demo-uiux (the pinned
+grey release of the demo line with the sign-in hub). Later runs, --upgrade
+too, keep the line of the directory (PERODUA_LINE in app.env). On the
+demo-uiux line, --init-db gives the new database the demo seed (sample data,
+mock screens and personas) and each seeded account a new random password,
+listed only in --dir/seeded-accounts.txt (root only); the portal mode is off
+and the 17:00 Job Order Inbound run stays off. Without SMTP_HOST, mail is off.
+--replace DIR: this deployment takes the place of the one in DIR, which has
+another project and another database, such as the client-stable-uiux line on
+the same port. Right before this App starts, the App of DIR stops; nothing of
+DIR is removed. --dir/rollback.sh stops this App and starts that one again.
 HELP
 }
 fail() { printf 'Error: %s\n' "$*" >&2; exit 1; }
@@ -157,9 +215,59 @@ cleanup() {
     fi
     # Before the temporary Docker configuration goes: it may start the old App again.
     if (( status != 0 && UPGRADE )) && [[ -n $OLD_RELEASE ]]; then upgrade_stopped; fi
+    if (( status != 0 && REPLACE_STOPPED )); then replace_stopped; fi
     [[ -z $TEMP_DIR ]] || rm -rf -- "$TEMP_DIR"
     [[ -z $AUTH_DIR ]] || rm -rf -- "$AUTH_DIR"
     exit "$status"
+}
+replace_stopped() {  # --replace: this App failed after the App of REPLACE_DIR stopped
+    printf 'This deployment stopped after the App of %s in %s was stopped for it. Stopping the App of this directory...\n' \
+        "$REPLACE_RELEASE" "$REPLACE_DIR" >&2
+    docker compose --project-name "$PROJECT_NAME" --file "$DEPLOY_DIR/compose.yml" stop >&2
+    if ((REPLACE_RUNNING == 0)); then
+        printf 'The App of %s was not running before this run, and stays stopped.\n' "$REPLACE_RELEASE" >&2
+        return
+    fi
+    printf 'Starting the App of %s in %s again...\n' "$REPLACE_RELEASE" "$REPLACE_DIR" >&2
+    if docker compose --project-name "$REPLACE_PROJECT" --file "$REPLACE_DIR/compose.yml" \
+            up --detach --no-recreate --wait --wait-timeout "$STARTUP_TIMEOUT" >&2; then
+        printf 'The App of %s runs again, with its own database and attachments.\n' "$REPLACE_RELEASE" >&2
+    else
+        printf 'The App of %s did not start again. Start it with: sudo bash service.sh --role app --dir %q start\n' \
+            "$REPLACE_RELEASE" "$REPLACE_DIR" >&2
+    fi
+}
+replace_rollback() {  # rollback.sh: from this deployment back to the one of REPLACE_DIR
+    printf '#!/usr/bin/env bash\n'
+    printf '# Written by deploy-app.sh --replace on %s. Run it as root to go back from\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf '# %s in %s to %s in %s:\n' "$RELEASE" "$DEPLOY_DIR" "$REPLACE_RELEASE" "$REPLACE_DIR"
+    printf '# it stops this App and starts that one again. Each keeps its own database\n# and attachments; nothing is removed.\n'
+    printf 'NEW_DIR=%q NEW_PROJECT=%q NEW_RELEASE=%q\n' "$DEPLOY_DIR" "$PROJECT_NAME" "$RELEASE"
+    printf 'OLD_DIR=%q OLD_PROJECT=%q OLD_RELEASE=%q\n' "$REPLACE_DIR" "$REPLACE_PROJECT" "$REPLACE_RELEASE"
+    cat <<'SCRIPT'
+set -Eeuo pipefail
+fail() { printf 'Error: %s\n' "$*" >&2; exit 1; }
+[[ $EUID -eq 0 ]] || fail 'Run with sudo or as root.'
+new() { docker compose --project-name "$NEW_PROJECT" --file "$NEW_DIR/compose.yml" "$@"; }
+old() { docker compose --project-name "$OLD_PROJECT" --file "$OLD_DIR/compose.yml" "$@"; }
+# The lock that deploy-app.sh, service.sh and uninstall.sh hold in each directory.
+exec 8>>"$OLD_DIR/.deploy.lock" 9>>"$NEW_DIR/.deploy.lock"
+flock -n 8 || fail "A deployment, uninstall or service.sh step is running in $OLD_DIR. Nothing was changed."
+flock -n 9 || fail "A deployment, uninstall or service.sh step is running in $NEW_DIR. Nothing was changed."
+# The database check of the App that starts again, as service.sh start makes it.
+state=$(old run --rm --no-deps -T odoo python3 /opt/deploy/preflight.py check </dev/null) \
+    || fail "The database check of $OLD_RELEASE in $OLD_DIR failed for the reason above. Nothing was changed."
+[[ $state == READY\ * ]] || fail "The database of $OLD_RELEASE in $OLD_DIR is not set up ($state). Nothing was changed."
+printf 'Stopping %s in %s (nothing is removed)...\n' "$NEW_RELEASE" "$NEW_DIR"
+new stop
+printf 'Starting %s in %s...\n' "$OLD_RELEASE" "$OLD_DIR"
+old up --detach --no-recreate --wait --wait-timeout 600 \
+    || fail "$OLD_RELEASE did not become healthy. Logs: sudo docker compose --project-name $OLD_PROJECT --file $OLD_DIR/compose.yml logs --tail 100. To run $NEW_RELEASE again: sudo bash service.sh --role app --dir $OLD_DIR stop, then sudo bash service.sh --role app --dir $NEW_DIR start"
+printf '%s runs again in %s, with its own database and attachments. %s in %s is stopped, not removed.\n' \
+    "$OLD_RELEASE" "$OLD_DIR" "$NEW_RELEASE" "$NEW_DIR"
+printf 'To go forward again: sudo bash service.sh --role app --dir %s stop, then sudo bash service.sh --role app --dir %s start\n' \
+    "$OLD_DIR" "$NEW_DIR"
+SCRIPT
 }
 stop_module_upgrade() {  # the one-off -u container must not run on after this script
     if [[ -n $UPGRADE_PID ]]; then
@@ -258,7 +366,7 @@ trap 'exit 130' INT TERM
 trap '[[ $BASHPID != "$$" ]] || printf "Deployment failed at line %s.\n" "$LINENO" >&2' ERR
 while (($#)); do
     case $1 in
-        --config|--dir|--backup-dir|--confirm|--send-test-mail)
+        --config|--dir|--backup-dir|--confirm|--send-test-mail|--line|--replace)
             (($# >= 2)) || fail "$1 requires a value"
             case $1 in
                 --config) CONFIG=$2 ;;
@@ -266,6 +374,8 @@ while (($#)); do
                 --backup-dir) BACKUP_BASE=$2 ;;
                 --confirm) CONFIRM=$2; [[ -n $CONFIRM ]] || fail '--confirm requires the database name' ;;
                 --send-test-mail) TEST_MAIL=$2; [[ -n $TEST_MAIL ]] || fail '--send-test-mail requires the address that gets the test email' ;;
+                --line) LINE_OPTION=$2; [[ -n $LINE_OPTION ]] || fail '--line requires client-stable-uiux or demo-uiux' ;;
+                --replace) REPLACE_DIR=$2; [[ -n $REPLACE_DIR ]] || fail '--replace requires the deployment directory that this one takes the place of' ;;
             esac
             shift 2 ;;
         --non-interactive) NON_INTERACTIVE=1; shift ;;
@@ -315,6 +425,15 @@ if [[ -n $TEST_MAIL ]]; then
     [[ -f $DEPLOY_DIR/.deployment-identity && ! -L $DEPLOY_DIR/.deployment-identity ]] \
         || fail "--send-test-mail needs a deployment, and $DEPLOY_DIR has none (no .deployment-identity)"
 fi
+if [[ -n $REPLACE_DIR ]]; then
+    ((UPGRADE == 0 && CHECK_ONLY == 0 && RELEASE_MAIL == 0 && ${#TEST_MAIL} == 0)) \
+        || fail '--replace deploys this directory in the place of another one: not with --upgrade, --check-config, --release-queued-mail or --send-test-mail'
+    [[ $REPLACE_DIR == /* && $REPLACE_DIR != / && $REPLACE_DIR != *$'\n'* ]] || fail '--replace must be an absolute directory path, not /'
+    [[ ! -L $REPLACE_DIR && -d $REPLACE_DIR ]] || fail "--replace names $REPLACE_DIR, which is not a directory"
+    REPLACE_DIR=$(cd -- "$REPLACE_DIR" && pwd -P)
+    [[ -f $REPLACE_DIR/.deployment-identity && ! -L $REPLACE_DIR/.deployment-identity && -f $REPLACE_DIR/compose.yml ]] \
+        || fail "--replace needs a deployment, and $REPLACE_DIR has none (no .deployment-identity and compose.yml)"
+fi
 if [[ -z $CONFIG && -f $DEPLOY_DIR/app.env ]]; then
     CONFIG=$DEPLOY_DIR/app.env
     # Before the first deployment, app.env can only be the operator's: every
@@ -329,13 +448,52 @@ if [[ -n $CONFIG ]]; then
         [[ $line =~ ^([A-Z_]+)=(.*)$ ]] || fail 'Configuration must contain literal KEY=VALUE lines'
         key=${BASH_REMATCH[1]} value=${BASH_REMATCH[2]}
         case $key in
-            DB_HOST|DB_PORT|DB_NAME|DB_USER|DB_PASSWORD_FILE|PROJECT_NAME|HTTP_PORT|BIND_IP|STARTUP_TIMEOUT|INIT_TIMEOUT|PUBLIC_ROOT|ENVIRONMENT_LABEL|PUBLIC_BASE_URL|SMTP_HOST|SMTP_PORT|SMTP_ENCRYPTION|SMTP_USER|SMTP_PASSWORD_FILE|SMTP_FROM|SMTP_FROM_NAME|MAIL_REDIRECT_TO)
+            DB_HOST|DB_PORT|DB_NAME|DB_USER|DB_PASSWORD_FILE|PROJECT_NAME|HTTP_PORT|BIND_IP|STARTUP_TIMEOUT|INIT_TIMEOUT|PUBLIC_ROOT|ENVIRONMENT_LABEL|PUBLIC_BASE_URL|SMTP_HOST|SMTP_PORT|SMTP_ENCRYPTION|SMTP_USER|SMTP_PASSWORD_FILE|SMTP_FROM|SMTP_FROM_NAME|MAIL_REDIRECT_TO|PERODUA_LINE)
                 printf -v "$key" '%s' "$value"
                 [[ -z $value ]] || SET[$key]=1 ;;
             *) fail "Unknown configuration key: $key" ;;
         esac
     done < "$CONFIG"
 fi
+# The line of this deployment: --line or PERODUA_LINE at its first run, then
+# the line its directory names. A directory never changes its line: the
+# database stamp, the module lists and the images belong to one line. To move
+# an environment to the other line, deploy it in a new directory with a new
+# empty database (--replace; docs/DEPLOYMENT.md, "Switch an environment to
+# the demo-uiux line").
+LINE=${PERODUA_LINE:-client-stable-uiux}
+if [[ -n $LINE_OPTION ]]; then
+    [[ -z $PERODUA_LINE || $PERODUA_LINE == "$LINE_OPTION" ]] \
+        || fail "--line $LINE_OPTION and PERODUA_LINE=$PERODUA_LINE in $CONFIG name two lines. Give one"
+    LINE=$LINE_OPTION
+fi
+[[ $LINE == client-stable-uiux || $LINE == demo-uiux ]] \
+    || fail "Unknown line $LINE: the line is client-stable-uiux or demo-uiux"
+if [[ -f $DEPLOY_DIR/.deployment-identity && ! -L $DEPLOY_DIR/.deployment-identity ]]; then
+    deployed_line=$(sed -n 's/^line=//p' "$DEPLOY_DIR/.deployment-identity")
+    deployed_line=${deployed_line:-client-stable-uiux}
+    [[ $deployed_line == "$LINE" ]] \
+        || fail "$DEPLOY_DIR runs the $deployed_line line, and a directory keeps the line of its first deployment. To move this environment to the $LINE line, deploy that line in a new directory with a new empty database, with --replace $DEPLOY_DIR (docs/DEPLOYMENT.md, \"Switch an environment to the demo-uiux line\"). Nothing was changed"
+fi
+PROFILE=$LINE
+if [[ $LINE == demo-uiux ]]; then
+    RELEASE=$DEMO_RELEASE REVISION=$DEMO_REVISION ODOO_IMAGE=$DEMO_ODOO_IMAGE WEB_IMAGE=$DEMO_WEB_IMAGE
+    REGISTRY=${ODOO_IMAGE%%/*}
+    PUBLIC_ROOT_SUPPORTED=1 HANDOVER_SUPPORTED=1 MAIL_SUPPORTED=1
+    INIT_MODULES=$DEMO_INIT_MODULES EXCLUDED_MODULE=$DEMO_EXCLUDED_MODULE RESTORED_MODULES=$DEMO_RESTORED_MODULES
+    MODULE_UPGRADE_FROM=$DEMO_MODULE_UPGRADE_FROM OLD_RELEASES_ACCEPTED=$DEMO_OLD_RELEASES_ACCEPTED
+    # Its own Compose project (the attachments volume) and database by
+    # default, so that it never takes those of a client-stable-uiux deployment.
+    [[ -n ${SET[PROJECT_NAME]:-} ]] || PROJECT_NAME=perodua-demo-uiux
+    [[ -n ${SET[DB_NAME]:-} ]] || DB_NAME=perodua_demo
+    [[ -f $SCRIPT_DIR/uat_demo.py && ! -L $SCRIPT_DIR/uat_demo.py ]] \
+        || fail 'uat_demo.py is missing next to deploy-app.sh; run it from the complete release directory'
+fi
+# A block whose release is not pinned yet (the placeholders of the demo-uiux
+# block before its first pin) names no image: refused before anything else.
+image_pin='^[a-z0-9.-]+(:[0-9]{1,5})?/[a-z0-9._/-]+:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}$'
+[[ $RELEASE =~ ^[a-z0-9.-]+$ && $REVISION =~ ^[0-9a-f]{40}$ && $ODOO_IMAGE =~ $image_pin && $WEB_IMAGE =~ $image_pin ]] \
+    || fail "This scripts folder pins no release of the $LINE line yet: its block holds placeholders ($RELEASE). Use the scripts folder of a kit version that pins a $LINE release (README.md, \"The demo-uiux line\")"
 # Outgoing email needs the mail code of the image (v1.2.2 or later): without
 # it, refused before any question.
 if ((MAIL_SUPPORTED == 0)); then
@@ -746,6 +904,20 @@ if ((CHECK_ONLY)); then
     printf 'Configuration valid for %s. Nothing was changed.\n' "$RELEASE"
     exit 0
 fi
+if [[ -n $REPLACE_DIR ]]; then
+    # The deployment that this one takes the place of keeps all it has: its
+    # directory, its containers, its database and its attachments. So it must
+    # be another Compose project and another database.
+    REPLACE_PROJECT=$(sed -n 's/^project=//p' "$REPLACE_DIR/.deployment-identity")
+    REPLACE_RELEASE=$(sed -n 's/^release=//p' "$REPLACE_DIR/.deployment-identity")
+    replace_database=$(sed -n -e 's/^host=//p' -e 's/^port=//p' -e 's/^database=//p' "$REPLACE_DIR/.deployment-identity" | paste -sd ' ' -)
+    [[ $REPLACE_PROJECT =~ ^[a-z][a-z0-9_-]{0,49}$ && $REPLACE_RELEASE =~ ^[a-z0-9.-]+$ && $replace_database =~ ^[^\ ]+\ [^\ ]+\ [^\ ]+$ ]] \
+        || fail "Unreadable $REPLACE_DIR/.deployment-identity"
+    [[ $REPLACE_PROJECT != "$PROJECT_NAME" ]] \
+        || fail "--replace: $REPLACE_DIR uses the Compose project $PROJECT_NAME as well. Give this deployment a PROJECT_NAME of its own, such as perodua-demo-uiux"
+    [[ $replace_database != "$DB_HOST $DB_PORT $DB_NAME" ]] \
+        || fail "--replace keeps database $DB_NAME of $REPLACE_DIR as it is, and this deployment names the same one. Create a new empty database on the DB server (deploy-db.sh DB_MODE=empty with another DB_NAME) and set that DB_NAME"
+fi
 command -v docker >/dev/null || fail 'Docker is missing. First run install-dependencies.sh --role app on Ubuntu 24.04'
 docker compose version >/dev/null 2>&1 || fail 'Docker Compose v2 is required'
 docker info >/dev/null 2>&1 || fail 'Cannot reach Docker. Start the engine and check your account permissions'
@@ -769,8 +941,18 @@ fi
 chmod 0700 "$DEPLOY_DIR"
 exec 9>"$DEPLOY_DIR/.deploy.lock"
 flock -n 9 || fail 'Another deployment is running in this directory'
+if [[ -n $REPLACE_DIR ]]; then
+    [[ $REPLACE_DIR != "$DEPLOY_DIR" ]] || fail '--replace names the deployment directory of this run itself'
+    # Held to the end of the run: no deployment, uninstall or service.sh step
+    # in that directory meanwhile.
+    exec 8>>"$REPLACE_DIR/.deploy.lock"
+    flock -n 8 || fail "A deployment, uninstall or service.sh step is running in $REPLACE_DIR. Nothing was changed"
+fi
 TEMP_DIR=$(mktemp -d "$DEPLOY_DIR/.deploy.XXXXXXXX")
 printf '%s\n' "release=$RELEASE" "revision=$REVISION" "project=$PROJECT_NAME" "host=$DB_HOST" "port=$DB_PORT" "database=$DB_NAME" "user=$DB_USER" > "$TEMP_DIR/identity"
+# The line, only when it is not the default: the identity of a client-stable-uiux
+# directory stays as the scripts of earlier kit versions write and read it.
+[[ $LINE == client-stable-uiux ]] || printf 'line=%s\n' "$LINE" >> "$TEMP_DIR/identity"
 same_but_release() {  # whether the identity $1 differs from this run's in the release only
     [[ $(grep -Ev '^(release|revision)=' "$1") == "$(grep -Ev '^(release|revision)=' "$TEMP_DIR/identity")" ]]
 }
@@ -967,7 +1149,8 @@ cat > "$TEMP_DIR/preflight.py" <<'PY'
 #
 # A module upgrade (deploy-app.sh --upgrade to other modules), in this order:
 #   upgrade-check FROM   check, with the module upgrade's refusals when the
-#                        stored fingerprint is FROM: prints RETIRED lines,
+#                        stored fingerprint is one of FROM (comma-separated
+#                        fingerprints): prints RETIRED lines,
 #                        RESTORE_LOCKS, the MODULES to upgrade, then
 #                        MODULE_UPGRADE <attachments>. With the modules of
 #                        this release: RESTORE_LOCKS, then READY <attachments>.
@@ -981,8 +1164,9 @@ cat > "$TEMP_DIR/preflight.py" <<'PY'
 #   mark-upgrading FROM OLD NEW
 #                        saves the cron flags and the last mail id, keeps the
 #                        mail an earlier module upgrade still holds, and sets
-#                        perodua.image_modhash to 'upgrading:FROM'. Neither the
-#                        old release's check nor this one's accepts that.
+#                        perodua.image_modhash to 'upgrading:<the stored
+#                        fingerprint>'. Neither the old release's check nor
+#                        this one's accepts that.
 #   verify-upgrade       after -u: puts the cron flags back (a mock intake pull
 #                        stays off), holds every outgoing mail (the mail -u
 #                        queued and the mail that waited before it), checks
@@ -1000,7 +1184,9 @@ mode = sys.argv[1]
 init_modules = os.environ['INIT_MODULES'].split(',')
 restored_modules = os.environ['RESTORED_MODULES'].split(',')
 excluded = os.environ['EXCLUDED_MODULE']
-PROFILE = 'client-stable-uiux'
+# The line of the deployment: the image profile that compose.yml sets
+# (client-stable-uiux or demo-uiux); LINE_RULES below hold its rules.
+PROFILE = os.environ.get('PERODUA_IMAGE_PROFILE') or 'client-stable-uiux'
 params = dict(host=os.environ['DB_HOST'], port=os.environ['DB_PORT'], user=os.environ['DB_USER'],
               password=pathlib.Path('/run/secrets/db_password').read_text(), connect_timeout=10)
 def fail(message):
@@ -1058,7 +1244,30 @@ HOLD_REASON = 'Held by deploy-app.sh --upgrade (module upgrade): release it with
 # the same -u. perodua_demo_ui retires the bridge, which may stay recorded.
 RETIRED_MODULES = ('perodua_hw_sim', 'perodua_supplier_transport_ext', 'perodua_warehouse_ext')
 ALLOWED_ABSENT = ('perodua_demo_client_ui',)
-NEVER_INSTALLED = ('perodua_demo_client', 'perodua_reporting', 'perodua_e2e')
+# The rules of each line block:
+#   never_installed  modules a database of the line never has (the first one
+#                    is EXCLUDED_MODULE); a module upgrade refuses them, and
+#                    its result must not have them;
+#   host_codes       the workspace codes the release knows in the host table
+#                    perodua_client_stable.hosts (the parameter keeps its name
+#                    on both lines);
+#   demo_seed        whether a database of the line has the demo seed. Without
+#                    it (client-stable-uiux), a module upgrade needs a database
+#                    without sample data, and its result must have none.
+# PLACEHOLDER of the demo-uiux line until its first pin: host_codes holds only
+# rp, sp and cp. The first pin adds the codes that perodua_sso_hub gives the
+# four workspaces without a host of their own (on the rp host, owner answer
+# d03 A); until then, a host table that names them refuses a module upgrade.
+LINE_RULES = {
+    'client-stable-uiux': {'never_installed': ('perodua_demo_client', 'perodua_reporting', 'perodua_e2e'),
+                           'host_codes': ('rp', 'sp', 'cp'), 'demo_seed': False},
+    'demo-uiux': {'never_installed': ('perodua_client_stable', 'perodua_e2e'),
+                  'host_codes': ('rp', 'sp', 'cp'), 'demo_seed': True},
+}
+if PROFILE not in LINE_RULES:
+    fail('the image profile ' + PROFILE + ' is not a line of this scripts folder')
+LINE = LINE_RULES[PROFILE]
+NEVER_INSTALLED = LINE['never_installed']
 # The data the upgrade deletes with them (plan WP5, D3): tables, columns with a
 # value other than their default, and the attachments of the retired models.
 RETIRED_TABLES = ('perodua_transporter_rate', 'perodua_transporter_process', 'perodua_supplier_process',
@@ -1093,7 +1302,7 @@ REFERENCE_RECORDS = (
     ('perodua_orders_ext', 'customer_category_service', 'perodua_customer_category', 'CAT-SERVICE'),
     ('perodua_orders_ext', 'customer_category_body_paint', 'perodua_customer_category', 'CAT-BP'),
 )
-HOST_CODES = ('rp', 'sp', 'cp')
+HOST_CODES = LINE['host_codes']
 # The scheduled pulls that read a mock feed while their system resolves to
 # mock (perodua_integration.mode.<SYSTEM>, else perodua_integration.mode, else
 # mock). verify-upgrade never switches one of them on in that case.
@@ -1180,7 +1389,7 @@ def module_upgrade_problems(cur, modules, installed, uat, excluded_rows):
         if name in installed:
             problems.append(name + ' is installed')
     if excluded_rows:
-        problems.append('%d records of %s are in ir_model_data' % (excluded_rows, NEVER_INSTALLED[0]))
+        problems.append('%d records of %s are in ir_model_data' % (excluded_rows, excluded))
     image = image_versions()
     for name in sorted(installed):
         if not name.startswith('perodua_'):
@@ -1202,18 +1411,21 @@ def module_upgrade_problems(cur, modules, installed, uat, excluded_rows):
             if unknown:
                 problems.append('perodua_client_stable.hosts names the workspace codes %s; this release knows only %s'
                                 % (', '.join(unknown), ', '.join(HOST_CODES)))
-    seed = params_like(cur, 'perodua_demo.seed_mode', 'perodua_demo.seeded', '%.sample_data')
-    samples = {key: value for key, value in seed.items() if key.endswith('.sample_data')}
-    mode_value = seed.get('perodua_demo.seed_mode')
-    if mode_value is None and not samples:
-        problems.append('neither perodua_demo.seed_mode nor a <module>.sample_data parameter is set, so nothing keeps the sample data of the new release out')
-    if mode_value is not None and mode_value != 'none':
-        problems.append('perodua_demo.seed_mode is %s, not none' % mode_value)
-    loaded = sorted(key for key, value in samples.items() if value != 'none')
-    if loaded:
-        problems.append('sample data is on for: ' + ', '.join(loaded))
-    if seed.get('perodua_demo.seeded'):
-        problems.append('perodua_demo.seeded is set: a demonstration database')
+    # The demo seed of a demo-uiux database is part of it: its module upgrade
+    # keeps loading the sample data of the new release, as on the demo line.
+    if not LINE['demo_seed']:
+        seed = params_like(cur, 'perodua_demo.seed_mode', 'perodua_demo.seeded', '%.sample_data')
+        samples = {key: value for key, value in seed.items() if key.endswith('.sample_data')}
+        mode_value = seed.get('perodua_demo.seed_mode')
+        if mode_value is None and not samples:
+            problems.append('neither perodua_demo.seed_mode nor a <module>.sample_data parameter is set, so nothing keeps the sample data of the new release out')
+        if mode_value is not None and mode_value != 'none':
+            problems.append('perodua_demo.seed_mode is %s, not none' % mode_value)
+        loaded = sorted(key for key, value in samples.items() if value != 'none')
+        if loaded:
+            problems.append('sample data is on for: ' + ', '.join(loaded))
+        if seed.get('perodua_demo.seeded'):
+            problems.append('perodua_demo.seeded is set: a demonstration database')
     for module, name, table, code in REFERENCE_RECORDS:
         if not table_exists(cur, table):
             continue
@@ -1410,10 +1622,11 @@ def retired_export(cur):
                     + where + ' ORDER BY id', values)
         add(archive, 'attachments.csv', [d[0] for d in cur.description], cur.fetchall())
     sys.stdout.buffer.write(buffer.getvalue())
-def mark_upgrading(cn, cur, installed, fingerprint):
+def mark_upgrading(cn, cur, installed, fingerprint, old_fingerprint):
     # Before -u: the cron flags, the last mail, the modules and the mail that
-    # an earlier module upgrade still holds, then the mark.
-    old_fingerprint, old_release, new_release = sys.argv[2:5]
+    # an earlier module upgrade still holds, then the mark. old_fingerprint is
+    # the stored one, one of the fingerprints that FROM lists.
+    old_release, new_release = sys.argv[3:5]
     cur.execute('SELECT id, active FROM ir_cron ORDER BY id')
     crons = {str(cron): bool(active) for cron, active in cur.fetchall()}
     mail = 0
@@ -1492,12 +1705,12 @@ def verify_upgrade(cn, cur, modules, stored, fingerprint):
             problems.append('%s is at version %s, the release at %s' % (name, modules[name][2], image.get(name, 'none (not in the release)')))
     problems += [name + ' is no longer installed' for name in record['modules'] if name not in installed]
     seed = params_like(cur, 'perodua_demo.seeded', 'perodua.uat_init', 'perodua.runtime_profile')
-    if seed.get('perodua_demo.seeded'):
+    if seed.get('perodua_demo.seeded') and not LINE['demo_seed']:
         problems.append('perodua_demo.seeded is set: sample data was loaded')
     if seed.get('perodua.uat_init') != 'complete' or seed.get('perodua.runtime_profile') != PROFILE:
         problems.append('the release stamps perodua.uat_init and perodua.runtime_profile changed')
     cur.execute("SELECT count(*) FROM res_users WHERE login = 'agent'")
-    if cur.fetchone()[0] and not record['agent_login']:
+    if cur.fetchone()[0] and not record['agent_login'] and not LINE['demo_seed']:
         problems.append('the sample user agent was created')
     if problems:
         for problem in problems:
@@ -1643,12 +1856,14 @@ with connect(db) as cn:
         if uat == 'complete' and (excluded in installed or excluded_records()):
             fail(excluded + ' was installed into this UAT database after its initialization')
         if stored.get('perodua.runtime_profile') != PROFILE:
-            fail('runtime profile does not match client-stable-uiux; restore the correct database')
+            fail('runtime profile does not match ' + PROFILE + '; restore the correct database')
         cur.execute("SELECT count(*) FROM ir_attachment WHERE store_fname IS NOT NULL")
         attachments = cur.fetchone()[0]
         modhash = stored.get('perodua.image_modhash') or ''  # a fresh stamp above has just set it
-        upgrade_from = sys.argv[2] if mode in ('upgrade-check', 'mark-upgrading') and len(sys.argv) > 2 else ''
-        if modhash != fingerprint and upgrade_from and modhash == upgrade_from:
+        # FROM: the fingerprints a module upgrade starts from, comma-separated.
+        upgrade_from = [value for value in sys.argv[2].split(',') if value] \
+            if mode in ('upgrade-check', 'mark-upgrading') and len(sys.argv) > 2 else []
+        if modhash != fingerprint and modhash in upgrade_from:
             # The modules of the release the module upgrade starts from. The
             # mark checks again what upgrade-check checked.
             problems = module_upgrade_problems(cur, modules, installed, uat, excluded_records())
@@ -1665,7 +1880,7 @@ with connect(db) as cn:
                 # exits 1, which may come after the commit of the mark.
                 refuse(problems, 3 if mode == 'mark-upgrading' else 1)
             if mode == 'mark-upgrading':
-                mark_upgrading(cn, cur, installed, fingerprint)
+                mark_upgrading(cn, cur, installed, fingerprint, modhash)
             for kind, name, count in retired_counts(cur):
                 print('RETIRED %s %s %d' % (kind, name, count))
             print(restore_locks_line(locks))
@@ -1714,6 +1929,18 @@ if [[ -n $SMTP_HOST ]]; then
     [[ -z $SMTP_FROM_NAME ]] || mail_environment+=$'\n'"      PERODUA_SMTP_FROM_NAME: \"$SMTP_FROM_NAME\""
     mail_environment+=$'\n'"      PERODUA_MAIL_REDIRECT_TO: \"$MAIL_REDIRECT_TO\""
 fi
+# The demo-uiux line: its personas (the persona seed of perodua_demo runs only
+# with this switch), mail off unless SMTP_HOST is set (whatever mail settings
+# the image itself may carry), and the helper of its UAT setup. No
+# PERODUA_DEMO_SEED: the image profile gives the sample data and the mock
+# screens, as on the demo line. The client-stable-uiux line gets none of
+# these lines, so its compose.yml stays as earlier kit versions write it.
+line_environment='' line_volumes=''
+if [[ $LINE == demo-uiux ]]; then
+    line_environment+=$'\n'"      PERODUA_DEMO_PERSONAS: \"1\""
+    [[ -n $SMTP_HOST ]] || line_environment+=$'\n'"      PERODUA_MAIL: \"off\""
+    line_volumes=$'\n'"      - ./uat_demo.py:/opt/deploy/uat_demo.py:ro"
+fi
 cat > "$TEMP_DIR/compose.yml" <<YAML
 services:
   odoo:
@@ -1725,17 +1952,17 @@ services:
       DB_PASSWORD_FILE: /run/secrets/db_password
       DB_NAME: "$DB_NAME"
       PERODUA_DB: "$DB_NAME"
-      PERODUA_IMAGE_PROFILE: client-stable-uiux
+      PERODUA_IMAGE_PROFILE: $PROFILE
       INIT_MODULES: "$INIT_MODULES"
       RESTORED_MODULES: "$RESTORED_MODULES"
-      EXCLUDED_MODULE: "$EXCLUDED_MODULE"$mail_environment
+      EXCLUDED_MODULE: "$EXCLUDED_MODULE"$line_environment$mail_environment
     command: ["odoo", "-c", "/etc/odoo/odoo.conf", "-d", "$DB_NAME", "--proxy-mode", "--workers=0"]
     secrets: [$odoo_secrets]
     volumes:
       - filestore:/var/lib/odoo
       - ./preflight.py:/opt/deploy/preflight.py:ro
       - ./uat_guard.py:/opt/deploy/uat_guard.py:ro
-      - ./uat_admins.py:/opt/deploy/uat_admins.py:ro
+      - ./uat_admins.py:/opt/deploy/uat_admins.py:ro$line_volumes
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8069/web/health', timeout=5)"]
       interval: 10s
@@ -1773,12 +2000,26 @@ YAML
 # Generated helper is read-only, uses the release image's Python and psycopg2.
 chmod 0444 "$TEMP_DIR/preflight.py"
 # The UAT helpers ship next to this script and run with the image's Python.
-for helper in uat_guard.py uat_admins.py; do install -m 0444 -- "$SCRIPT_DIR/$helper" "$TEMP_DIR/$helper"; done
+HELPERS=(uat_guard.py uat_admins.py)
+[[ $LINE != demo-uiux ]] || HELPERS+=(uat_demo.py)
+for helper in "${HELPERS[@]}"; do install -m 0444 -- "$SCRIPT_DIR/$helper" "$TEMP_DIR/$helper"; done
 # --upgrade: up to here nothing in the directory has changed. The new release
 # checks the database and saves it from a staged copy of the deployment in
 # TEMP_DIR: the same project, so the same attachments volume and network. The
 # directory's files and containers stay those of the old release until the
 # switch below.
+fingerprints() {  # MODULE_UPGRADE_FROM in words: the one fingerprint, or "one of" the list
+    if [[ $MODULE_UPGRADE_FROM == *,* ]]; then printf 'one of %s' "${MODULE_UPGRADE_FROM//,/, }"; else printf '%s' "$MODULE_UPGRADE_FROM"; fi
+}
+upgrade_sources() {  # where a module upgrade of this line starts from, in words
+    local release names=''
+    if [[ -z $MODULE_UPGRADE_FROM || -z $OLD_RELEASES_ACCEPTED ]]; then
+        printf 'from the modules of an earlier %s release that this scripts folder accepts, and it accepts none' "$LINE"
+        return
+    fi
+    for release in ${OLD_RELEASES_ACCEPTED//,/ }; do names+="${names:+, }${release##*-}"; done
+    printf 'from the modules of %s (fingerprint %s)' "$names" "$(fingerprints)"
+}
 staged() { docker compose --project-name "$PROJECT_NAME" --file "$TEMP_DIR/compose.yml" "$@"; }
 current() { docker compose --project-name "$PROJECT_NAME" --file "$DEPLOY_DIR/compose.yml" "$@"; }
 upgrade_check_database() {
@@ -1793,7 +2034,7 @@ upgrade_check_database() {
             </dev/null 2> "$TEMP_DIR/check.log"); then
         cat "$TEMP_DIR/check.log" >&2
         if grep -q 'module fingerprint does not match' "$TEMP_DIR/check.log"; then
-            fail "$RELEASE has other Odoo modules than the release that set up database $DB_NAME. It upgrades modules (-u) only from the modules of v1.2.1 (fingerprint $MODULE_UPGRADE_FROM)"
+            fail "$RELEASE has other Odoo modules than the release that set up database $DB_NAME. It upgrades modules (-u) only $(upgrade_sources)"
         fi
         if grep -q 'marked by a module upgrade that did not finish' "$TEMP_DIR/check.log"; then
             DB_MARKED=1
@@ -1833,7 +2074,7 @@ upgrade_check_database() {
     [[ $UPGRADE_MODULES =~ ^perodua_[a-z0-9_]+(,perodua_[a-z0-9_]+)*$ ]] || fail "Unexpected module list from the database check: $UPGRADE_MODULES"
     retired_counts "$report"
     printf 'Database %s has the modules of %s (fingerprint %s). %s has other modules: this upgrade runs a module upgrade (-u) of %s modules. %s attachments.\n' \
-        "$DB_NAME" "$OLD_RELEASE" "$MODULE_UPGRADE_FROM" "$RELEASE" "$(tr ',' '\n' <<< "$UPGRADE_MODULES" | wc -l | tr -d ' ')" "${state#MODULE_UPGRADE }"
+        "$DB_NAME" "$OLD_RELEASE" "$(fingerprints)" "$RELEASE" "$(tr ',' '\n' <<< "$UPGRADE_MODULES" | wc -l | tr -d ' ')" "${state#MODULE_UPGRADE }"
     way_back_locks "$report"  # preflight.py refuses the module upgrade when they do not fit
     if ((RETIRED_TOTAL == 0)); then
         printf 'Retired data: none. The tables, columns and attachments of the retired modules hold nothing that the upgrade deletes.\n'
@@ -1929,10 +2170,10 @@ upgrade_recheck_database() {
     ((DROP_RETIRED)) \
         || fail "Users wrote data of the retired modules after the first check, while the App ran (above). The module upgrade deletes it. Once its owner agreed, run --upgrade again with --drop-retired-data: the rows are saved as CSV in the backup folder (retired-data.tar.gz) before the upgrade"
 }
-module_upgrade_guard() {  # before anything changes: the modules -u touches never need perodua_demo_client
+module_upgrade_guard() {  # before anything changes: the modules -u touches never need EXCLUDED_MODULE
     printf 'Checking that the module upgrade keeps %s out of database %s...\n' "$EXCLUDED_MODULE" "$DB_NAME"
     if ! staged run --rm --no-deps -T odoo python3 /opt/deploy/uat_guard.py guard --modules "$UPGRADE_MODULES" \
-            --exclude "$EXCLUDED_MODULE" --odoo-config /etc/odoo/odoo.conf --json \
+            --exclude "$EXCLUDED_MODULE" --line "$LINE" --odoo-config /etc/odoo/odoo.conf --json \
             </dev/null > "$TEMP_DIR/uat-guard.json" 2> "$TEMP_DIR/uat-guard.log"; then
         cat "$TEMP_DIR/uat-guard.log" >&2
         fail "Refused before any change: the modules of $RELEASE cannot keep $EXCLUDED_MODULE out of database $DB_NAME safely (above)"
@@ -2215,7 +2456,7 @@ if ((UPGRADE)); then
     UPGRADE_STATE=switched
 fi
 install -d -m 0700 "$DEPLOY_DIR/secrets"
-for file in compose.yml preflight.py uat_guard.py uat_admins.py; do mv -f -- "$TEMP_DIR/$file" "$DEPLOY_DIR/$file"; done
+for file in compose.yml preflight.py "${HELPERS[@]}"; do mv -f -- "$TEMP_DIR/$file" "$DEPLOY_DIR/$file"; done
 mv -f -- "$TEMP_DIR/db_password" "$DEPLOY_DIR/secrets/db_password"
 if [[ -n $SMTP_USER ]]; then
     mv -f -- "$TEMP_DIR/smtp_password" "$DEPLOY_DIR/secrets/smtp_password"
@@ -2229,6 +2470,9 @@ if [[ ! -e $DEPLOY_DIR/.deployment-identity ]]; then
 fi
 mv -f -- "$TEMP_DIR/identity" "$DEPLOY_DIR/.deployment-identity"
 {
+    # The line, only when it is not the default: the scripts of earlier kit
+    # versions refuse the key, and they deploy the client-stable-uiux line only.
+    [[ $LINE == client-stable-uiux ]] || printf 'PERODUA_LINE=%s\n' "$LINE"
     for key in DB_HOST DB_PORT DB_NAME DB_USER PROJECT_NAME HTTP_PORT BIND_IP STARTUP_TIMEOUT INIT_TIMEOUT; do printf '%s=%s\n' "$key" "${!key}"; done
     # Only when set: empty is their default, and an app.env without them stays
     # readable by the scripts of v1.0.3 and earlier, which refuse unknown keys.
@@ -2263,8 +2507,62 @@ uat_setup() {
         bash -c 'PGPASSWORD="$DB_PASSWORD" exec odoo shell -c /etc/odoo/odoo.conf -d "$DB_NAME" --db_host="$DB_HOST" --db_port="$DB_PORT" --db_user="$DB_USER" < /opt/deploy/uat_admins.py' \
         > "$DEPLOY_DIR/uat-setup.log" 2>&1 || fail "UAT administrator setup failed; see $DEPLOY_DIR/uat-setup.log. Rerun with --init-db to retry it; modules are not reinstalled"
     grep -F 'UAT admins: ready:' "$DEPLOY_DIR/uat-setup.log" || fail "UAT administrator setup did not confirm completion; see $DEPLOY_DIR/uat-setup.log"
+    [[ $LINE != demo-uiux ]] || uat_demo install
     state=$(preflight verify-fresh)
     [[ $state == VERIFIED\ * ]] || fail 'Fresh UAT database failed its post-initialization checks'
+}
+SEEDED=''
+uat_demo() {
+    # The demo-uiux line: uat_demo.py with PERODUA_UAT_DEMO=$1 (install or
+    # upgrade). Its standard output holds the new passwords: it goes to a file
+    # in TEMP_DIR (0700), never to the terminal, a log or a Docker log (the
+    # no-log override), and only its SEEDED_ACCOUNT lines go on, to
+    # seeded-accounts.txt (0600 in the 0700 deployment directory).
+    local mode=$1 output=$TEMP_DIR/uat-demo.out list=$TEMP_DIR/seeded-accounts.txt ready count rerun
+    # uat_demo.py commits only after its own checks. A rerun of install gives
+    # every seeded account a new password again; a rerun of upgrade, each one
+    # that still has the seed password.
+    if [[ $mode == install ]]; then rerun='Rerun with --init-db to retry it; modules are not reinstalled'; else rerun='Run deploy-app.sh again to retry it'; fi
+    printf 'services:\n  odoo:\n    logging:\n      driver: none\n' > "$TEMP_DIR/no-log.yml"
+    if [[ $mode == install ]]; then
+        printf 'Giving each account of the demo seed a new random password, and switching the portal mode and the 17:00 Job Order Inbound run off...\n'
+    else
+        printf 'Giving each account that still has the seed password a new random password...\n'
+    fi
+    # shellcheck disable=SC2016
+    timeout --foreground "$INIT_TIMEOUT" docker compose --project-name "$PROJECT_NAME" --file "$DEPLOY_DIR/compose.yml" \
+        --file "$TEMP_DIR/no-log.yml" run --rm --no-deps -T -e PERODUA_UAT_DEMO="$mode" odoo \
+        bash -c 'PGPASSWORD="$DB_PASSWORD" exec odoo shell -c /etc/odoo/odoo.conf -d "$DB_NAME" --db_host="$DB_HOST" --db_port="$DB_PORT" --db_user="$DB_USER" < /opt/deploy/uat_demo.py' \
+        </dev/null > "$output" 2>> "$DEPLOY_DIR/uat-demo.log" \
+        || fail "The UAT setup of the demo-uiux line failed; see $DEPLOY_DIR/uat-demo.log. $rerun"
+    ready=$(grep -m 1 -E '^UAT demo: ready: [0-9]+ ' "$output") \
+        || fail "The UAT setup of the demo-uiux line did not confirm completion; see $DEPLOY_DIR/uat-demo.log. $rerun"
+    printf '%s\n' "$ready" | tee -a "$DEPLOY_DIR/uat-demo.log"
+    [[ $ready =~ ^UAT\ demo:\ ready:\ ([0-9]+)\  ]] || fail "Unexpected answer from the UAT setup of the demo-uiux line: $ready"
+    count=$(awk -F '\t' '$1 == "SEEDED_ACCOUNT" && NF == 4' "$output" | wc -l | tr -d ' ')
+    [[ $count == "${BASH_REMATCH[1]}" ]] || fail "The UAT setup of the demo-uiux line reported ${BASH_REMATCH[1]} new passwords and listed $count. $rerun"
+    SEEDED=$count
+    if [[ $mode == upgrade ]] && ((count == 0)); then rm -f -- "$output"; return 0; fi
+    {
+        if [[ $mode == install || ! -f $DEPLOY_DIR/seeded-accounts.txt ]]; then
+            printf '# The seeded accounts of database %s and their passwords. Only root may read this file.\n' "$DB_NAME"
+            printf '# deploy-app.sh gave each one a new random password. whadmin, admin1 and admin2 keep "perodua".\n'
+            printf '# login\tpassword\taccount\n'
+        else
+            cat -- "$DEPLOY_DIR/seeded-accounts.txt"
+        fi
+        if [[ $mode == install ]]; then
+            printf '# %s, --init-db of %s:\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$RELEASE"
+        else
+            printf '# %s, module upgrade to %s:\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$RELEASE"
+        fi
+        awk -F '\t' '$1 == "SEEDED_ACCOUNT" && NF == 4 { print $2 "\t" $3 "\t" $4 }' "$output"
+    } > "$list"
+    rm -f -- "$output"
+    chmod 0600 "$list"
+    mv -f -- "$list" "$DEPLOY_DIR/seeded-accounts.txt"
+    printf 'Seeded accounts: %s got a new random password. They are listed in %s/seeded-accounts.txt, which only root may read; no output shows them.\n' \
+        "$count" "$DEPLOY_DIR"
 }
 clear_leftover_attachments() {
     # Files an earlier deployment of this project left in the volume belong to
@@ -2301,9 +2599,14 @@ case $state in
         [[ $state != MISSING_NO_CREATEDB ]] || fail "Database $DB_NAME does not exist and $DB_USER may not create databases (by design). On the DB server run deploy-db.sh with DB_MODE=empty to create it, then rerun with --init-db"
         bind_directory
         ((LEFTOVER == 0)) || clear_leftover_attachments
-        printf 'Initializing NEW UAT database %s without %s and without Odoo demo data.\n' "$DB_NAME" "$EXCLUDED_MODULE"
+        if [[ $LINE == demo-uiux ]]; then
+            printf 'Initializing NEW UAT database %s of the demo-uiux line, with its demo seed (sample data, mock screens and personas), without %s and without Odoo demo data.\n' \
+                "$DB_NAME" "$EXCLUDED_MODULE"
+        else
+            printf 'Initializing NEW UAT database %s without %s and without Odoo demo data.\n' "$DB_NAME" "$EXCLUDED_MODULE"
+        fi
         printf 'Checking the pinned image before anything is written to the database...\n'
-        if ! uat_helper guard --modules "$INIT_MODULES" --exclude "$EXCLUDED_MODULE" --odoo-config /etc/odoo/odoo.conf --json \
+        if ! uat_helper guard --modules "$INIT_MODULES" --exclude "$EXCLUDED_MODULE" --line "$LINE" --odoo-config /etc/odoo/odoo.conf --json \
                 > "$DEPLOY_DIR/uat-guard.json" 2> "$DEPLOY_DIR/uat-guard.log"; then
             cat "$DEPLOY_DIR/uat-guard.log" >&2
             fail "Refused before any database change: the pinned image cannot keep $EXCLUDED_MODULE out safely. Report: $DEPLOY_DIR/uat-guard.json"
@@ -2344,6 +2647,9 @@ case $state in
         # stamp follows the checks below. No module upgrade runs here.
         printf 'The Odoo modules of database %s are upgraded to %s and checked: deploying it, with no module upgrade.\n' "$DB_NAME" "$RELEASE"
         bind_directory
+        # An account that the module upgrade added with the seed password
+        # (such as a new persona) gets a random one; a rerun finds none left.
+        [[ $LINE != demo-uiux ]] || uat_demo upgrade
         PENDING_STAMP=1 ;;
     *) fail 'Unexpected database preflight response' ;;
 esac
@@ -2402,13 +2708,29 @@ fi
 compose stop web odoo
 [[ $(preflight public-urls "$PUBLIC_BASE_URL") == PUBLIC_URLS_SET ]] \
     || fail 'Could not record the report and public addresses in the database. The App is stopped: fix the cause and run deploy-app.sh again'
+if [[ -n $REPLACE_DIR ]]; then
+    # --replace: the way back first, then the App of REPLACE_DIR stops (it
+    # may hold the same port), right before this App starts. If this run then
+    # fails, the cleanup stops this App and starts that one again.
+    replace_running=$(docker compose --project-name "$REPLACE_PROJECT" --file "$REPLACE_DIR/compose.yml" ps --quiet --status running) \
+        || fail "Cannot read the state of the App of $REPLACE_DIR. Nothing of it was changed"
+    [[ -z $replace_running ]] || REPLACE_RUNNING=1
+    replace_rollback > "$TEMP_DIR/rollback.sh"
+    chmod 0700 "$TEMP_DIR/rollback.sh"
+    mv -f -- "$TEMP_DIR/rollback.sh" "$DEPLOY_DIR/rollback.sh"
+    printf 'Stopping the App of %s in %s, which this deployment takes the place of. Nothing of it is removed: its containers, database %s and attachments stay. The way back: sudo bash %q\n' \
+        "$REPLACE_RELEASE" "$REPLACE_DIR" "$(sed -n 's/^database=//p' "$REPLACE_DIR/.deployment-identity")" "$DEPLOY_DIR/rollback.sh"
+    REPLACE_STOPPED=1
+    docker compose --project-name "$REPLACE_PROJECT" --file "$REPLACE_DIR/compose.yml" stop
+fi
 STARTED=1
 compose up -d --force-recreate --wait --wait-timeout "$STARTUP_TIMEOUT"
-compose exec -T odoo python3 - "$REVISION" "$STARTUP_TIMEOUT" "$PUBLIC_ROOT" "$FRESH" <<'PY'
+compose exec -T odoo python3 - "$REVISION" "$STARTUP_TIMEOUT" "$PUBLIC_ROOT" "$PROFILE" "$FRESH" <<'PY'
 import http.cookiejar, json, sys, time, urllib.parse, urllib.request, urllib.error
 revision=sys.argv[1]
 public_root=sys.argv[3]
-fresh=sys.argv[4] == '1'
+profile=sys.argv[4]
+fresh=sys.argv[5] == '1'
 def fetch(path):
     with urllib.request.urlopen('http://web' + path, timeout=20) as response:
         return json.load(response)
@@ -2463,7 +2785,7 @@ def verify():
     backend=fetch('/uiux/api/version')['data']
     if frontend.get('source_revision') != revision or backend.get('source_revision') != revision:
         raise ValueError('frontend/backend source revision mismatch')
-    if backend.get('image_profile') != 'client-stable-uiux':
+    if backend.get('image_profile') != profile:
         raise ValueError('backend profile mismatch')
     with urllib.request.urlopen('http://web/app/',timeout=20) as r:
         if b'<html' not in r.read().lower(): raise ValueError('frontend did not serve HTML')
@@ -2553,8 +2875,19 @@ if ((PENDING_STAMP)); then
         "$HELD_MAIL" "$HELD_MAIL_BEFORE"
     # The public host names do not open Odoo's own pages when PUBLIC_ROOT is
     # set, so the message also names the list that needs no web page.
-    printf 'Review the held mail: README.md, "Upgrade an App server to %s", step 13 lists it with psql on the DB server (in Odoo: Settings > Technical > Emails, status Delivery Failed). Then send it with: sudo bash deploy-app.sh --release-queued-mail --dir %q\n' \
-        "${RELEASE##*-}" "$DEPLOY_DIR"
+    if [[ $LINE == demo-uiux ]]; then
+        held_steps='README.md, "Upgrade the demo-uiux line", lists it with psql on the DB server'
+    else
+        held_steps="README.md, \"Upgrade an App server to ${RELEASE##*-}\", step 13 lists it with psql on the DB server"
+    fi
+    printf 'Review the held mail: %s (in Odoo: Settings > Technical > Emails, status Delivery Failed). Then send it with: sudo bash deploy-app.sh --release-queued-mail --dir %q\n' \
+        "$held_steps" "$DEPLOY_DIR"
+    [[ -z $SEEDED ]] || ((SEEDED == 0)) \
+        || printf 'Seeded accounts: %s more, each with a new random password, in %s/seeded-accounts.txt (root only).\n' "$SEEDED" "$DEPLOY_DIR"
+fi
+if ((REPLACE_STOPPED)); then
+    printf 'This deployment takes the place of %s in %s. Its App is stopped, not removed: its containers, its database and its attachments stay. The way back: sudo bash %q\n' \
+        "$REPLACE_RELEASE" "$REPLACE_DIR" "$DEPLOY_DIR/rollback.sh"
 fi
 if [[ $BIND_IP == 127.0.0.1 ]]; then
     printf 'HTTP URL: http://127.0.0.1:%s%s/app/ (this server only). From your computer: ssh -N -L %s:127.0.0.1:%s <user>@<APP_SERVER_IP>, then open http://localhost:%s%s/app/\n' \
@@ -2573,6 +2906,11 @@ elif ((MAIL_SUPPORTED)); then
 fi
 if ((FRESH)); then
     printf 'UAT administrators (UAT only, fixed password): whadmin, admin1, admin2 / perodua\n'
+    if [[ $LINE == demo-uiux ]]; then
+        printf 'The other %s accounts of the demo seed (roles, portal logins, personas) have random passwords: sudo cat %q\n' \
+            "${SEEDED:-0}" "$DEPLOY_DIR/seeded-accounts.txt"
+        printf 'Portal mode: off (portal accounts sign in through the hub later). The 17:00 Job Order Inbound run: off.\n'
+    fi
 fi
 printf 'HTTP only. Configure a trusted HTTPS entry point before exposing real credentials.\n'
 printf 'Browser login, business journeys and real-server firewall checks remain part of deployment acceptance.\n'

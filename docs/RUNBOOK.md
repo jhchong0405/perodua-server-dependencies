@@ -123,6 +123,33 @@ lines above the error give the reason: a wrong setting (run
 `sudo bash deploy-app.sh --mail` to check the answers), or a firewall between
 the App server and the SMTP server.
 
+## 7. App Server: a deployment of the demo-uiux line
+
+Only for a directory of the demo-uiux line (`PERODUA_LINE=demo-uiux` in its
+`app.env`), such as `/opt/perodua-app-demo` with the project
+`perodua-demo-uiux`. Checks 1 and 2 use that project and directory.
+
+```bash
+sudo grep -x 'line=demo-uiux' /opt/perodua-app-demo/.deployment-identity
+sudo stat -c '%a %U %n' /opt/perodua-app-demo/seeded-accounts.txt
+sudo docker compose -p perodua-demo-uiux -f /opt/perodua-app-demo/compose.yml exec -T odoo \
+  python3 -c "import json, urllib.request; print(json.load(urllib.request.urlopen('http://127.0.0.1:8069/uiux/api/version'))['data']['image_profile'])"
+```
+
+**PASS:** the first command prints `line=demo-uiux`, the second
+`600 root .../seeded-accounts.txt`, the third `demo-uiux`. Do not print or copy
+`seeded-accounts.txt` into a ticket: it holds the passwords of the seeded
+accounts.
+
+When this deployment took the place of another one (`--replace`),
+`/opt/perodua-app-demo/rollback.sh` exists, and the other one is stopped:
+
+```bash
+sudo docker compose -p perodua-client-uiux -f /opt/perodua-app/compose.yml ps -a
+```
+
+**PASS:** its `web` and `odoo` show `Exited`, not removed.
+
 ## If a check fails
 
 Send the failed check's output and the relevant log excerpt to support.

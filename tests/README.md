@@ -992,6 +992,45 @@ name in SQL, data files, spreadsheets and compiled code; `auto_install=True` and
 the requested list; prose mentions that are not references; reviewed references
 pinned to file hashes; addons-path shadowing; and inputs it cannot inspect,
 including an unexpected error, which must stop the initialization (exit 2).
+The demo-uiux line (`--line demo-uiux` or `PERODUA_LINE=demo-uiux`) has its
+own cases. The client-stable-uiux cases above stay as they are: the client
+compose file, `app.env` and identity get no line settings.
+
+- `test_deploy_app_uat.py` copies the scripts folder with test pins in the demo
+  block (`DEMO_PINS`). It checks that the placeholders of the shipped block stop
+  every run before Docker (`--check-config` too); that `--line` and
+  `PERODUA_LINE` must agree and name a known line; that a directory keeps the
+  line of its first deployment, both ways; the demo init list (the entrypoint
+  list and `perodua_sso_hub`); the guard call with `--line demo-uiux`; the
+  compose settings (`PERODUA_IMAGE_PROFILE`, `PERODUA_DEMO_PERSONAS`,
+  `PERODUA_MAIL: "off"` without `SMTP_HOST`, `uat_demo.py` mounted); that
+  `uat_demo.py` runs in `odoo shell` without a Docker log; that
+  `seeded-accounts.txt` gets mode 0600 and one row per account, and that no
+  seeded password is in the output, on a Docker command line or in another
+  file of the directory (`uat-demo.log` included); a failed or incomplete `uat_demo.py` run and its resume; the upgrade
+  mode, which appends; `--replace` (the order of the stops, `rollback.sh` and
+  its syntax, the old App started again after a failure, unless it was not
+  running) and its refusals before Docker; and that the deploy-app.sh has one
+  plain `RELEASE=`, `REVISION=`, `DEMO_RELEASE=` and `DEMO_REVISION=` line.
+- `test_preflight_module_upgrade.py` runs `preflight.py` with
+  `PERODUA_IMAGE_PROFILE=demo-uiux`: an `upgrade-check` from a fingerprint of
+  the comma list, the refusal without it, each line refusing the database of
+  the other, an unknown profile, `perodua_client_stable` and `perodua_e2e` in a
+  demo database, and `mark-upgrading`, `verify-upgrade` and `stamp-upgrade` of a
+  demo database with its demo seed and its seeded accounts.
+- `test_uat_guard.py` checks the excluded module of each line, that the demo
+  reviews are placeholders that never accept a finding, that a real hash
+  accepts it, that the demo line keeps `perodua_client_stable` out, and that an
+  unknown line exits 2.
+- `test_service_app.py` checks that `reset` of a demo directory reads
+  `DEMO_RELEASE=` and `DEMO_REVISION=`, and that it changes nothing while the
+  demo block holds placeholders. `test_uninstall_app.py` checks that the plan
+  names `seeded-accounts.txt` and `rollback.sh`.
+
+These cases use fakes only. A real `odoo shell` run of `uat_demo.py`, the hooks
+of the demo seed and `--replace` on two real deployments need a lab rehearsal
+with a pinned demo-uiux image.
+
 See [the two-server acceptance record](TWO-SERVER-2026-09-18.md) for the real
 Ubuntu VM deployment, attachment persistence and separate reboot checks.
 

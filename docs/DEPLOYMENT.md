@@ -939,6 +939,10 @@ upgrade goes on as in the chapter above. `deploy-app.sh` pins this:
 | `MODULE_UPGRADE_FROM` | `d7335a5c60803bc8be0f227d80c21639`: the module fingerprint of v1.2.1 (33 `perodua_*` modules in its image). The only fingerprint a module upgrade starts from. |
 | `OLD_RELEASES_ACCEPTED` | `client-stable-uiux-v1.2.1`: the release the directory may run. |
 
+Both settings are comma-separated lists; the client-stable-uiux block lists
+one value each. The demo-uiux line has its own two lists
+([The demo-uiux line](#the-demo-uiux-line)).
+
 The pinned release, v1.2.2, has the fingerprint
 `a3885675a252d98e79439d7ca8bf6a9d` (34 `perodua_*` modules in its image: the
 33 of v1.2.1 and the new `perodua_access`). After the upgrade,
@@ -1919,6 +1923,212 @@ the same.
 For a local test with Pebble, a local acme-dns and a test DNS server, the
 environment variable `PERODUA_HTTPS_LEGO_NETWORK=NAME` runs lego on that Docker
 network instead of the host's.
+
+## The demo-uiux line
+
+`deploy-app.sh` holds one block of pins for each line it deploys. The block
+of the client-stable-uiux line is the one of the earlier kit versions
+(`RELEASE=`, `REVISION=`, `ODOO_IMAGE=`, `WEB_IMAGE=`, `INIT_MODULES`,
+`EXCLUDED_MODULE`, `RESTORED_MODULES`, `MODULE_UPGRADE_FROM`,
+`OLD_RELEASES_ACCEPTED`). The demo-uiux block has the same settings with the
+prefix `DEMO_`. Each of them is one plain line, which `service.sh reset` reads
+with `sed`: `RELEASE=` and `REVISION=` for a directory of the client line,
+`DEMO_RELEASE=` and `DEMO_REVISION=` for one of the demo line.
+
+| Setting | demo-uiux |
+| --- | --- |
+| `DEMO_RELEASE`, `DEMO_REVISION` | the numbered grey release `demo-uiux-grey-vX.Y.Z` and its commit of perodua-odoo. **Placeholders** in this kit version. |
+| `DEMO_ODOO_IMAGE` | `perodua-deploy.novutal.com/perodua-odoo:demo-uiux-grey-vX.Y.Z@sha256:...`: the Odoo image of profile `demo-uiux`, built without the mail password of the demo images. Placeholder. |
+| `DEMO_WEB_IMAGE` | `perodua-deploy.novutal.com/perodua-odoo:demo-uiux-grey-web-vX.Y.Z@sha256:...`: the web image built from `docker/uiux/Dockerfile.client-stable-uiux` (the page under `PUBLIC_ROOT`, the closed paths, the frame headers). Placeholder. |
+| `DEMO_INIT_MODULES` | the init list of the `demo-uiux` profile of `docker/entrypoint.sh` (`perodua_demo_ui`, `perodua_portal`, `perodua_portal_workspaces`, `perodua_agent_portal`, `perodua_demo_client`, `perodua_gateway`, `perodua_forecast_workbook`, `perodua_demo_profile`, `perodua_supplier_execution`, `perodua_uiux_api`) and `perodua_sso_hub` |
+| `DEMO_EXCLUDED_MODULE` | `perodua_client_stable`: the client menu profile, which the entrypoint of the image refuses on this profile |
+| `DEMO_RESTORED_MODULES` | the same as `DEMO_INIT_MODULES` |
+| `DEMO_MODULE_UPGRADE_FROM`, `DEMO_OLD_RELEASES_ACCEPTED` | empty: the first grey release takes no module upgrade |
+
+The database rules of each line are in `preflight.py` (`LINE_RULES`), chosen
+by the image profile that `compose.yml` sets:
+
+| Rule | client-stable-uiux | demo-uiux |
+| --- | --- | --- |
+| Modules that are never installed | `perodua_demo_client`, `perodua_reporting`, `perodua_e2e` | `perodua_client_stable`, `perodua_e2e` |
+| Workspace codes of the host table `perodua_client_stable.hosts` | `rp`, `sp`, `cp` | `rp`, `sp`, `cp`; **placeholder**: the first pin adds the codes that `perodua_sso_hub` gives the four workspaces without a host of their own, on the rp host |
+| Sample data | a module upgrade needs a database without it, and its result must have none | the demo seed is part of the database |
+| `perodua.runtime_profile` | `client-stable-uiux` | `demo-uiux` |
+
+**The line of a directory.** The first deployment of a directory chooses the
+line: `--line demo-uiux`, or `PERODUA_LINE=demo-uiux` in an `app.env` written
+before the first run. `deploy-app.sh` then writes `PERODUA_LINE=demo-uiux` to
+`app.env` and `line=demo-uiux` to `.deployment-identity`. A directory of the
+client line has neither, as with the earlier kit versions. Every later run
+keeps the line; a run that names the other one (`--line`, or `PERODUA_LINE` in
+`--config`) stops before Docker: `DIR runs the client-stable-uiux line, and a
+directory keeps the line of its first deployment`.
+
+**Placeholders.** While the demo-uiux block names no image (a release name
+that is not lower case, a revision that is not 40 hexadecimal digits, or an
+image without a digest), every run of that line stops before Docker,
+`--check-config` too: `This scripts folder pins no release of the demo-uiux
+line yet`. `service.sh reset` of a demo-uiux directory stops in the same way.
+
+### What --init-db does on the demo-uiux line
+
+`deploy-app.sh` runs its own Odoo commands, also on this line: the entrypoint of
+the image passes them on (`odoo ...`) and runs only its mail setting first, not
+its database steps. So the kit makes the steps that the entrypoint makes on a
+new database of the `demo-uiux` profile:
+
+| Entrypoint of the image (`docker/entrypoint.sh`) | deploy-app.sh, demo-uiux line |
+| --- | --- |
+| `odoo -i DEFAULT_INIT_MODULES --without-demo=True --stop-after-init` | `odoo -i DEMO_INIT_MODULES` with the demo-data option that `uat_guard.py demo-flag` verifies in the image (`--without-demo=True` for Odoo 19), after `uat_guard.py guard --line demo-uiux` |
+| The demo seed: the install hooks of `perodua_demo` (sample data, the company), `perodua_demo_ui` (the gallery, the business roles) and `perodua_demo_profile` (the supply fixtures, the delivery time slots, the mock screens, the personas) | the same hooks in the same `-i`, with the environment of `compose.yml`: `PERODUA_IMAGE_PROFILE=demo-uiux` and no `PERODUA_DEMO_SEED` (the sample data and the mock screens load), `PERODUA_DEMO_PERSONAS=1` (the persona seed runs) |
+| `perodua.image_modhash` = the md5 of the manifests of the profile's modules (without `perodua_client_stable`) | `preflight.py stamp`: the fingerprint of the kit, the md5 of every `perodua_*` manifest of the image. The two values differ: start the image only through this kit. |
+| `perodua.runtime_profile` = `demo-uiux` | `preflight.py stamp`: `demo-uiux`, after the checks below |
+| `report.url` = `http://127.0.0.1:8069` | `preflight.py public-urls`, with `web.base.url` from `PUBLIC_BASE_URL` |
+| `--proxy-mode` when `PERODUA_PROXY_MODE=1` | `--proxy-mode` in the command of `compose.yml` |
+| A later start with another image installs each baked module that is missing, then upgrades all | never: `--upgrade` runs `-u` of the installed modules only |
+
+Between the install and the stamp, the database stays `SETUP_PENDING`:
+`uat_admins.py` (as on the client line), then `uat_demo.py install` (below),
+then `preflight.py verify-fresh` (the modules of `DEMO_INIT_MODULES`
+installed, no `perodua_client_stable` and none of its records, no Odoo demo
+data, every version that of the image), then the HTTP checks, which also need
+`image_profile` `demo-uiux` from `/uiux/api/version` and the sign-in of
+`whadmin`, `admin1` and `admin2`. A rerun with `--init-db` finishes a run that
+stopped in between, as on the client line.
+
+**`uat_demo.py install`** runs with `odoo shell`, as the superuser:
+
+- **The seeded accounts.** The demo seed gives its accounts the password
+  `perodua`. Each account that has a password gets a new random one of 20
+  letters and digits, except `whadmin`, `admin1` and `admin2` (`perodua`, as
+  on the client line), the native Administrator (archived by
+  `uat_admins.py`) and the technical superuser. The passwords are permanent:
+  no forced change at the first sign-in. They go only to
+  `DIR/seeded-accounts.txt` (mode 0600, in the 0700 directory): one line per
+  account, `login<TAB>password<TAB>account` (internal or portal, archived).
+  No terminal output, log or Docker log shows them. `sudo cat
+  DIR/seeded-accounts.txt` lists them.
+- **The portal mode** is `off`, through its own switch
+  (`perodua.portal.mode`, with its audit line): a portal account without a
+  role gets 403 "no workspace", as on the client line, until portal users
+  sign in through the hub.
+- **The 17:00 Job Order Inbound run**
+  (`perodua_supplier_execution.cron_perodua_inbound_job_orders`) is off
+  (owner decision w4d). A module upgrade puts the cron flags back as before
+  it, so it stays off.
+
+**Outgoing email.** The grey Odoo image has no mail password. Without
+`SMTP_HOST`, `compose.yml` sets `PERODUA_MAIL: "off"`, so a mail setting that
+the image itself may carry is never used. With `SMTP_HOST`, the mail settings
+of `app.env` apply as on the client line ([Outgoing email](#outgoing-email-v122-or-later)).
+
+### Switch an environment to the demo-uiux line
+
+The switch makes a new deployment beside the old one. Nothing of the old one
+changes: its directory, its containers, its database and its attachments stay.
+Only its App stops. Before the switch: phase 1 of option A (the module
+`perodua_sso_hub`) is merged and in the pinned grey release, the lab
+rehearsal of these steps passed, and the owner said yes to the step.
+
+1. On the DB server, a new empty database. In a copy of `deploy.conf`, set
+   `DB_MODE=empty` and a new `DB_NAME` (such as `perodua_demo`), with the same
+   `DB_USER`, `DB_LISTEN_IP` and `APP_CIDR`:
+
+   ```bash
+   sudo bash deploy-db.sh --config deploy-demo.conf
+   ```
+
+   It asks for the password of `DB_USER` (the existing role keeps it). The
+   database of the client line stays as it is.
+2. On the App server, a new directory, such as `/opt/perodua-app-demo`, with
+   an `app.env` written before the first run: `PERODUA_LINE=demo-uiux`, the
+   new `DB_NAME`, a `PROJECT_NAME` of its own (default
+   `perodua-demo-uiux`), `DB_HOST`, `DB_PORT` and `DB_USER` of the DB server,
+   and `HTTP_PORT`, `BIND_IP`, `PUBLIC_ROOT`, `ENVIRONMENT_LABEL` and
+   `PUBLIC_BASE_URL` as in the `app.env` of the client line (on grey: 8110,
+   `/dev`, `https://stgiss.perodua.com.my/dev`). Make it 0600.
+3. From the `scripts` folder of the kit version that pins the grey release:
+
+   ```bash
+   sudo bash deploy-app.sh --dir /opt/perodua-app-demo --init-db --replace /opt/perodua-app
+   ```
+
+   `--replace` first checks that `/opt/perodua-app` is a deployment with
+   another Compose project and another database (server, port and name), and
+   holds its lock to the end of the run. The new database gets its modules,
+   its demo seed and its UAT setup while the old App still runs. Then the run
+   writes `/opt/perodua-app-demo/rollback.sh`, stops the old App (`docker
+   compose stop`: its containers stay) and starts the new one on the same
+   port. If the new App then fails its checks, the run stops it and starts
+   the old one again, and says so.
+4. Check the new App: `docs/RUNBOOK.md`, and `client-check.ps1` from a PC
+   (`/dev/app/` and `/dev/uiux/api/handover/mode` on each host name).
+
+**The way back** at any time: `sudo bash /opt/perodua-app-demo/rollback.sh`.
+It checks the database of the old App (as `service.sh start` does), stops the
+new App and starts the old one. Each keeps its own data: entries made on the
+demo-uiux line are not in the database of the client line. To go forward
+again: `service.sh --role app --dir /opt/perodua-app stop`, then
+`service.sh --role app --dir /opt/perodua-app-demo start`. The old stack stays
+stopped, not removed, until SIT ends; then ask the owner.
+
+Do not start the two Apps at the same time on one port: the second one does
+not start. A stopped App stays stopped after a reboot.
+
+### Upgrade between demo-uiux releases
+
+`deploy-app.sh --upgrade --dir /opt/perodua-app-demo` from the `scripts`
+folder of a newer kit version works as on the client line (the backup,
+`restore.txt`, the held mail), with the rules of the demo-uiux line:
+
+- A release with the same Odoo modules needs no module upgrade.
+- A module upgrade (`-u`) starts only from a fingerprint in
+  `DEMO_MODULE_UPGRADE_FROM` and in a directory of a release in
+  `DEMO_OLD_RELEASES_ACCEPTED`. Both lists grow with each pin, so the
+  environment can hop from one grey release to the next during SIT.
+- The demo seed does not stop it. `perodua_client_stable` or `perodua_e2e`
+  installed does, and so does a host table with codes that the release does
+  not know.
+- After the upgrade, `uat_demo.py upgrade` gives each account that still has
+  the seed password `perodua` (such as a persona that the new release adds) a
+  new random password and adds it to `seeded-accounts.txt`. `whadmin`,
+  `admin1` and `admin2` keep their passwords.
+- A directory of the client line never moves to the demo-uiux line with
+  `--upgrade`: use the switch above.
+
+### Pin a demo-uiux release
+
+Each pin of a grey release (a change of this kit, after the owner's yes):
+
+1. The numbered grey release of perodua-odoo: the Odoo image
+   `perodua-odoo:demo-uiux-grey-vX.Y.Z` (profile `demo-uiux`, no mail
+   password) and the web image `perodua-odoo:demo-uiux-grey-web-vX.Y.Z`, both
+   of one revision, copied registry to registry to
+   `perodua-deploy.novutal.com`.
+2. `DEMO_RELEASE`, `DEMO_REVISION`, `DEMO_ODOO_IMAGE` and `DEMO_WEB_IMAGE`
+   with the digests of the private registry.
+3. `uat_guard.py`, `REVIEWED_REFERENCES['demo-uiux']`: run the guard in the
+   pinned image (`python3 /opt/deploy/uat_guard.py guard --line demo-uiux
+   --modules DEMO_INIT_MODULES --odoo-config /etc/odoo/odoo.conf --json`, with
+   `uat_guard.py` mounted as `compose.yml` does it). Review each finding of
+   `references_in_install_set`, and write its entry with the sha256 of the
+   reviewed file and the reason; remove each placeholder that the image does
+   not confirm. A placeholder (no sha256) never accepts a finding.
+4. `preflight.py`, `LINE_RULES['demo-uiux']['host_codes']`: the keys of
+   `WORKSPACE_CODES` in `perodua_sso_hub/controllers/hosts.py` of the release.
+5. From the second pin on: add the fingerprint of the previous grey release
+   to `DEMO_MODULE_UPGRADE_FROM` and its name to `DEMO_OLD_RELEASES_ACCEPTED`.
+   The fingerprint is the md5 of the `perodua_*` manifests of its image, as
+   `preflight.py` computes it:
+
+   ```bash
+   docker run --rm --entrypoint python3 IMAGE -c "import hashlib, pathlib; d=sorted(p for p in pathlib.Path('/opt/perodua-addons').glob('perodua_*') if p.is_dir()); print(hashlib.md5(b''.join((p / '__manifest__.py').read_bytes() for p in d)).hexdigest())"
+   ```
+
+   A module that the new release removes goes into `RETIRED_MODULES`, or
+   the module upgrade refuses it.
+6. The kit tests (`tests/README.md`), then the lab rehearsal of the exact kit
+   flow and a Chromium check before any grey step.
 
 ## Isolated verification
 

@@ -5,8 +5,10 @@ Standard library only. deploy-app.sh runs it inside the pinned Odoo image,
 before anything touches the database, so it reads the real addon tree the
 image will install from. The tests run it against temporary addon trees.
 
-  guard      refuse unless the excluded module (perodua_demo_client) can be
-             kept out of a fresh initialization of the requested modules:
+  guard      refuse unless the excluded module of the line (--line:
+             perodua_demo_client on client-stable-uiux, the default, and
+             perodua_client_stable on demo-uiux) can be kept out of a fresh
+             initialization (or a module upgrade) of the requested modules:
              A. no module Odoo would install depends on it, directly or
                 transitively, or pulls it in through auto_install;
              B. no module Odoo would install references it without declaring
@@ -62,65 +64,117 @@ DEMO_FLAGS = {19: '--without-demo=True'}
 # exact bytes of the file it was reviewed in. A changed file voids its entry,
 # so a different image can never inherit an old judgement: it is refused until
 # someone reviews it again.
-REVIEWED_REFERENCES = (
-    {
-        'file': 'perodua_demo/hooks.pyc',
-        'finding': "constant 'perodua_demo_client.loaded'",
-        'sha256': 'e33ac1c570ca2838e76157cce108b00acf80932b309a52256dd0825c4d18b46c',
-        'reason': (
-            'A system-parameter key, not an XML ID: one function '
-            '(reconcile_fixture_identifiers) reads it with SQL, a missing row means '
-            '"not loaded", and the value only words a log line and an error text; no '
-            'branch tests it. The surrounding code detects the client_data column and '
-            'handles the dataset being absent. post_init_hook calls that function only '
-            'when perodua_demo.seeded is set, and the function returns before the read '
-            'without it, so a fresh UAT initialization (no sample data: the hook only '
-            'configures the company) never reads the key. The 19.0.1.12.0 migration of '
-            'perodua_demo also calls it; the module upgrade from v1.2.1 (perodua_demo '
-            '19.0.1.46.0) does not run that migration. Optional detection, not reliance. '
-            'Reviewed against the pinned client-stable-uiux-v1.2.2 image '
-            '(sha256:772500ec34d45c24cf9f66aa2bf26c3287d5c81ce8b8173f82ffed282d18bdfb), '
-            'whose hooks.pyc is the compiled perodua_demo/hooks.py of revision '
-            'ecd966496435b9999da2624ba8cdc349bce3f852. The function that reads the key '
-            'and post_init_hook are the same as in client-stable-uiux-v1.2.1 (hooks.pyc '
-            'sha256 853d3bd13a94f38d8b6f1c6390af24f04cdf74b18bdd71a6cf792681f0453777); '
-            'the other changes of the file (such as the Perodua logo of the demo company, '
-            'which configure_company leaves out, and the warehouse addresses and part '
-            'prices of the sample data) do not use the key. The code that uses this '
-            'key is the same as in the file reviewed for client-stable-uiux-v1.0.0 to '
-            'v1.0.8 (sha256 '
-            'db90973ddb2b77efd08746d109a5ce22c6043ee3be20effe2143537af53f7269), except '
-            'one error text.'),
-    },
-    {
-        'file': 'perodua_demo/supply_seed.pyc',
-        'finding': "constant 'perodua_demo_client'",
-        'sha256': '0ee305b0244e20230b8c068b4c05ff393e657a8c2c8197616e127e7e3624650d',
-        'reason': (
-            'A module name as a search value, not an import, an XML ID or a path: '
-            'mvp_demo_parts() searches ir.model.data for the product rows of that '
-            'module; with no row it returns nothing, and the two steps that call it do '
-            'nothing. Each step first asks gallery.mock_data_refusal, which refuses on '
-            'a database without sample data, on a client-stable-uiux image and with '
-            'perodua_client_stable installed. The steps run from seed_supply_demo and '
-            'seed_mvp_part_demo only. Each caller of these returns when '
-            'perodua_demo.seeded is not set (the post_init_hook and the 19.0.1.50.0 and '
-            '19.0.1.71.0 migrations of perodua_demo_profile, the gallery pass of '
-            'perodua_demo_ui, the 19.0.1.7.0 and 19.0.1.8.0 migrations of '
-            'perodua_demo), except seed_all, which runs only with sample data. No other '
-            'caller is new in v1.2.2, and the module upgrade from v1.2.1 '
-            '(perodua_demo_profile 19.0.1.71.0, perodua_demo 19.0.1.46.0) runs none of '
-            'these migrations. So neither a fresh UAT initialization nor the module '
-            'upgrade from v1.2.1 reads the rows. Optional detection, not reliance. '
-            'Reviewed against the pinned client-stable-uiux-v1.2.2 image '
-            '(sha256:772500ec34d45c24cf9f66aa2bf26c3287d5c81ce8b8173f82ffed282d18bdfb), '
-            'whose supply_seed.pyc is the compiled perodua_demo/supply_seed.py of '
-            'revision ecd966496435b9999da2624ba8cdc349bce3f852. The source is the same '
-            'as in client-stable-uiux-v1.2.1 (supply_seed.pyc sha256 '
-            'a15b9f326ccadf0c7a3574b5feec59e8a9198d7e7524969ba9412047a70a4fa1): the two '
-            'files differ only in the source time in the .pyc header.'),
-    },
-)
+# The line blocks of deploy-app.sh, each with the module that a database of
+# the line never gets (the default of --exclude).
+LINE_EXCLUDED = {'client-stable-uiux': 'perodua_demo_client', 'demo-uiux': 'perodua_client_stable'}
+DEFAULT_LINE = 'client-stable-uiux'
+SHA256 = re.compile(r'[0-9a-f]{64}')
+
+
+def _placeholder(file, constant, reason):
+    """A review the first pin of a demo-uiux release makes: the finding the
+    pinned image is expected to show, and why it is expected not to be
+    reliance. Without its sha256 it matches no file, so the finding stays
+    refused until someone reviews the pinned bytes and fills it in."""
+    return {'file': file, 'finding': f'constant {constant!r}', 'sha256': None,
+            'reason': 'PLACEHOLDER until the first pin of a demo-uiux release: ' + reason}
+
+
+_PARAMETER = ('a key of ir.config_parameter that keeps the name it has on the client-stable-uiux line '
+              '(owner answer d05), not an XML ID, an import or a path')
+# References that were read and found NOT to be reliance, per line, each pinned
+# to the exact bytes of the file it was reviewed in. A changed file voids its
+# entry, so a different image can never inherit an old judgement: it is
+# refused until someone reviews it again.
+REVIEWED_REFERENCES = {
+    'client-stable-uiux': (
+        {
+            'file': 'perodua_demo/hooks.pyc',
+            'finding': "constant 'perodua_demo_client.loaded'",
+            'sha256': 'e33ac1c570ca2838e76157cce108b00acf80932b309a52256dd0825c4d18b46c',
+            'reason': (
+                'A system-parameter key, not an XML ID: one function '
+                '(reconcile_fixture_identifiers) reads it with SQL, a missing row means '
+                '"not loaded", and the value only words a log line and an error text; no '
+                'branch tests it. The surrounding code detects the client_data column and '
+                'handles the dataset being absent. post_init_hook calls that function only '
+                'when perodua_demo.seeded is set, and the function returns before the read '
+                'without it, so a fresh UAT initialization (no sample data: the hook only '
+                'configures the company) never reads the key. The 19.0.1.12.0 migration of '
+                'perodua_demo also calls it; the module upgrade from v1.2.1 (perodua_demo '
+                '19.0.1.46.0) does not run that migration. Optional detection, not reliance. '
+                'Reviewed against the pinned client-stable-uiux-v1.2.2 image '
+                '(sha256:772500ec34d45c24cf9f66aa2bf26c3287d5c81ce8b8173f82ffed282d18bdfb), '
+                'whose hooks.pyc is the compiled perodua_demo/hooks.py of revision '
+                'ecd966496435b9999da2624ba8cdc349bce3f852. The function that reads the key '
+                'and post_init_hook are the same as in client-stable-uiux-v1.2.1 (hooks.pyc '
+                'sha256 853d3bd13a94f38d8b6f1c6390af24f04cdf74b18bdd71a6cf792681f0453777); '
+                'the other changes of the file (such as the Perodua logo of the demo company, '
+                'which configure_company leaves out, and the warehouse addresses and part '
+                'prices of the sample data) do not use the key. The code that uses this '
+                'key is the same as in the file reviewed for client-stable-uiux-v1.0.0 to '
+                'v1.0.8 (sha256 '
+                'db90973ddb2b77efd08746d109a5ce22c6043ee3be20effe2143537af53f7269), except '
+                'one error text.'),
+        },
+        {
+            'file': 'perodua_demo/supply_seed.pyc',
+            'finding': "constant 'perodua_demo_client'",
+            'sha256': '0ee305b0244e20230b8c068b4c05ff393e657a8c2c8197616e127e7e3624650d',
+            'reason': (
+                'A module name as a search value, not an import, an XML ID or a path: '
+                'mvp_demo_parts() searches ir.model.data for the product rows of that '
+                'module; with no row it returns nothing, and the two steps that call it do '
+                'nothing. Each step first asks gallery.mock_data_refusal, which refuses on '
+                'a database without sample data, on a client-stable-uiux image and with '
+                'perodua_client_stable installed. The steps run from seed_supply_demo and '
+                'seed_mvp_part_demo only. Each caller of these returns when '
+                'perodua_demo.seeded is not set (the post_init_hook and the 19.0.1.50.0 and '
+                '19.0.1.71.0 migrations of perodua_demo_profile, the gallery pass of '
+                'perodua_demo_ui, the 19.0.1.7.0 and 19.0.1.8.0 migrations of '
+                'perodua_demo), except seed_all, which runs only with sample data. No other '
+                'caller is new in v1.2.2, and the module upgrade from v1.2.1 '
+                '(perodua_demo_profile 19.0.1.71.0, perodua_demo 19.0.1.46.0) runs none of '
+                'these migrations. So neither a fresh UAT initialization nor the module '
+                'upgrade from v1.2.1 reads the rows. Optional detection, not reliance. '
+                'Reviewed against the pinned client-stable-uiux-v1.2.2 image '
+                '(sha256:772500ec34d45c24cf9f66aa2bf26c3287d5c81ce8b8173f82ffed282d18bdfb), '
+                'whose supply_seed.pyc is the compiled perodua_demo/supply_seed.py of '
+                'revision ecd966496435b9999da2624ba8cdc349bce3f852. The source is the same '
+                'as in client-stable-uiux-v1.2.1 (supply_seed.pyc sha256 '
+                'a15b9f326ccadf0c7a3574b5feec59e8a9198d7e7524969ba9412047a70a4fa1): the two '
+                'files differ only in the source time in the .pyc header.'),
+        },
+    ),
+    # PLACEHOLDERS until the first pin: the references to perodua_client_stable
+    # that the demo-uiux image is expected to hold in the modules it installs
+    # (perodua_sso_hub keeps the parameter names of perodua_client_stable).
+    # The first pin runs the guard of that image (--line demo-uiux --json),
+    # reviews each finding of references_in_install_set, and writes its entry
+    # with the sha256 of the reviewed file; an entry it does not confirm goes.
+    'demo-uiux': (
+        _placeholder('perodua_demo/gallery.pyc', 'perodua_client_stable',
+                     'EXPORT_MOCK_BLOCKING_MODULE, the module whose install state mock_data_refusal reads: '
+                     'a search value, and on this line the module is not installed, so the mock data loads'),
+        *(_placeholder(f'perodua_demo_profile/migrations/{version}/post-migrate.pyc',
+                       'perodua_client_stable.menu_arrangement.v1',
+                       'CLIENT_STATE_KEY, ' + _PARAMETER + '; a migration of an earlier version, which a fresh '
+                       'database never runs')
+          for version in ('19.0.1.100.0', '19.0.1.102.0', '19.0.1.103.0', '19.0.1.128.0', '19.0.1.196.0')),
+        _placeholder('perodua_sso_hub/controllers/hosts.pyc', 'perodua_client_stable.hosts', 'HOSTS_PARAM, ' + _PARAMETER),
+        *(_placeholder('perodua_sso_hub/controllers/handover.pyc', key, _PARAMETER)
+          for key in ('perodua_client_stable.module_signin', 'perodua_client_stable.handover.v1',
+                      'perodua_client_stable.handover.verifier.v1', 'perodua_client_stable.handover.pending.v1',
+                      'perodua_client_stable.handover.spent.')),
+        *(_placeholder('perodua_sso_hub/controllers/oidc_clients.pyc', key, _PARAMETER)
+          for key in ('perodua_client_stable.oidc_clients', 'perodua_client_stable.oidc.sid.v2')),
+        _placeholder('perodua_sso_hub/controllers/binding.pyc', 'perodua_client_stable.bind.v1', _PARAMETER),
+        _placeholder('perodua_sso_hub/hooks.pyc', 'perodua_client_stable',
+                     'the module name in the SQL of the pre_init_hook that gives perodua_sso_hub the records '
+                     'of the OIDC models of perodua_client_stable (plan row P1-03): it moves rows, it does not '
+                     'install or need the module'),
+    ),
+}
 
 
 class Refused(Exception):
@@ -400,7 +454,14 @@ def odoo_addons_paths(config_file: str) -> list[pathlib.Path]:
         raise Broken(f'cannot read the effective addons path from Odoo: {exc}') from None
 
 
-def run_guard(args, reviewed=REVIEWED_REFERENCES) -> dict:
+def run_guard(args, reviewed=None) -> dict:
+    """The guard report. ``reviewed``: the reviewed references to apply, by
+    default those of the line of ``args`` (``--line``)."""
+    line = getattr(args, 'line', None) or DEFAULT_LINE
+    if line not in REVIEWED_REFERENCES:
+        raise Broken(f'{line} is not a line of this guard (known: {", ".join(sorted(REVIEWED_REFERENCES))})')
+    if reviewed is None:
+        reviewed = REVIEWED_REFERENCES[line]
     requested = [m.strip() for m in args.modules.split(',') if m.strip()]
     if not requested:
         raise Broken('no modules requested')
@@ -412,9 +473,9 @@ def run_guard(args, reviewed=REVIEWED_REFERENCES) -> dict:
     else:
         paths = odoo_addons_paths(args.odoo_config)
     modules = discover(paths)
-    excluded = args.exclude
+    excluded = getattr(args, 'exclude', None) or LINE_EXCLUDED[line]
     problems: list[str] = []
-    report: dict = {'excluded': excluded, 'requested': requested,
+    report: dict = {'line': line, 'excluded': excluded, 'requested': requested,
                     'addons_paths': [str(p) for p in paths]}
 
     if excluded in requested:
@@ -438,9 +499,14 @@ def run_guard(args, reviewed=REVIEWED_REFERENCES) -> dict:
 
     # B. undeclared reliance inside everything that would be installed
     scanner = Scanner(excluded)
-    index = {(r['file'], r['finding'], r['sha256']): r['reason'] for r in reviewed}
+    # Only a review with the sha256 of the reviewed file counts; a placeholder
+    # (no sha256 yet) only says which finding waits for its review.
+    index = {(r['file'], r['finding'], r['sha256']): r['reason'] for r in reviewed
+             if isinstance(r.get('sha256'), str) and SHA256.fullmatch(r['sha256'])}
+    placeholders = {(r['file'], r['finding']) for r in reviewed
+                    if not (isinstance(r.get('sha256'), str) and SHA256.fullmatch(r['sha256']))}
     used = set()
-    inside, outside, accepted = {}, {}, {}
+    inside, outside, accepted, waiting = {}, {}, {}, []
     for name, module in sorted(modules.items()):
         if name == excluded:
             continue
@@ -451,6 +517,8 @@ def run_guard(args, reviewed=REVIEWED_REFERENCES) -> dict:
             reason = index.get((file, hit, digest))
             if reason is None:
                 inside.setdefault(name, []).append(f'{file}: {hit}')
+                if (file, hit) in placeholders:
+                    waiting.append(f'{file}: {hit}')
             else:
                 used.add((file, hit, digest))
                 accepted.setdefault(name, []).append(
@@ -459,8 +527,13 @@ def run_guard(args, reviewed=REVIEWED_REFERENCES) -> dict:
         problems.append(f'{name} would be installed but relies on {excluded} '
                         f'without declaring it: {findings[0]}'
                         + (f' (+{len(findings) - 1} more)' if len(findings) > 1 else ''))
+    if waiting:
+        problems.append(f'{len(waiting)} of these findings have only a placeholder review of the {line} line, '
+                        'which the first pin of its release replaces with a review of the pinned bytes: '
+                        + ', '.join(waiting[:3]) + (f' (+{len(waiting) - 3} more)' if len(waiting) > 3 else ''))
     report['references_in_install_set'] = inside
     report['reviewed_references'] = accepted
+    report['placeholder_reviews'] = waiting
     # Entries that no longer match anything: harmless, but worth pruning.
     report['unused_reviews'] = [f'{f}: {h}' for f, h, d in index if (f, h, d) not in used]
     # Not installed, so not a risk to this database. Counted for the record but
@@ -498,7 +571,11 @@ def main(argv=None) -> int:
     sub = parser.add_subparsers(dest='command', required=True)
     guard = sub.add_parser('guard')
     guard.add_argument('--modules', required=True, help='comma-separated modules to initialize')
-    guard.add_argument('--exclude', default='perodua_demo_client')
+    guard.add_argument('--line', choices=sorted(REVIEWED_REFERENCES), default=DEFAULT_LINE,
+                       help='the line block of deploy-app.sh: its reviewed references, and its excluded module')
+    guard.add_argument('--exclude', default=None,
+                       help='the module to keep out (default: the one of the line, '
+                            + ', '.join(f'{k}: {v}' for k, v in sorted(LINE_EXCLUDED.items())) + ')')
     where = guard.add_mutually_exclusive_group(required=True)
     where.add_argument('--odoo-config', help="derive the addons path from this image's Odoo")
     where.add_argument('--addons-path', help='explicit comma-separated addons directories')
@@ -531,7 +608,7 @@ def main(argv=None) -> int:
     if report['problems']:
         return REFUSED
     print(f"UAT guard: accepted: of at most {len(report['install_set'])} modules Odoo could install, "
-          f"none is {args.exclude} and none relies on it", file=sys.stderr)
+          f"none is {report['excluded']} and none relies on it", file=sys.stderr)
     return ACCEPTED
 
 

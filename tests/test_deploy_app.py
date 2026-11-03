@@ -303,6 +303,10 @@ sys.exit(93)
         version = re.search(r"^RELEASE=client-stable-uiux-v(\d+\.\d+\.\d+)$", SCRIPT.read_text(encoding="utf-8"), re.M)
         self.assertIsNotNone(version)
         self.assertIn(f"Deploy the pinned Client Stable UIUX v{version.group(1)} Odoo + Web images", result.stdout)
+        # And the line options.
+        for text in ("[--line LINE] [--replace DIR]", "--line LINE chooses the release line",
+                     "--replace DIR: this deployment takes the place of the one in DIR"):
+            self.assertIn(text, result.stdout)
 
     def test_unknown_option_and_missing_option_values_fail_early(self):
         for args in (("--unknown",), ("--dir",), ("--config",)):

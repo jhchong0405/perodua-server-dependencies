@@ -288,6 +288,33 @@ class ServiceAppTests(unittest.TestCase):
         self.assertEqual((self.app / ".deployment-identity").read_text(),
                          self.identity.replace("client-stable-uiux-v1.0.2", RELEASE).replace("f" * 40, REVISION))
 
+    def demo_directory(self, release, revision):
+        # A directory of the demo-uiux line (line= in its identity) and a
+        # scripts folder whose deploy-app.sh has a demo block too.
+        (self.bundle / "deploy-app.sh").write_text(FAKE_DEPLOY_APP.replace(
+            f"REVISION={REVISION}\n", f"REVISION={REVISION}\nDEMO_RELEASE={release}\nDEMO_REVISION={revision}\n"))
+        self.identity = self.identity.replace("client-stable-uiux-v1.0.2", "demo-uiux-grey-v9.9.8") + "line=demo-uiux\n"
+        (self.app / ".deployment-identity").write_text(self.identity)
+
+    def test_a_demo_directory_resets_to_the_demo_release_of_the_scripts_folder(self):
+        demo_release, demo_revision = "demo-uiux-grey-v9.9.9", "9" * 40
+        self.demo_directory(demo_release, demo_revision)
+        result = self.run_script("reset", "--confirm", "perodua")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"deploy-app.sh --init-db: {demo_release} (now demo-uiux-grey-v9.9.8)", result.stdout)
+        self.assertIn(f"its accounts get new random passwords in {self.app}/seeded-accounts.txt", result.stdout)
+        self.assertEqual(self.deploy_calls(), [self.check_call(), f"free --dir {self.app} --init-db"])
+        # The client block (RELEASE=, REVISION=) is not the line of this directory.
+        self.assertEqual((self.app / ".deployment-identity").read_text(),
+                         self.identity.replace("demo-uiux-grey-v9.9.8", demo_release).replace("f" * 40, demo_revision))
+
+    def test_a_demo_directory_changes_nothing_while_the_demo_block_is_a_placeholder(self):
+        self.demo_directory("demo-uiux-grey-vX.Y.Z", "PLACEHOLDER-the-perodua-odoo-commit-of-the-first-grey-release")
+        result = self.run_script("reset", "--confirm", "perodua")
+        self.assert_nothing_changed(result, "Cannot read the demo-uiux release of deploy-app.sh")
+        self.assertEqual(self.deploy_calls(), [])
+        self.assertIn(FILESTORE, json.loads(self.state.read_text())["volumes"])
+
     def test_reset_changes_nothing_without_a_matching_confirmation(self):
         self.assert_nothing_changed(self.run_script("reset", "--confirm", "other"), "--confirm must be exactly perodua")
         self.assert_nothing_changed(self.run_script("reset"), "No terminal to confirm on: pass --confirm perodua")

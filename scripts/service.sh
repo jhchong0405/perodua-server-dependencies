@@ -25,7 +25,9 @@ reset, on the App server, deletes all data in the App's database and all
 attachments, then runs deploy-app.sh --init-db for a fresh UAT system of the
 release next to this script. The database, its login and password, the web
 port and the other settings stay; the UAT administrators whadmin, admin1 and
-admin2 get the password "perodua" again. That deploy-app.sh first checks the
+admin2 get the password "perodua" again. A deployment of the demo-uiux line
+gets its demo seed again, with new random passwords for the seeded accounts
+(seeded-accounts.txt). That deploy-app.sh first checks the
 settings in app.env (--check-config); if it refuses them, nothing is changed.
 The plan is shown next: type the database name to confirm, or pass it with
 --confirm for unattended use.
@@ -106,14 +108,24 @@ app_start() {
 }
 
 app_reset() {
-    local helper release revision current status=0 listed ids=() mounted anonymous=() anon error
+    local helper release revision current status=0 listed ids=() mounted anonymous=() anon error LINE block
     for helper in deploy-app.sh reset_database.py; do
         [[ -f $SCRIPT_DIR/$helper ]] || die "$helper is missing next to service.sh; run it from the complete release directory."
     done
     [[ -f $DEPLOY_DIR/app.env ]] || die "$DEPLOY_DIR/app.env is missing, so deploy-app.sh would ask for the settings again. Nothing was changed."
-    release=$(sed -n 's/^RELEASE=//p' "$SCRIPT_DIR/deploy-app.sh")
-    revision=$(sed -n 's/^REVISION=//p' "$SCRIPT_DIR/deploy-app.sh")
-    [[ $release =~ ^[a-z0-9.-]+$ && $revision =~ ^[0-9a-f]{40}$ ]] || die 'Cannot read the release of deploy-app.sh.'
+    # The block of the directory's line in deploy-app.sh: RELEASE= and
+    # REVISION= for client-stable-uiux (no line= in the identity), DEMO_RELEASE=
+    # and DEMO_REVISION= for demo-uiux. Each is one plain line.
+    LINE=$(sed -n 's/^line=//p' "$DEPLOY_DIR/.deployment-identity")
+    case ${LINE:=client-stable-uiux} in
+        client-stable-uiux) block='' ;;
+        demo-uiux) block=DEMO_ ;;
+        *) die "Unreadable $DEPLOY_DIR/.deployment-identity: unknown line $LINE." ;;
+    esac
+    release=$(sed -n "s/^${block}RELEASE=//p" "$SCRIPT_DIR/deploy-app.sh")
+    revision=$(sed -n "s/^${block}REVISION=//p" "$SCRIPT_DIR/deploy-app.sh")
+    [[ $release =~ ^[a-z0-9.-]+$ && $revision =~ ^[0-9a-f]{40}$ ]] \
+        || die "Cannot read the $LINE release of deploy-app.sh: this scripts folder may pin none yet (a placeholder). Nothing was changed."
     current=$(sed -n 's/^release=//p' "$DEPLOY_DIR/.deployment-identity")
     # deploy-app.sh reads app.env only at the end, after the data is gone. Let
     # it check the settings first: one this release refuses (such as
@@ -128,6 +140,9 @@ app_reset() {
     printf '  - set up a fresh UAT system with deploy-app.sh --init-db: %s' "$release"
     if [[ $current == "$release" ]]; then printf '\n'; else printf ' (now %s)\n' "$current"; fi
     printf 'The data and attachments cannot be recovered. whadmin, admin1 and admin2 get the password "perodua" again.\n'
+    if [[ $LINE == demo-uiux ]]; then
+        printf 'The demo seed is loaded again, and its accounts get new random passwords in %s/seeded-accounts.txt.\n' "$DEPLOY_DIR"
+    fi
     confirm "$DB_NAME"
 
     # As uninstall.sh does: Docker keeps the containers' anonymous volumes (such

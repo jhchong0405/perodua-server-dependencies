@@ -324,10 +324,76 @@ class GuardTests(unittest.TestCase):
                          ["perodua_client_stable/hooks.pyc: constant 'perodua_demo_client.loaded'"])
 
     def test_shipped_reviews_are_pinned_to_two_files(self):
-        self.assertEqual([review['file'] for review in uat_guard.REVIEWED_REFERENCES],
+        reviews = uat_guard.REVIEWED_REFERENCES['client-stable-uiux']
+        self.assertEqual([review['file'] for review in reviews],
                          ['perodua_demo/hooks.pyc', 'perodua_demo/supply_seed.pyc'])
-        for review in uat_guard.REVIEWED_REFERENCES:
+        for review in reviews:
             self.assertRegex(review['sha256'], r'^[0-9a-f]{64}$')
+
+    # ── the line blocks ─────────────────────────────────────────────────────
+    def test_each_line_has_its_reviews_and_its_excluded_module(self):
+        self.assertEqual(set(uat_guard.REVIEWED_REFERENCES), {'client-stable-uiux', 'demo-uiux'})
+        self.assertEqual(uat_guard.LINE_EXCLUDED, {'client-stable-uiux': 'perodua_demo_client',
+                                                   'demo-uiux': 'perodua_client_stable'})
+        self.assertEqual(uat_guard.DEFAULT_LINE, 'client-stable-uiux')
+        # Without --line and --exclude: the client-stable-uiux line, as before.
+        code, report, stderr = self.run_guard()
+        self.assertEqual((report['line'], report['excluded']), ('client-stable-uiux', EXCLUDED), stderr)
+
+    def test_the_demo_reviews_are_placeholders_until_the_first_pin(self):
+        reviews = uat_guard.REVIEWED_REFERENCES['demo-uiux']
+        self.assertTrue(reviews)
+        for review in reviews:
+            self.assertIsNone(review['sha256'], review)
+            self.assertTrue(review['reason'].startswith('PLACEHOLDER until the first pin'), review)
+            self.assertRegex(review['finding'], r"^constant 'perodua_client_stable[.']")
+
+    def demo_tree(self, constant="HOSTS_PARAM = 'perodua_client_stable.hosts'\n"):
+        """A demo-uiux graph: the hub module, which keeps a parameter name of
+        perodua_client_stable, and no dependency on that module."""
+        self.module('perodua_sso_hub', depends=['perodua_master_data', 'web'])
+        return self.pyc('perodua_sso_hub', 'controllers/hosts', constant)
+
+    def run_demo_guard(self, *extra):
+        result = subprocess.run(
+            [sys.executable, str(GUARD), 'guard', '--json', '--line', 'demo-uiux', '--modules', 'perodua_sso_hub',
+             '--addons-path', f'{self.core},{self.addons}', *extra],
+            text=True, capture_output=True, timeout=60)
+        return result.returncode, (json.loads(result.stdout) if result.stdout.strip() else None), result.stderr
+
+    def test_a_placeholder_review_never_accepts_a_finding(self):
+        compiled = self.demo_tree()
+        code, report, stderr = self.run_demo_guard()
+        self.assertEqual(code, uat_guard.REFUSED, stderr)
+        self.assertEqual(report['excluded'], 'perodua_client_stable')
+        self.assertEqual(report['placeholder_reviews'],
+                         ["perodua_sso_hub/controllers/hosts.pyc: constant 'perodua_client_stable.hosts'"])
+        self.assertIn('placeholder review of the demo-uiux line', stderr)
+        # The review the first pin writes, with the sha256 of the reviewed bytes, accepts it.
+        args = argparse.Namespace(modules='perodua_sso_hub', exclude=None, line='demo-uiux', odoo_config=None,
+                                  addons_path=f'{self.core},{self.addons}', json=True)
+        entry = {'file': 'perodua_sso_hub/controllers/hosts.pyc', 'finding': "constant 'perodua_client_stable.hosts'",
+                 'sha256': hashlib.sha256(compiled.read_bytes()).hexdigest(), 'reason': 'a parameter key'}
+        report = uat_guard.run_guard(args, reviewed=[entry])
+        self.assertEqual(report['verdict'], 'accepted')
+        self.assertEqual(report['placeholder_reviews'], [])
+
+    def test_the_demo_line_keeps_perodua_client_stable_out(self):
+        self.demo_tree(constant='X = 1\n')
+        code, report, stderr = self.run_demo_guard()
+        self.assertEqual(code, uat_guard.ACCEPTED, stderr)
+        self.assertNotIn('perodua_client_stable', report['install_set'])
+        self.assertIn('none is perodua_client_stable', stderr)
+        # A module of the graph that needs it is refused.
+        self.module('perodua_sso_hub', depends=['perodua_client_stable'])
+        code, _, stderr = self.run_demo_guard()
+        self.assertEqual(code, uat_guard.REFUSED, stderr)
+        self.assertIn('Odoo would install perodua_client_stable', stderr)
+
+    def test_an_unknown_line_is_a_usage_error(self):
+        code, _, stderr = self.run_demo_guard('--line', 'demo')
+        self.assertEqual(code, 2)
+        self.assertIn("invalid choice: 'demo'", stderr)
 
 
 class NormalizationTests(unittest.TestCase):
