@@ -327,8 +327,10 @@ only `from`. It checks:
   (`fixtures/service-v1.2.1.sh`, pinned by its sha256) refuses `start`
   and `restart` on a marked database, before and after the switch, without
   `up` and without its advice to reset. The `service.sh` of this kit is the
-  same file, and `reset_database.py` is pinned by its sha256: `restore.txt`
-  says that both do the same in the folders of the old and the new release.
+  same file apart from its help text and `reset` (which reads the release of
+  the line of the directory), and `reset_database.py` is pinned by its sha256:
+  `restore.txt` says that both do the same in the folders of the old and the
+  new release.
 
 `test_preflight_module_upgrade.py` runs the exact `preflight.py` that
 `deploy-app.sh` writes, and the one of v1.2.1

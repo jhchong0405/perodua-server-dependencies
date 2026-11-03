@@ -705,8 +705,21 @@ class OldServiceShTests(ModuleUpgradeFixture, unittest.TestCase):
         import hashlib
         self.assertEqual(hashlib.sha256(OLD_SERVICE.read_bytes()).hexdigest(), OLD_SERVICE_SHA256)
         self.assertEqual(hashlib.sha256((SCRIPTS / 'reset_database.py').read_bytes()).hexdigest(), OLD_RESET_SHA256)
-        # The service.sh of this kit is the one of v1.2.1.
-        self.assertEqual((SCRIPTS / 'service.sh').read_text(), OLD_SERVICE.read_text())
+        self.assertEqual(self.without_help_and_reset((SCRIPTS / 'service.sh').read_text()),
+                         self.without_help_and_reset(OLD_SERVICE.read_text()))
+
+    def without_help_and_reset(self, text):
+        """service.sh without the bodies of usage and app_reset.
+
+        The service.sh of this kit is the one of v1.2.1 apart from its help
+        text and its reset, which reads the release of the line of the
+        directory. Everything else, stop, start, restart and status with it
+        (restore.txt step 1), is the same byte for byte.
+        """
+        for name in ('usage', 'app_reset'):
+            text, count = re.subn(rf'^{name}\(\) \{{\n.*?^\}}\n', f'{name}() {{ }}\n', text, flags=re.M | re.S)
+            self.assertEqual(count, 1, name)
+        return text
 
     def test_old_service_sh_refuses_a_marked_database(self):
         # Before the switch: the directory's own preflight.py is the old one.

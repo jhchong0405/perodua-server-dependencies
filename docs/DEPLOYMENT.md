@@ -725,8 +725,10 @@ instead. In short, on the App Server: stop the App
 delete the Odoo sessions; and deploy the release that the data belongs to.
 `restore.txt` also says how to run its commands: steps 1 to 4 in a `scripts`
 folder of the old or the new release (it names the folder of the upgrade;
-`service.sh` and `reset_database.py` are the same in both, which the tests
-pin), step 5 in a folder of the old release; one command at a time, each
+the tests pin that `reset_database.py` is the same in both, and that
+`service.sh` differs only in its help text and in `reset`, which reads the
+release of the line of the directory), step 5 in a folder of the old
+release; one command at a time, each
 with exit status 0, and a stop at the first failure; what success looks like
 (`App stopped.`; only the `Container ... Creating`/`Created` lines of Docker
 for steps 2 and 4; these lines and two blocks of 7 `perl: warning` lines for
