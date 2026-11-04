@@ -525,6 +525,32 @@ class UpgradeTests(UpgradeHarness, unittest.TestCase):
         self.assertIn(f'Deployment verified: {RELEASE} ({REVISION})', result.stdout)
         self.assertIn(f'Upgraded from {OLD_RELEASE}. The data as it was before: {self.backups()[0]}', result.stdout)
 
+    def test_a_demo_directory_of_the_earlier_grey_release_keeps_its_modules(self):
+        # The grey release that the kit pins has the Odoo modules of the one
+        # before it: --upgrade keeps them (no -u), and IMAGE_MAIL=on gives the
+        # new compose file the mail of the image.
+        old_release = re.search(r'^DEMO_OLD_RELEASES_ACCEPTED=(\S+)$', TEXT, re.M).group(1).split(',')[-1]
+        demo_release = re.search(r'^DEMO_RELEASE=(\S+)$', TEXT, re.M).group(1)
+        demo_revision = re.search(r'^DEMO_REVISION=([0-9a-f]{40})$', TEXT, re.M).group(1)
+        demo_image = re.search(r'^DEMO_ODOO_IMAGE=(\S+)$', TEXT, re.M).group(1)
+        self.deployed(old_release, demo_revision)
+        self.identity += 'line=demo-uiux\n'
+        (self.deploy_dir / '.deployment-identity').write_text(self.identity)
+        self.write_app_env(PERODUA_LINE='demo-uiux', IMAGE_MAIL='on', MAIL_REDIRECT_TO='off')
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn(f'Database perodua fits {demo_release}: the same Odoo modules', result.stdout)
+        self.assert_never_upgrades_modules()
+        self.assertIn(f'Deployment verified: {demo_release} ({demo_revision})', result.stdout)
+        self.assertIn('line=demo-uiux\n', (self.deploy_dir / '.deployment-identity').read_text())
+        compose = (self.deploy_dir / 'compose.yml').read_text()
+        self.assertIn(f'image: {demo_image}', compose)
+        self.assertIn('      PERODUA_MAIL: "on"\n', compose)
+        self.assertIn('      PERODUA_MAIL_REDIRECT_TO: "off"\n', compose)
+        self.assertNotIn('PERODUA_MAIL: "off"', compose)
+        self.assertIn('Outgoing email: the mail settings inside the Odoo image (IMAGE_MAIL=on), every email to its'
+                      ' real recipients.', result.stdout)
+
     def test_the_identity_names_the_new_release_and_nothing_else_changes(self):
         result = self.run_script()
         self.assertEqual(result.returncode, 0, result.stdout)
