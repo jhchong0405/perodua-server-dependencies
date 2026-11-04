@@ -175,6 +175,11 @@ if args and args[0] == 'compose':
                 reply(json.dumps({'verdict': 'refused' if code else 'accepted'}), code,
                       'UAT guard: REFUSED: fixture' if code else 'UAT guard: accepted: fixture')
             if cmd[2] == 'demo-flag': reply('--without-demo=True')
+        if cmd[:2] == ['bash', '-c'] and 'uat_demo.py' in cmd[2]:
+            # uat_demo.py of the demo-uiux line, after a module upgrade: no
+            # account still has the seed password, so the plan has none.
+            step = next(a.split('=', 1)[1] for a in action if a.startswith('PERODUA_UAT_DEMO_STEP='))
+            reply('UAT demo: planned: 0' if step == 'plan' else 'UAT demo: ready: 0 seeded accounts have a new random password')
         if cmd[:2] == ['bash', '-c'] and ' -u ' in cmd[2]:
             if os.environ.get('FAKE_U_HANG'):  # a long -u: say so, then take a while
                 import time
@@ -309,6 +314,8 @@ class UpgradeHarness:
                     step = 'filestore archive'
                 elif cmd[:2] == ['bash', '-c'] and ' -u ' in cmd[2]:
                     step = 'odoo -u'
+                elif cmd[:2] == ['bash', '-c'] and 'uat_demo.py' in cmd[2]:
+                    step = 'uat_demo ' + next(a.split('=', 1)[1] for a in action if a.startswith('PERODUA_UAT_DEMO_STEP='))
                 elif cmd[:2] == ['python3', '/opt/deploy/uat_guard.py']:
                     step = 'uat_guard ' + cmd[2]
                 else:
@@ -525,11 +532,15 @@ class UpgradeTests(UpgradeHarness, unittest.TestCase):
         self.assertIn(f'Deployment verified: {RELEASE} ({REVISION})', result.stdout)
         self.assertIn(f'Upgraded from {OLD_RELEASE}. The data as it was before: {self.backups()[0]}', result.stdout)
 
-    def test_a_demo_directory_of_the_earlier_grey_release_keeps_its_modules(self):
-        # The grey release that the kit pins has the Odoo modules of the one
-        # before it: --upgrade keeps them (no -u), and IMAGE_MAIL=on gives the
-        # new compose file the mail of the image.
-        old_release = re.search(r'^DEMO_OLD_RELEASES_ACCEPTED=(\S+)$', TEXT, re.M).group(1).split(',')[-1]
+    def test_a_demo_directory_on_the_modules_of_the_pinned_release_keeps_them(self):
+        # When the database check finds the Odoo modules of the pinned grey
+        # release (READY, as v0.55.0 to v0.55.1 was), --upgrade keeps them (no
+        # -u), and IMAGE_MAIL=on gives the new compose file the mail of the
+        # image. The directory runs the release that NO_IMAGE_MAIL_RELEASES
+        # names (v0.55.0). The module upgrade of v0.55.x to the pinned release
+        # is in test_deploy_app_module_upgrade.py.
+        old_release = re.search(r'^NO_IMAGE_MAIL_RELEASES=(\S+)$', TEXT, re.M).group(1).split(',')[0]
+        self.assertIn(old_release, re.search(r'^DEMO_OLD_RELEASES_ACCEPTED=(\S+)$', TEXT, re.M).group(1).split(','))
         demo_release = re.search(r'^DEMO_RELEASE=(\S+)$', TEXT, re.M).group(1)
         demo_revision = re.search(r'^DEMO_REVISION=([0-9a-f]{40})$', TEXT, re.M).group(1)
         demo_image = re.search(r'^DEMO_ODOO_IMAGE=(\S+)$', TEXT, re.M).group(1)

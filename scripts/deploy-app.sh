@@ -67,17 +67,19 @@ OLD_RELEASES_ACCEPTED=client-stable-uiux-v1.2.1
 # client line: the page under PUBLIC_ROOT, the closed paths, the frame
 # headers). It has PUBLIC_ROOT, the hand-over and the mail code of the client
 # line from its first release.
-# The grey release demo-uiux-grey-v0.55.1: the same DEMO_REVISION (the app
-# master after #2224) as v0.55.0, built by CI and published to GHCR, then
-# copied to the private registry, registry to registry, with no new build: the
-# digests are the ones CI built. Its Odoo image is the demo-uiux image of that
-# revision, with the test Gmail settings and app password of the owner in
-# /etc/perodua/mail (owner decision 2026-11-04): IMAGE_MAIL=on in app.env
-# sends with them. The web image is the one of v0.55.0.
-DEMO_RELEASE=demo-uiux-grey-v0.55.1
-DEMO_REVISION=634599e70b38471b6ecb9bf331177fc5be31e822
-DEMO_ODOO_IMAGE=perodua-deploy.novutal.com/perodua-odoo:demo-uiux-grey-v0.55.1@sha256:bbbc994a6091d775a41a42d18f5f5fed6ce57776c77d30607b09b33c513004df
-DEMO_WEB_IMAGE=perodua-deploy.novutal.com/perodua-odoo:demo-uiux-grey-web-v0.55.1@sha256:14d068e06196493402d0a7c1001f8d56d010bd366f1d82a7d2a5c0c6bacac4d4
+# The grey release demo-uiux-grey-v0.56.1: DEMO_REVISION is the app master
+# after #2241 (the access door #1437, W2 of the /my removal, the WOM and TMS
+# placeholder cards), built by CI and published to GHCR, then copied to the
+# private registry, registry to registry, with no new build: the digests are
+# the ones CI built. Its Odoo image is the demo-uiux image of that revision,
+# with the test Gmail settings and app password of the owner in
+# /etc/perodua/mail (owner decision 2026-11-04), as in v0.55.1: IMAGE_MAIL=on
+# in app.env sends with them. The web image is the one of v0.56.0, which is
+# v0.56.1 without the mail settings, as v0.55.0 was to v0.55.1.
+DEMO_RELEASE=demo-uiux-grey-v0.56.1
+DEMO_REVISION=eefe5d72492b0cbfd81564b1dd6fd72faed394ee
+DEMO_ODOO_IMAGE=perodua-deploy.novutal.com/perodua-odoo:demo-uiux-grey-v0.56.1@sha256:74286eb8321a965dbcdd0541ae5961135645be6e38da1a0a7acdce3c2544ae73
+DEMO_WEB_IMAGE=perodua-deploy.novutal.com/perodua-odoo:demo-uiux-grey-web-v0.56.1@sha256:0cd02045cec3fc0d266b40bdc3b8b2f379af9d50cfe329e858f4fef7268c5622
 # --init-db: the modules the entrypoint of the image installs on a new database
 # of the demo-uiux profile (docker/entrypoint.sh, DEFAULT_INIT_MODULES), and
 # perodua_sso_hub, with the demo seed of their install hooks. uat_guard.py
@@ -88,11 +90,13 @@ DEMO_EXCLUDED_MODULE=perodua_client_stable
 DEMO_RESTORED_MODULES=perodua_demo_ui,perodua_portal,perodua_portal_workspaces,perodua_agent_portal,perodua_demo_client,perodua_gateway,perodua_forecast_workbook,perodua_demo_profile,perodua_supplier_execution,perodua_uiux_api,perodua_sso_hub
 # --upgrade from an earlier grey release: a module upgrade (-u) starts only
 # from one of these module fingerprints (comma-separated), and only in a
-# directory of one of these releases. The fingerprint of v0.55.0 is also the
-# one of v0.55.1 (the same Odoo modules), so --upgrade from v0.55.0 keeps the
-# modules and runs no -u.
+# directory of one of these releases (comma-separated). v0.55.0 and v0.55.1
+# have the same Odoo modules, so one fingerprint. v0.56.1 has other modules
+# (fingerprint 64c105d49204847ccc054fc50c1c28a5: 11 new versions, and the new
+# dependencies perodua_external_access of perodua_portal and auth_totp_mail
+# of perodua_uiux_api), so --upgrade from either of them runs a -u.
 DEMO_MODULE_UPGRADE_FROM=f439f02d565f7782f8f3d9461ca3cb70
-DEMO_OLD_RELEASES_ACCEPTED=demo-uiux-grey-v0.55.0
+DEMO_OLD_RELEASES_ACCEPTED=demo-uiux-grey-v0.55.0,demo-uiux-grey-v0.55.1
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 DEPLOY_DIR=/opt/perodua-app
 CONFIG='' NON_INTERACTIVE=0 INIT_DB=0 CHECK_ONLY=0 TEMP_DIR='' AUTH_DIR='' STARTED=0
@@ -136,7 +140,8 @@ IMAGE_MAIL=''
 # The releases whose scripts folder knows no IMAGE_MAIL (the demo-uiux release
 # of kit f7f7486). Its deploy-app.sh refuses the key, and MAIL_REDIRECT_TO
 # without SMTP_HOST: the backup of an --upgrade from it keeps an app.env that
-# it accepts (backup_app_env).
+# it accepts (backup_app_env). v0.55.1 (kit fec880e and 7af6a40) knows
+# IMAGE_MAIL, so the backup of an --upgrade from it keeps app.env as it is.
 NO_IMAGE_MAIL_RELEASES=demo-uiux-grey-v0.55.0
 MAIL=0 TEST_MAIL='' smtp_password=''
 # The settings the configuration file gives a value, and whether that file is an

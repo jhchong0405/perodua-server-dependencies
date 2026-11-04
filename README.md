@@ -26,7 +26,7 @@ server needs no step.
 
 `deploy-app.sh` also has a second line: **demo-uiux**, the demo line with the
 sign-in hub, in its own block. A directory runs one line, the one of its first
-deployment. This kit version pins the grey release `demo-uiux-grey-v0.55.1`
+deployment. This kit version pins the grey release `demo-uiux-grey-v0.56.1`
 of that line. See [The demo-uiux line](#the-demo-uiux-line).
 
 ## What v1.2.2 changes
@@ -425,7 +425,7 @@ the top of the script:
 | | client-stable-uiux (the default) | demo-uiux |
 | --- | --- | --- |
 | Block | `RELEASE=`, `REVISION=`, `ODOO_IMAGE=`, `WEB_IMAGE=`, the module lists | `DEMO_RELEASE=`, `DEMO_REVISION=`, `DEMO_ODOO_IMAGE=`, `DEMO_WEB_IMAGE=`, the `DEMO_` module lists |
-| Release in this kit version | v1.2.2 | `demo-uiux-grey-v0.55.1` (`--upgrade` from `demo-uiux-grey-v0.55.0`) |
+| Release in this kit version | v1.2.2 | `demo-uiux-grey-v0.56.1` (`--upgrade` with a module upgrade from `demo-uiux-grey-v0.55.0` and `demo-uiux-grey-v0.55.1`) |
 | Workspaces | 4 (the client menu profile) | all 8 of the demo line |
 | A new database (`--init-db`) | no business data | the demo seed: sample data, mock screens and personas |
 | Accounts of a new database | `whadmin`, `admin1`, `admin2` / `perodua`; the business roles also `perodua` | `whadmin`, `admin1`, `admin2` / `perodua`; each other account a new random password, in `seeded-accounts.txt` (root only) |
@@ -443,14 +443,17 @@ deploy that line in a **new directory with a new empty database**, with
 `--replace OLD_DIR` (below). The old directory, its database and its
 attachments stay as they are.
 
-### What demo-uiux-grey-v0.55.1 has
+### What demo-uiux-grey-v0.56.1 has
 
-The grey releases v0.55.0 and v0.55.1 are both revision `634599e7` of the app
-master (4 November 2026), with the same Odoo modules and the same web image
-(`perodua-odoo:demo-uiux-grey-web-v0.55.x`). The Odoo image of v0.55.0 has no
-mail settings. The Odoo image of v0.55.1 (`perodua-odoo:demo-uiux-grey-v0.55.1`)
-is the demo-uiux image of that revision, with the test mail settings of the
-owner (below). Both have:
+The grey release v0.56.1 is revision `eefe5d72` of the app master (4 November
+2026, after app PR #2241). Its Odoo image
+(`perodua-odoo:demo-uiux-grey-v0.56.1`) is the demo-uiux image of that
+revision, with the test mail settings of the owner (below): the same mail
+files, byte for byte, as in v0.55.1. Its web image
+(`perodua-odoo:demo-uiux-grey-web-v0.56.1`) is the web image of v0.56.0, which
+is v0.56.1 without the mail settings, as v0.55.0 was to v0.55.1.
+
+It has all of v0.55.1:
 
 - **The sign-in hub** in its own module, `perodua_sso_hub` (app PR #2202):
   stgiss is the OpenID Connect provider for the module names and for WOM and
@@ -462,8 +465,25 @@ owner (below). Both have:
   text of the IDDI and ECC PO release e-mails, and the `/web/health` probes.
 - **The Outcome 10.26, 10.27 and 10.30 rounds** (app PRs #2122 and #2195).
 
-It does not have the access door of app issue #1437 or W2 of the /my
-removal. A later grey release brings them.
+And these, new (owner decision of 4 November 2026: grey gets them now):
+
+- **The access door of app issue #1437** (app PR #2239): the server can check
+  the role rights on every route. The door stays **off**: the system parameter
+  `perodua.access.enforce` is not set, and no value or another value is off.
+- **W2 of the /my removal** (app PR #2242): the engine for the external
+  accounts. It stays dark: the hub lets a share account cross to a module
+  name only while the system parameter `perodua_sso_hub.external_signin` is
+  `on`, and it is not set. External accounts sign in with the password only
+  (owner decision d28 C): the module upgrade clears the two-factor key and
+  the trusted devices of each share account, and posts a note on its contact.
+- **The WOM and TMS cards** in the Workspaces launcher (app PR #2241).
+- **Fixes of the sign-in hub** (`perodua_sso_hub` 19.0.1.2.0).
+
+Its Odoo modules are not those of v0.55.x: 11 `perodua_*` modules have a new
+version, `perodua_portal` now depends on `perodua_external_access`, and
+`perodua_uiux_api` on `auth_totp_mail` (both already installed on a database
+of v0.55.x). Thus `--upgrade` from v0.55.0 or v0.55.1 runs a **module
+upgrade** (`-u`). See [Upgrade the demo-uiux line](#upgrade-the-demo-uiux-line).
 
 ### Mail from the image (IMAGE_MAIL)
 
@@ -494,11 +514,15 @@ The `app.env` of the demo-uiux directory chooses the mail:
 - At its first start with mail on, Odoo holds the mail that waited in the
   queue: review it in Settings > Technical > Emails, then Retry or Cancel it.
 
-On grey, for the real recipients, in this order:
+Grey runs v0.55.1 with these two lines in `/opt/perodua-app-demo/app.env`.
+They stay through the `--upgrade` to v0.56.1, in the new `app.env` and in the
+`app.env` of the backup: the scripts folder of v0.55.1 knows them.
+
+A directory of v0.55.0, for the real recipients, in this order:
 
 1. `sudo bash deploy-app.sh --upgrade --dir /opt/perodua-app-demo` from
    v0.55.0, without the two lines below. Wait for `Deployment verified:
-   demo-uiux-grey-v0.55.1`.
+   demo-uiux-grey-v0.56.1`.
 2. Add these two lines to `/opt/perodua-app-demo/app.env`:
 
    ```
@@ -572,22 +596,117 @@ needs the owner's yes. The full steps are in
 release that it pins, as for the client line. A module upgrade (`-u`) runs
 only from a module fingerprint and a release that its demo-uiux block accepts
 (`DEMO_MODULE_UPGRADE_FROM`, `DEMO_OLD_RELEASES_ACCEPTED`: lists). This kit
-version accepts `demo-uiux-grey-v0.55.0`, whose Odoo modules are those of
-v0.55.1: that `--upgrade` keeps the modules and runs no `-u`. To send mail
-with the settings of the image, add `IMAGE_MAIL=on` and `MAIL_REDIRECT_TO`
-to `/opt/perodua-app-demo/app.env` after the verified `--upgrade`, then run
-`deploy-app.sh --dir /opt/perodua-app-demo`
-([Mail from the image](#mail-from-the-image-image_mail)). After a module
-upgrade, each account that still has the seed password `perodua` (such as a
-new persona) gets a new
-random password, added to `seeded-accounts.txt`; `whadmin`, `admin1` and
-`admin2` keep their passwords. A run that stops after the database has those
-passwords keeps them in `seeded-accounts.pending` (root only); the next run
-lists them. The cron flags go back as before the upgrade, the mock intake
-pulls too. The held mail is listed with the command of
-step 13 of [Upgrade an App server to v1.2.2](#upgrade-an-app-server-to-v122),
-with the database name of this directory (`-d perodua_demo`), and released with
-`sudo bash deploy-app.sh --release-queued-mail --dir /opt/perodua-app-demo`.
+version accepts the fingerprint `f439f02d565f7782f8f3d9461ca3cb70` (the Odoo
+modules of v0.55.0 and of v0.55.1), in a directory of
+`demo-uiux-grey-v0.55.0` or `demo-uiux-grey-v0.55.1`. v0.56.1 has other
+modules (fingerprint `64c105d49204847ccc054fc50c1c28a5`), so its `--upgrade`
+runs a module upgrade, as the move of the client line to v1.2.2 does
+([Module upgrade](#module-upgrade--u)): the checks, the confirmation, the
+backup, the mark, one run of `-u`, the check of the result and the held
+mail. A directory of another release, or a database with another
+fingerprint, is refused before the App stops.
+
+- **The modules of `-u`.** The installed `perodua_*` modules. On a database
+  that `--init-db` of v0.55.0 set up, they are the 34 `perodua_*` modules
+  that `DEMO_INIT_MODULES` installs with its dependencies: all those of the
+  image but `perodua_client_stable` and `perodua_reporting`. The new
+  dependencies are installed already: `perodua_external_access` through
+  `perodua_agent_portal`, and the Odoo module `auth_totp_mail`, which Odoo
+  installs by itself with `auth_totp` and `mail` (`auto_install`). If one is
+  not installed, Odoo installs it in the same `-u`.
+- **What `-u` changes.** One migration script runs: `perodua_uiux_api`
+  19.0.1.557.0 clears the two-factor key and the trusted devices of each
+  external (share) account that has them, with SQL, so Odoo sends no security
+  email. It posts an internal note on the contact of each such account.
+- **The mail.** With `IMAGE_MAIL=on`, the run of `-u` has the mail settings of
+  the image. The mail that it queues, and the mail that waited in the queue,
+  is held (Settings > Technical > Emails, status Delivery Failed) until
+  `--release-queued-mail`. List it with the command of
+  step 13 of [Upgrade an App server to v1.2.2](#upgrade-an-app-server-to-v122),
+  with the database name of this directory (`-d perodua_demo`), and release it
+  with `sudo bash deploy-app.sh --release-queued-mail --dir /opt/perodua-app-demo`.
+- **The seeded accounts.** After the check of `-u`, each account that still
+  has the seed password `perodua` gets a new random password, added to
+  `seeded-accounts.txt`, except `whadmin`, `admin1` and `admin2`. This
+  includes an account that someone gave the password `perodua` by hand. On
+  grey, the known ones are the SSO test accounts `womtest1` and `tmstest1`. By the
+  owner's decision of 4 November 2026 they keep `perodua`, so step 8 below
+  gives it to them again. Odoo 19
+  sends the email "Security Update: Password Changed" at once to each such
+  account that has an email address: with `MAIL_REDIRECT_TO=off`, to that
+  address. This email is not held. A run that stops after the database has
+  those passwords keeps them in `seeded-accounts.pending` (root only); the
+  next run lists them.
+- **The cron flags** go back as before the upgrade, the mock intake pulls too.
+- **The lock table of the way back.** A demo database has more objects than a
+  database of the client line: a local database of the demo-uiux image
+  v0.52.0, with 162 modules, needs 12,778 locks with the margin, and a DB server with
+  `max_locks_per_transaction` 128 and `max_connections` 100 has room for
+  12,800. When the count is more than the room, `--upgrade` stops before the
+  App stops and prints the steps that give the DB server the room (as in
+  "Before you start" of [Upgrade an App server to v1.2.2](#upgrade-an-app-server-to-v122)).
+  These steps restart PostgreSQL. Step 3 below shows the count before the
+  time when nobody works, so that you can plan them.
+- **The way back** is `restore.txt` in the backup folder, all of its steps,
+  as after the module upgrade of the client line. Its step 5 runs
+  `deploy-app.sh` from a `scripts` folder of the old release: keep it. With
+  git, make that folder before you change the clone, for example
+  `git worktree add --detach ../perodua-kit-v0.55.1 fec880e` (kit commit
+  `fec880e` and `7af6a40` pin v0.55.1, and `f7f7486` pins v0.55.0).
+
+On grey (v0.55.1, with `IMAGE_MAIL=on` and `MAIL_REDIRECT_TO=off`), in a
+`tmux` session, from the `scripts` folder of this kit version:
+
+1. `grep -E '^DEMO_(RELEASE|REVISION)=' deploy-app.sh` shows
+   `DEMO_RELEASE=demo-uiux-grey-v0.56.1` and
+   `DEMO_REVISION=eefe5d72492b0cbfd81564b1dd6fd72faed394ee`.
+2. `sudo bash deploy-app.sh --check-config --dir /opt/perodua-app-demo` shows
+   `Configuration valid for demo-uiux-grey-v0.56.1. Nothing was changed.`
+3. Before the time when nobody works, count the locks. Run the command of
+   step 4. It changes nothing, and the App keeps running. It pulls the
+   images, then shows
+   `Locks for the way back: ... With a margin of 1000 it can need M. The DB server has room for R: ...`.
+   At the question, press Enter without the name. It then shows
+   `Nothing was changed: /opt/perodua-app-demo still runs demo-uiux-grey-v0.55.1.`
+   - When R is M or more, the DB server needs no step.
+   - When the run stops with
+     `Database preflight: module upgrade refused: the way back can fail`, it
+     prints 5 steps. They stop the App, set `max_locks_per_transaction` on the
+     DB server (192.168.23.12) and restart PostgreSQL. Get the owner's yes,
+     and do them at the start of the time when nobody works, before step 4.
+4. `sudo bash deploy-app.sh --upgrade --dir /opt/perodua-app-demo`. The first
+   part changes nothing, and the App keeps running. It shows
+   `Database perodua_demo has the modules of demo-uiux-grey-v0.55.1 (fingerprint f439f02d565f7782f8f3d9461ca3cb70). demo-uiux-grey-v0.56.1 has other modules: this upgrade runs a module upgrade (-u) of 34 modules. N attachments.`,
+   the lock line, `Retired data: none.`, the guard
+   (`UAT guard: accepted: ... none is perodua_client_stable and none relies on it`)
+   and the plan, then asks `Type perodua_demo to start the module upgrade:`.
+5. Type `perodua_demo`. From here the App is down until the end. It ends with
+   `Deployment verified: demo-uiux-grey-v0.56.1 (eefe5d72492b0cbfd81564b1dd6fd72faed394ee)`,
+   the backup folder (`/opt/perodua-app-demo/backups/TIME-demo-uiux-grey-v0.55.1`),
+   the line `Held mail: N ..., M ...` and
+   `Outgoing email: the mail settings inside the Odoo image (IMAGE_MAIL=on), every email to its real recipients.`
+6. Review the held mail with the owner, then release it (above).
+7. `sudo cat /opt/perodua-app-demo/seeded-accounts.txt`: the lines after
+   `# TIME, module upgrade to demo-uiux-grey-v0.56.1:` name the accounts that
+   got a new password. When there is no such line, no account changed.
+8. The SSO test accounts `womtest1` and `tmstest1` keep the password
+   `perodua` (owner decision, 4 November 2026; the SSO guide for Asolute
+   gives it). When step 7 names them, give them `perodua` again.
+   On the App server, run Odoo's shell as `deploy-app.sh` does:
+
+   ```bash
+   sudo docker compose --project-name perodua-demo-uiux --file /opt/perodua-app-demo/compose.yml run --rm --no-deps -T odoo \
+     bash -c 'PGPASSWORD="$DB_PASSWORD" exec odoo shell -c /etc/odoo/odoo.conf -d "$DB_NAME" --db_host="$DB_HOST" --db_port="$DB_PORT" --db_user="$DB_USER"' <<'EOF'
+   users = env['res.users'].with_context(active_test=False).search([('login', 'in', ['womtest1', 'tmstest1'])])
+   users.write({'password': 'perodua'})
+   env.cr.commit()
+   print('perodua again:', ' '.join(sorted(users.mapped('login'))))
+   EOF
+   ```
+
+   It shows `perodua again: tmstest1 womtest1`. The two accounts have no
+   email address, so Odoo sends them no "Security Update" email. Each later
+   module upgrade gives them a new password again: do this step after each.
 
 ## Repository layout
 
