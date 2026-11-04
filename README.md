@@ -601,8 +601,8 @@ modules of v0.55.0 and of v0.55.1), in a directory of
 `demo-uiux-grey-v0.55.0` or `demo-uiux-grey-v0.55.1`. v0.56.1 has other
 modules (fingerprint `64c105d49204847ccc054fc50c1c28a5`), so its `--upgrade`
 runs a module upgrade, as the move of the client line to v1.2.2 does
-([Module upgrade](#module-upgrade--u)): the checks, the backup, the
-confirmation, the mark, one run of `-u`, the check of the result and the held
+([Module upgrade](#module-upgrade--u)): the checks, the confirmation, the
+backup, the mark, one run of `-u`, the check of the result and the held
 mail. A directory of another release, or a database with another
 fingerprint, is refused before the App stops.
 
