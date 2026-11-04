@@ -636,8 +636,8 @@ fingerprint, is refused before the App stops.
   next run lists them.
 - **The cron flags** go back as before the upgrade, the mock intake pulls too.
 - **The lock table of the way back.** A demo database has more objects than a
-  database of the client line: a local demo-uiux database with 162 modules
-  needs 12,778 locks with the margin, and a DB server with
+  database of the client line: a local database of the demo-uiux image
+  v0.52.0, with 162 modules, needs 12,778 locks with the margin, and a DB server with
   `max_locks_per_transaction` 128 and `max_connections` 100 has room for
   12,800. When the count is more than the room, `--upgrade` stops before the
   App stops and prints the steps that give the DB server the room (as in
