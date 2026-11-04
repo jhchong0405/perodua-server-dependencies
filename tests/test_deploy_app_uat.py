@@ -45,23 +45,30 @@ def release_copy(folder, supported):
     return folder / 'deploy-app.sh'
 
 
-# The demo-uiux block of this kit version holds placeholders until the first
-# pin of a grey release; the tests pin these fixture values in a copy.
+# The tests pin these fixture values in a copy of deploy-app.sh, so that they
+# do not depend on the grey release that this kit version pins.
 DEMO_PINS = {
     'DEMO_RELEASE': 'demo-uiux-grey-v0.99.0',
     'DEMO_REVISION': '9' * 40,
     'DEMO_ODOO_IMAGE': 'perodua-deploy.novutal.com/perodua-odoo:demo-uiux-grey-v0.99.0@sha256:' + 'd' * 64,
     'DEMO_WEB_IMAGE': 'perodua-deploy.novutal.com/perodua-odoo:demo-uiux-grey-web-v0.99.0@sha256:' + 'e' * 64,
 }
+# The demo-uiux block of the kit versions before the first pin of a grey release.
+PLACEHOLDER_PINS = {
+    'DEMO_RELEASE': 'demo-uiux-grey-vX.Y.Z',
+    'DEMO_REVISION': 'PLACEHOLDER-the-perodua-odoo-commit-of-the-first-grey-release',
+    'DEMO_ODOO_IMAGE': 'perodua-deploy.novutal.com/perodua-odoo:demo-uiux-grey-vX.Y.Z@sha256:PLACEHOLDER-digest-of-the-first-pin',
+    'DEMO_WEB_IMAGE': 'perodua-deploy.novutal.com/perodua-odoo:demo-uiux-grey-web-vX.Y.Z@sha256:PLACEHOLDER-digest-of-the-first-pin',
+}
 DEMO_MODULES = re.search(r'^DEMO_INIT_MODULES=(\S+)$', SCRIPT.read_text(encoding='utf-8'), re.M).group(1)
 
 
-def demo_release_copy(folder):
+def demo_release_copy(folder, pins=DEMO_PINS):
     """deploy-app.sh and its helpers in another folder, as a kit version whose
-    demo-uiux block pins the fixture release DEMO_PINS."""
+    demo-uiux block pins ``pins`` (the fixture release DEMO_PINS)."""
     folder.mkdir()
     text = SCRIPT.read_text(encoding='utf-8')
-    for key, value in DEMO_PINS.items():
+    for key, value in pins.items():
         line = re.compile(rf'^{key}=\S+$', re.M)
         assert len(line.findall(text)) == 1, f'deploy-app.sh must set {key} once'
         text = line.sub(f'{key}={value}', text)
@@ -642,7 +649,25 @@ class UatOrchestrationTests(unittest.TestCase):
                 with self.subTest(line=block + name):
                     self.assertEqual(len(re.findall(rf"^{block}{name}=\S+$", text, re.M)), 1)
 
+    def test_the_real_demo_block_pins_a_grey_release(self):
+        text = SCRIPT.read_text(encoding='utf-8')
+        pins = {key: re.search(rf'^{key}=(\S+)$', text, re.M).group(1) for key in DEMO_PINS}
+        version = re.fullmatch(r'demo-uiux-grey-(v\d+\.\d+\.\d+)', pins['DEMO_RELEASE']).group(1)
+        self.assertRegex(pins['DEMO_REVISION'], r'^[0-9a-f]{40}$')
+        for key, tag in (('DEMO_ODOO_IMAGE', 'demo-uiux-grey-'), ('DEMO_WEB_IMAGE', 'demo-uiux-grey-web-')):
+            with self.subTest(image=key):
+                self.assertRegex(pins[key], rf'^perodua-deploy\.novutal\.com/perodua-odoo:{tag}{re.escape(version)}'
+                                            r'@sha256:[0-9a-f]{64}$')
+        self.assertNotEqual(pins['DEMO_ODOO_IMAGE'].split('@')[1], pins['DEMO_WEB_IMAGE'].split('@')[1])
+        # The settings of the line pass the pin check, and --check-config runs no Docker.
+        self.configure(PERODUA_LINE='demo-uiux')
+        result = self.run_script('EMPTY', '--check-config')
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn(f'Configuration valid for {pins["DEMO_RELEASE"]}. Nothing was changed.', result.stdout)
+        self.assertEqual(self.calls(), [])
+
     def test_the_demo_line_stops_while_its_block_holds_placeholders(self):
+        self.script = demo_release_copy(Path(self.temp.name) / 'placeholders', PLACEHOLDER_PINS)
         self.configure(PERODUA_LINE='demo-uiux')
         for extra in ((), ('--init-db',), ('--check-config',)):
             with self.subTest(extra=extra):

@@ -66,13 +66,15 @@ OLD_RELEASES_ACCEPTED=client-stable-uiux-v1.2.1
 # client line: the page under PUBLIC_ROOT, the closed paths, the frame
 # headers). It has PUBLIC_ROOT, the hand-over and the mail code of the client
 # line from its first release.
-# PLACEHOLDERS until the first pin of a grey release: DEMO_RELEASE,
-# DEMO_REVISION and the two image digests name no image, and every run of the
-# demo-uiux line stops before it changes anything until they do.
-DEMO_RELEASE=demo-uiux-grey-vX.Y.Z
-DEMO_REVISION=PLACEHOLDER-the-perodua-odoo-commit-of-the-first-grey-release
-DEMO_ODOO_IMAGE=perodua-deploy.novutal.com/perodua-odoo:demo-uiux-grey-vX.Y.Z@sha256:PLACEHOLDER-digest-of-the-first-pin
-DEMO_WEB_IMAGE=perodua-deploy.novutal.com/perodua-odoo:demo-uiux-grey-web-vX.Y.Z@sha256:PLACEHOLDER-digest-of-the-first-pin
+# The first grey release, demo-uiux-grey-v0.55.0: built by CI from
+# DEMO_REVISION (the app master after #2224) and published to GHCR, then
+# copied to the private registry, registry to registry, with no new build: the
+# digests are the ones CI built. Its Odoo image has no /etc/perodua (no mail
+# settings, no mail password).
+DEMO_RELEASE=demo-uiux-grey-v0.55.0
+DEMO_REVISION=634599e70b38471b6ecb9bf331177fc5be31e822
+DEMO_ODOO_IMAGE=perodua-deploy.novutal.com/perodua-odoo:demo-uiux-grey-v0.55.0@sha256:ef83c1f11dcad817ffefda3b9a6477a49d1b3a0354c83128a94af6813bfb9235
+DEMO_WEB_IMAGE=perodua-deploy.novutal.com/perodua-odoo:demo-uiux-grey-web-v0.55.0@sha256:14d068e06196493402d0a7c1001f8d56d010bd366f1d82a7d2a5c0c6bacac4d4
 # --init-db: the modules the entrypoint of the image installs on a new database
 # of the demo-uiux profile (docker/entrypoint.sh, DEFAULT_INIT_MODULES), and
 # perodua_sso_hub, with the demo seed of their install hooks. uat_guard.py
