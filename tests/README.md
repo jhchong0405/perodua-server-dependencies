@@ -224,6 +224,10 @@ directory's own, or the staged one of the new release) and the release that
 - a demo-uiux directory of the earlier grey release (`DEMO_OLD_RELEASES_ACCEPTED`)
   with `IMAGE_MAIL=on` moves to the pinned grey release with the same Odoo
   modules and no `-u`, and its new `compose.yml` has the mail of the image;
+  its backup saves `app.env` without `IMAGE_MAIL` and `MAIL_REDIRECT_TO`
+  (mode 0600), which the scripts folder of that release refuses, and
+  `restore.txt` says so; a release that knows `IMAGE_MAIL` (not in
+  `NO_IMAGE_MAIL_RELEASES`) gets `app.env` back byte for byte;
 - the backup folder (`backups/TIME-OLD_RELEASE`, 0700, or under `--backup-dir`)
   holds the dump, the archive, the old identity and `app.env`, and
   `restore.txt`, which is printed as well and names each restore command: step

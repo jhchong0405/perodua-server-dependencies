@@ -2095,14 +2095,33 @@ first start with mail on, Odoo holds the mail that waited in the queue
 ("Held: outgoing email settings changed"): review it in Settings > Technical >
 Emails, then Retry or Cancel it.
 
-On grey, for the real recipients, add these two lines to
-`/opt/perodua-app-demo/app.env` (0600), then run `deploy-app.sh --upgrade`
-(from v0.55.0) or `deploy-app.sh --dir /opt/perodua-app-demo`:
+On grey, for the real recipients, in this order:
 
-```
-IMAGE_MAIL=on
-MAIL_REDIRECT_TO=off
-```
+1. `sudo bash deploy-app.sh --upgrade --dir /opt/perodua-app-demo` from
+   v0.55.0, with the `app.env` of v0.55.0 (no `IMAGE_MAIL`). Wait for
+   `Deployment verified: demo-uiux-grey-v0.55.1`.
+2. Add these two lines to `/opt/perodua-app-demo/app.env` (0600):
+
+   ```
+   IMAGE_MAIL=on
+   MAIL_REDIRECT_TO=off
+   ```
+
+3. `sudo bash deploy-app.sh --dir /opt/perodua-app-demo`, without
+   `--upgrade`. It writes the new `compose.yml` and starts the App with the
+   mail of the image.
+
+**Why this order.** The backup of an `--upgrade` saves `app.env` for step 5
+of its `restore.txt`, which copies it back and runs `deploy-app.sh` of the
+old release. The scripts folder of v0.55.0 (kit `f7f7486`) refuses
+`IMAGE_MAIL` (`Unknown configuration key: IMAGE_MAIL`) and, without
+`SMTP_HOST`, `MAIL_REDIRECT_TO` (`MAIL_REDIRECT_TO applies only with
+SMTP_HOST`). So with the two lines in `app.env` before the `--upgrade`, the
+way back would stop when it is needed. If they are there all the same,
+`deploy-app.sh` saves the `app.env` of the backup without them (for each
+release in `NO_IMAGE_MAIL_RELEASES`, which names v0.55.0), and step 5 of
+`restore.txt` says so: the way back then works, with the mail off as in
+v0.55.0.
 
 ### Switch an environment to the demo-uiux line
 

@@ -550,6 +550,34 @@ class UpgradeTests(UpgradeHarness, unittest.TestCase):
         self.assertNotIn('PERODUA_MAIL: "off"', compose)
         self.assertIn('Outgoing email: the mail settings inside the Odoo image (IMAGE_MAIL=on), every email to its'
                       ' real recipients.', result.stdout)
+        # The way back runs deploy-app.sh of v0.55.0, which refuses IMAGE_MAIL
+        # and MAIL_REDIRECT_TO without SMTP_HOST: the backup keeps app.env
+        # without them, and restore.txt says so.
+        backup = self.backups()[0]
+        saved = (backup / 'app.env').read_text()
+        self.assertEqual(saved, ''.join(line for line in self.app_env.splitlines(keepends=True)
+                                        if not line.startswith(('IMAGE_MAIL=', 'MAIL_REDIRECT_TO='))))
+        self.assertIn('PERODUA_LINE=demo-uiux\n', saved)
+        self.assertEqual((backup / 'app.env').stat().st_mode & 0o777, 0o600)
+        restore = (backup / 'restore.txt').read_text()
+        self.assertIn(f'   sudo cp -p {backup}/app.env {self.deploy_dir}/app.env\n', restore)
+        self.assertIn(f'   (This app.env has no IMAGE_MAIL and no MAIL_REDIRECT_TO: {old_release} refuses them, and its'
+                      ' mail stays off.)\n', restore)
+
+    def test_the_backup_keeps_app_env_as_it_is_for_a_release_that_knows_image_mail(self):
+        # A grey release whose scripts folder knows IMAGE_MAIL (not in
+        # NO_IMAGE_MAIL_RELEASES) gets its app.env back byte for byte.
+        demo_revision = re.search(r'^DEMO_REVISION=([0-9a-f]{40})$', TEXT, re.M).group(1)
+        self.assertNotIn('demo-uiux-grey-v0.55.9', re.search(r'^NO_IMAGE_MAIL_RELEASES=(\S+)$', TEXT, re.M).group(1))
+        self.deployed('demo-uiux-grey-v0.55.9', demo_revision)
+        self.identity += 'line=demo-uiux\n'
+        (self.deploy_dir / '.deployment-identity').write_text(self.identity)
+        self.write_app_env(PERODUA_LINE='demo-uiux', IMAGE_MAIL='on', MAIL_REDIRECT_TO='off')
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout)
+        backup = self.backups()[0]
+        self.assertEqual((backup / 'app.env').read_text(), self.app_env)
+        self.assertNotIn('has no IMAGE_MAIL', (backup / 'restore.txt').read_text())
 
     def test_the_identity_names_the_new_release_and_nothing_else_changes(self):
         result = self.run_script()

@@ -1015,7 +1015,10 @@ class UatOrchestrationTests(unittest.TestCase):
         result = send()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('The test email was not sent, for the reason above. The mail settings are those inside the Odoo'
-                      ' image', result.stdout)
+                      ' image: read the mail-test lines above. The App names them when it starts: sudo docker compose'
+                      f' --project-name perodua-uat-fixture --file {self.deploy_dir}/compose.yml logs odoo | grep -F'
+                      " \\[entrypoint\\]\\ mail.", result.stdout)
+        self.assertNotIn('mail line above', result.stdout)
         del self.env['FAKE_MAIL_TEST_EXIT']
         # To the real recipients.
         self.demo(IMAGE_MAIL='on', MAIL_REDIRECT_TO='off')

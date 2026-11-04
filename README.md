@@ -494,12 +494,25 @@ The `app.env` of the demo-uiux directory chooses the mail:
 - At its first start with mail on, Odoo holds the mail that waited in the
   queue: review it in Settings > Technical > Emails, then Retry or Cancel it.
 
-The grey `app.env` for the real recipients has these two lines:
+On grey, for the real recipients, in this order:
 
-```
-IMAGE_MAIL=on
-MAIL_REDIRECT_TO=off
-```
+1. `sudo bash deploy-app.sh --upgrade --dir /opt/perodua-app-demo` from
+   v0.55.0, without the two lines below. Wait for `Deployment verified:
+   demo-uiux-grey-v0.55.1`.
+2. Add these two lines to `/opt/perodua-app-demo/app.env`:
+
+   ```
+   IMAGE_MAIL=on
+   MAIL_REDIRECT_TO=off
+   ```
+
+3. `sudo bash deploy-app.sh --dir /opt/perodua-app-demo` (no `--upgrade`).
+
+The scripts folder of v0.55.0 refuses these two lines (`Unknown
+configuration key: IMAGE_MAIL`), and the way back of `restore.txt` runs it.
+So add them only after a verified `--upgrade`. If they are in `app.env`
+during an `--upgrade` from v0.55.0, its backup saves `app.env` without them,
+so that the way back still works with the mail off.
 
 A kit version without a pin of this line (its block holds placeholders)
 stops every run with `--line demo-uiux` before it changes anything:
@@ -561,8 +574,9 @@ only from a module fingerprint and a release that its demo-uiux block accepts
 (`DEMO_MODULE_UPGRADE_FROM`, `DEMO_OLD_RELEASES_ACCEPTED`: lists). This kit
 version accepts `demo-uiux-grey-v0.55.0`, whose Odoo modules are those of
 v0.55.1: that `--upgrade` keeps the modules and runs no `-u`. To send mail
-with the settings of the image after it, add `IMAGE_MAIL=on` and
-`MAIL_REDIRECT_TO` to `/opt/perodua-app-demo/app.env` before the `--upgrade`
+with the settings of the image, add `IMAGE_MAIL=on` and `MAIL_REDIRECT_TO`
+to `/opt/perodua-app-demo/app.env` after the verified `--upgrade`, then run
+`deploy-app.sh --dir /opt/perodua-app-demo`
 ([Mail from the image](#mail-from-the-image-image_mail)). After a module
 upgrade, each account that still has the seed password `perodua` (such as a
 new persona) gets a new

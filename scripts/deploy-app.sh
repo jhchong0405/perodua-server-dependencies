@@ -98,7 +98,7 @@ DEPLOY_DIR=/opt/perodua-app
 CONFIG='' NON_INTERACTIVE=0 INIT_DB=0 CHECK_ONLY=0 TEMP_DIR='' AUTH_DIR='' STARTED=0
 # --upgrade: the release the directory runs before, the backup of its data,
 # whether its App was running, and how far the upgrade got (see cleanup).
-UPGRADE=0 BACKUP_BASE='' BACKUP_DIR='' OLD_RELEASE='' OLD_REVISION='' WAS_RUNNING=0 UPGRADE_STATE=''
+UPGRADE=0 BACKUP_BASE='' BACKUP_DIR='' OLD_RELEASE='' OLD_REVISION='' WAS_RUNNING=0 UPGRADE_STATE='' BACKUP_APP_ENV_TRIMMED=0
 # The line of this deployment (--line, PERODUA_LINE) and its image profile.
 LINE='' LINE_OPTION='' PERODUA_LINE='' PROFILE=''
 # --replace DIR: the deployment of another directory that this one takes the
@@ -133,6 +133,11 @@ MAIL_KEYS=(SMTP_HOST SMTP_PORT SMTP_ENCRYPTION SMTP_USER SMTP_PASSWORD_FILE SMTP
 # IMAGE_MAIL=on (the demo-uiux line only): the other source of the mail
 # settings, those inside the pinned Odoo image, each email to MAIL_REDIRECT_TO.
 IMAGE_MAIL=''
+# The releases whose scripts folder knows no IMAGE_MAIL (the demo-uiux release
+# of kit f7f7486). Its deploy-app.sh refuses the key, and MAIL_REDIRECT_TO
+# without SMTP_HOST: the backup of an --upgrade from it keeps an app.env that
+# it accepts (backup_app_env).
+NO_IMAGE_MAIL_RELEASES=demo-uiux-grey-v0.55.0
 MAIL=0 TEST_MAIL='' smtp_password=''
 # The settings the configuration file gives a value, and whether that file is an
 # app.env written by hand in the deployment directory before its first run.
@@ -1047,7 +1052,10 @@ if [[ -n $TEST_MAIL ]]; then
         || fail "Outgoing email is off in $DEPLOY_DIR (no SMTP_HOST in $CONFIG). Configure it first: sudo bash deploy-app.sh --mail --dir $DEPLOY_DIR"
     printf 'Sending one test email to %s: %s...\n' "$TEST_MAIL" "$(mail_summary)"
     if [[ -n $IMAGE_MAIL ]]; then
-        settings_hint='The mail settings are those inside the Odoo image: check that the image has them (the [entrypoint] mail line above), that their sign-in is still valid, and that this server reaches their SMTP server'
+        # The entrypoint names the mail settings (its "[entrypoint] mail:"
+        # line) only at the start of Odoo, not before perodua-mail-test.
+        printf -v settings_hint 'The mail settings are those inside the Odoo image: read the mail-test lines above. The App names them when it starts: sudo docker compose --project-name %q --file %q logs odoo | grep -F %q. Check that their sign-in (the app password in the image) is not revoked, and that this server reaches their SMTP server' \
+            "$PROJECT_NAME" "$DEPLOY_DIR/compose.yml" '[entrypoint] mail'
     else
         settings_hint='Check the SMTP settings with sudo bash deploy-app.sh --mail, and that this server reaches the SMTP server'
     fi
@@ -2389,12 +2397,29 @@ upgrade_backup() {
     files=$(tar -tzf "$BACKUP_DIR/filestore.tar.gz" | awk '!/\/$/ { n++ } END { print n + 0 }') \
         || fail "The backup $BACKUP_DIR/filestore.tar.gz cannot be read back"
     cp -p -- "$DEPLOY_DIR/.deployment-identity" "$BACKUP_DIR/deployment-identity"
-    [[ ! -f $DEPLOY_DIR/app.env ]] || cp -p -- "$DEPLOY_DIR/app.env" "$BACKUP_DIR/app.env"
+    [[ ! -f $DEPLOY_DIR/app.env ]] || backup_app_env
     restore_hint > "$BACKUP_DIR/restore.txt"
     UPGRADE_STATE=backed-up
     bytes=$(wc -c < "$BACKUP_DIR/database.dump")
     printf 'Backup complete in %s: database.dump (%s bytes), filestore.tar.gz (%s files).\n' "$BACKUP_DIR" "$bytes" "$files"
     cat "$BACKUP_DIR/restore.txt"
+}
+backup_app_env() {  # app.env as step 5 of restore.txt gives it to OLD_RELEASE
+    BACKUP_APP_ENV_TRIMMED=0
+    # A copy, unless OLD_RELEASE refuses IMAGE_MAIL and app.env has it (the
+    # two lines were added by hand for this upgrade): then without IMAGE_MAIL,
+    # and without MAIL_REDIRECT_TO when there is no SMTP_HOST, as OLD_RELEASE
+    # wrote it. Its mail stays off, as it was.
+    if [[ ,$NO_IMAGE_MAIL_RELEASES, == *,"$OLD_RELEASE",* ]] && grep -q '^IMAGE_MAIL=' "$DEPLOY_DIR/app.env"; then
+        local drop='^IMAGE_MAIL='
+        grep -Eq '^SMTP_HOST=[^[:space:]]' "$DEPLOY_DIR/app.env" || drop='^(IMAGE_MAIL|MAIL_REDIRECT_TO)='
+        grep -Ev "$drop" "$DEPLOY_DIR/app.env" > "$BACKUP_DIR/app.env" || [[ $? == 1 ]] \
+            || fail "Cannot save $DEPLOY_DIR/app.env in $BACKUP_DIR"
+        chmod 0600 "$BACKUP_DIR/app.env"
+        BACKUP_APP_ENV_TRIMMED=1
+    else
+        cp -p -- "$DEPLOY_DIR/app.env" "$BACKUP_DIR/app.env"
+    fi
 }
 restore_hint() {  # how to put the backup back, saved next to it as restore.txt
     local compose dump archive folder locks='' sizes='' tab=$'\t'
@@ -2496,6 +2521,8 @@ go_back_steps() {  # back to OLD_RELEASE, from any of its scripts folders
     dir=$(printf '%q' "$DEPLOY_DIR") backup=$(printf '%q' "$BACKUP_DIR")
     printf '   sudo cp -p %s/deployment-identity %s/.deployment-identity\n' "$backup" "$dir"
     [[ ! -f $BACKUP_DIR/app.env ]] || printf '   sudo cp -p %s/app.env %s/app.env\n' "$backup" "$dir"
+    ((${BACKUP_APP_ENV_TRIMMED:-0} == 0)) \
+        || printf '   (This app.env has no IMAGE_MAIL and no MAIL_REDIRECT_TO: %s refuses them, and its mail stays off.)\n' "$OLD_RELEASE"
     printf '   Then, from a scripts folder of %s: sudo bash deploy-app.sh --dir %s\n' "$OLD_RELEASE" "$dir"
 }
 if ((UPGRADE)); then
