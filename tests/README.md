@@ -221,13 +221,15 @@ directory's own, or the staged one of the new release) and the release that
 - after the upgrade, `.deployment-identity` differs from the old one only in
   `release=` and `revision=`, `app.env` and the password are unchanged, and
   `compose.yml` names the new image and the same attachments volume;
-- a demo-uiux directory of the earlier grey release (`DEMO_OLD_RELEASES_ACCEPTED`)
-  with `IMAGE_MAIL=on` moves to the pinned grey release with the same Odoo
-  modules and no `-u`, and its new `compose.yml` has the mail of the image;
-  its backup saves `app.env` without `IMAGE_MAIL` and `MAIL_REDIRECT_TO`
-  (mode 0600), which the scripts folder of that release refuses, and
-  `restore.txt` says so; a release that knows `IMAGE_MAIL` (not in
-  `NO_IMAGE_MAIL_RELEASES`) gets `app.env` back byte for byte;
+- a demo-uiux directory of the release in `NO_IMAGE_MAIL_RELEASES`
+  (v0.55.0) with `IMAGE_MAIL=on`, on a database that the check finds with the
+  Odoo modules of the pinned release (`READY`), moves to it with no `-u`, and
+  its new `compose.yml` has the mail of the image; its backup saves `app.env`
+  without `IMAGE_MAIL` and `MAIL_REDIRECT_TO` (mode 0600), which the scripts
+  folder of that release refuses, and `restore.txt` says so; a release that
+  knows `IMAGE_MAIL` (not in `NO_IMAGE_MAIL_RELEASES`) gets `app.env` back
+  byte for byte. The module upgrade of the demo-uiux line is in
+  `test_deploy_app_module_upgrade.py` (below);
 - the backup folder (`backups/TIME-OLD_RELEASE`, 0700, or under `--backup-dir`)
   holds the dump, the archive, the old identity and `app.env`, and
   `restore.txt`, which is printed as well and names each restore command: step
@@ -330,6 +332,26 @@ only `from`. It checks:
 - `--release-queued-mail` runs only `preflight.py release-mail` with the
   directory's compose file, and only from the folder of the release the
   directory runs; it prints the two numbers of the released mail;
+- the demo-uiux line (`DemoModuleUpgradeTests`): the block upgrades the
+  modules of grey (the fingerprint `f439f02d...` of v0.55.0 and v0.55.1 is in
+  `DEMO_MODULE_UPGRADE_FROM`, both releases are in
+  `DEMO_OLD_RELEASES_ACCEPTED`, and only v0.55.0 is in
+  `NO_IMAGE_MAIL_RELEASES`). A directory of v0.55.1 with `IMAGE_MAIL=on` and
+  `MAIL_REDIRECT_TO=off` takes the module upgrade to the pinned release: the
+  same steps, with the plan of `uat_demo.py` (the accounts that still have
+  the seed password; the fake finds none) after the switch and before `up`;
+  the guard of `-u` with `--line demo-uiux` and `--exclude
+  perodua_client_stable`; the names of both releases, the fingerprint and
+  the number of modules in the output; the new identity with
+  `line=demo-uiux`, the pinned image, the held mail and the README part that
+  lists it. The two mail lines stay in the new `app.env` and in the `app.env`
+  of the backup (byte for byte), `compose.yml` has the mail of the image and
+  no `SMTP_` value, and the mail hold comes after `-u` and before the App
+  starts. A directory of v0.55.0 with the two lines gets a backup `app.env`
+  without them (0600, named in `restore.txt`) and keeps them in the new
+  `app.env`; one without them keeps the mail off. A directory of an unknown
+  grey release, or a database with another fingerprint, is refused before
+  the App stops, and nothing changes;
 - as root on Linux: the `service.sh` of v1.2.1
   (`fixtures/service-v1.2.1.sh`, pinned by its sha256) refuses `start`
   and `restart` on a marked database, before and after the switch, without
@@ -1050,7 +1072,9 @@ compose file, `app.env` and identity get no line settings.
   host table, while the client line still knows only `rp`, `sp` and `cp`.
 - `test_uat_guard.py` checks the excluded module of each line, that the demo
   reviews are the 16 findings of 11 files of the pinned image, each with its
-  sha256, that they do not accept the same finding in other bytes, that a
+  sha256 and a reason that names the pinned release (`DEMO_RELEASE`) and
+  another sha256 of the file that the first pin (v0.55.0) reviewed, that
+  they do not accept the same finding in other bytes, that a
   placeholder (no sha256) never accepts a finding while a real hash accepts it,
   that the demo line keeps `perodua_client_stable` out, and that an unknown
   line exits 2.
