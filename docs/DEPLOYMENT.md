@@ -1941,10 +1941,10 @@ with `sed`: `RELEASE=` and `REVISION=` for a directory of the client line,
 
 | Setting | demo-uiux |
 | --- | --- |
-| `DEMO_RELEASE`, `DEMO_REVISION` | the numbered grey release `demo-uiux-grey-vX.Y.Z` and its commit of perodua-odoo. **Placeholders** in this kit version. |
-| `DEMO_ODOO_IMAGE` | `perodua-deploy.novutal.com/perodua-odoo:demo-uiux-grey-vX.Y.Z@sha256:...`: the Odoo image of profile `demo-uiux`, built without the mail password of the demo images. Placeholder. |
-| `DEMO_WEB_IMAGE` | `perodua-deploy.novutal.com/perodua-odoo:demo-uiux-grey-web-vX.Y.Z@sha256:...`: the web image built from `docker/uiux/Dockerfile.client-stable-uiux` (the page under `PUBLIC_ROOT`, the closed paths, the frame headers). Placeholder. |
-| `DEMO_INIT_MODULES` | the init list of the `demo-uiux` profile of `docker/entrypoint.sh` (`perodua_demo_ui`, `perodua_portal`, `perodua_portal_workspaces`, `perodua_agent_portal`, `perodua_demo_client`, `perodua_gateway`, `perodua_forecast_workbook`, `perodua_demo_profile`, `perodua_supplier_execution`, `perodua_uiux_api`) and `perodua_sso_hub` |
+| `DEMO_RELEASE`, `DEMO_REVISION` | the numbered grey release `demo-uiux-grey-vX.Y.Z` and its commit of perodua-odoo. In this kit version: `demo-uiux-grey-v0.55.0`, revision `634599e70b38471b6ecb9bf331177fc5be31e822` (the app master after PR #2224). |
+| `DEMO_ODOO_IMAGE` | `perodua-deploy.novutal.com/perodua-odoo:demo-uiux-grey-vX.Y.Z@sha256:...`: the Odoo image of profile `demo-uiux`, built without the mail password of the demo images. In this kit version: `demo-uiux-grey-v0.55.0@sha256:ef83c1f11dcad817ffefda3b9a6477a49d1b3a0354c83128a94af6813bfb9235` (an index with `linux/amd64`, the digest that CI published to GHCR). |
+| `DEMO_WEB_IMAGE` | `perodua-deploy.novutal.com/perodua-odoo:demo-uiux-grey-web-vX.Y.Z@sha256:...`: the web image built from `docker/uiux/Dockerfile.client-stable-uiux` (the page under `PUBLIC_ROOT`, the closed paths, the frame headers). In this kit version: `demo-uiux-grey-web-v0.55.0@sha256:14d068e06196493402d0a7c1001f8d56d010bd366f1d82a7d2a5c0c6bacac4d4`. |
+| `DEMO_INIT_MODULES` | the init list of the `demo-uiux` profile of `docker/entrypoint.sh` (`perodua_demo_ui`, `perodua_portal`, `perodua_portal_workspaces`, `perodua_agent_portal`, `perodua_demo_client`, `perodua_gateway`, `perodua_forecast_workbook`, `perodua_demo_profile`, `perodua_supplier_execution`, `perodua_uiux_api`, `perodua_sso_hub`; the entrypoint of the pinned revision has `perodua_sso_hub` in the list too) |
 | `DEMO_EXCLUDED_MODULE` | `perodua_client_stable`: the client menu profile, which the entrypoint of the image refuses on this profile |
 | `DEMO_RESTORED_MODULES` | the same as `DEMO_INIT_MODULES` |
 | `DEMO_MODULE_UPGRADE_FROM`, `DEMO_OLD_RELEASES_ACCEPTED` | empty: the first grey release takes no module upgrade |
@@ -1969,11 +1969,13 @@ keeps the line; a run that names the other one (`--line`, or `PERODUA_LINE` in
 `--config`) stops before Docker: `DIR runs the client-stable-uiux line, and a
 directory keeps the line of its first deployment`.
 
-**Placeholders.** While the demo-uiux block names no image (a release name
+**Placeholders.** A demo-uiux block that names no image (a release name
 that is not lower case, a revision that is not 40 hexadecimal digits, or an
-image without a digest), every run of that line stops before Docker,
-`--check-config` too: `This scripts folder pins no release of the demo-uiux
-line yet`. `service.sh reset` of a demo-uiux directory stops in the same way.
+image without a digest), as in the kit versions before the first pin, stops
+every run of that line before Docker, `--check-config` too: `This scripts
+folder pins no release of the demo-uiux line yet`. `service.sh reset` of a
+demo-uiux directory stops in the same way. This kit version pins
+`demo-uiux-grey-v0.55.0` (README.md, "What demo-uiux-grey-v0.55.0 has").
 
 ### What --init-db does on the demo-uiux line
 

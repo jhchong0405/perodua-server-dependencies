@@ -999,8 +999,11 @@ own cases. The client-stable-uiux cases above stay as they are: the client
 compose file, `app.env` and identity get no line settings.
 
 - `test_deploy_app_uat.py` copies the scripts folder with test pins in the demo
-  block (`DEMO_PINS`). It checks that the placeholders of the shipped block stop
-  every run before Docker (`--check-config` too); that `--line` and
+  block (`DEMO_PINS`). It checks that the shipped block pins a grey release
+  (the release name, a 40-digit revision, two image digests with the tags of
+  the release) that `--check-config` accepts without Docker; that the
+  placeholders of the kit versions before the first pin (`PLACEHOLDER_PINS`)
+  stop every run before Docker (`--check-config` too); that `--line` and
   `PERODUA_LINE` must agree and name a known line; that a directory keeps the
   line of its first deployment, both ways; the demo init list (the entrypoint
   list and `perodua_sso_hub`); the guard call with `--line demo-uiux`; the
@@ -1030,9 +1033,11 @@ compose file, `app.env` and identity get no line settings.
   the demo line accepts the seven workspace codes of `perodua_sso_hub` in the
   host table, while the client line still knows only `rp`, `sp` and `cp`.
 - `test_uat_guard.py` checks the excluded module of each line, that the demo
-  reviews are placeholders that never accept a finding, that a real hash
-  accepts it, that the demo line keeps `perodua_client_stable` out, and that an
-  unknown line exits 2.
+  reviews are the 16 findings of 11 files of the pinned image, each with its
+  sha256, that they do not accept the same finding in other bytes, that a
+  placeholder (no sha256) never accepts a finding while a real hash accepts it,
+  that the demo line keeps `perodua_client_stable` out, and that an unknown
+  line exits 2.
 - `test_service_app.py` checks that `reset` of a demo directory reads
   `DEMO_RELEASE=` and `DEMO_REVISION=`, and that it changes nothing while the
   demo block holds placeholders. `test_uninstall_app.py` checks that the plan

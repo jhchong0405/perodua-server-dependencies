@@ -26,9 +26,8 @@ server needs no step.
 
 `deploy-app.sh` also has a second line: **demo-uiux**, the demo line with the
 sign-in hub, in its own block. A directory runs one line, the one of its first
-deployment. In this kit version the demo-uiux block holds placeholders: it
-deploys nothing until the first grey release is pinned. See
-[The demo-uiux line](#the-demo-uiux-line).
+deployment. This kit version pins the first grey release of that line,
+`demo-uiux-grey-v0.55.0`. See [The demo-uiux line](#the-demo-uiux-line).
 
 ## What v1.2.2 changes
 
@@ -426,7 +425,7 @@ the top of the script:
 | | client-stable-uiux (the default) | demo-uiux |
 | --- | --- | --- |
 | Block | `RELEASE=`, `REVISION=`, `ODOO_IMAGE=`, `WEB_IMAGE=`, the module lists | `DEMO_RELEASE=`, `DEMO_REVISION=`, `DEMO_ODOO_IMAGE=`, `DEMO_WEB_IMAGE=`, the `DEMO_` module lists |
-| Release in this kit version | v1.2.2 | placeholders until the first pin of a grey release `demo-uiux-grey-vX.Y.Z` |
+| Release in this kit version | v1.2.2 | `demo-uiux-grey-v0.55.0`, the first grey release |
 | Workspaces | 4 (the client menu profile) | all 8 of the demo line |
 | A new database (`--init-db`) | no business data | the demo seed: sample data, mock screens and personas |
 | Accounts of a new database | `whadmin`, `admin1`, `admin2` / `perodua`; the business roles also `perodua` | `whadmin`, `admin1`, `admin2` / `perodua`; each other account a new random password, in `seeded-accounts.txt` (root only) |
@@ -444,8 +443,28 @@ deploy that line in a **new directory with a new empty database**, with
 `--replace OLD_DIR` (below). The old directory, its database and its
 attachments stay as they are.
 
-While the demo-uiux block holds placeholders, every run with
-`--line demo-uiux` stops before it changes anything:
+### What demo-uiux-grey-v0.55.0 has
+
+The first grey release is revision `634599e7` of the app master (4 November
+2026), as the images `perodua-odoo:demo-uiux-grey-v0.55.0` (Odoo, profile
+`demo-uiux`, no mail password) and `perodua-odoo:demo-uiux-grey-web-v0.55.0`
+(web). It has:
+
+- **The sign-in hub** in its own module, `perodua_sso_hub` (app PR #2202):
+  stgiss is the OpenID Connect provider for the module names and for WOM and
+  TMS, as on v1.2.2. The module keeps the Odoo system parameters
+  `perodua_client_stable.*` (owner answer d05) and needs no
+  `perodua_client_stable`.
+- **W1 of the /my removal** (app PR #2224): the clean-up for the later waves
+  (the /my routes of Odoo stay), no menu that opens an external URL, the new
+  text of the IDDI and ECC PO release e-mails, and the `/web/health` probes.
+- **The Outcome 10.26, 10.27 and 10.30 rounds** (app PRs #2122 and #2195).
+
+It does not have the access door of app issue #1437 or W2 of the /my
+removal. A later grey release brings them.
+
+A kit version without a pin of this line (its block holds placeholders)
+stops every run with `--line demo-uiux` before it changes anything:
 `This scripts folder pins no release of the demo-uiux line yet`.
 
 ### Switch the grey environment to the demo-uiux line
