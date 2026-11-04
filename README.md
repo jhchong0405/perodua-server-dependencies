@@ -24,6 +24,11 @@ A system set up with v1.0.0 to v1.0.2 cannot keep its data: download this
 version on the App server and run a [reset](#stop-start-and-reset) there. The DB
 server needs no step.
 
+`deploy-app.sh` also has a second line: **demo-uiux**, the demo line with the
+sign-in hub, in its own block. A directory runs one line, the one of its first
+deployment. This kit version pins the first grey release of that line,
+`demo-uiux-grey-v0.55.0`. See [The demo-uiux line](#the-demo-uiux-line).
+
 ## What v1.2.2 changes
 
 v1.2.2 (revision `ecd96649`) has the changes of v1.2.1 (revision `0d4d1aec`)
@@ -412,11 +417,126 @@ modules are the same as in v1.0.4: no module version changed, so
 This `scripts` folder also adds `deploy-app.sh --upgrade`, and `https.sh apply`
 now marks the session cookie `Secure`. See [Sign in once](#sign-in-once-v105).
 
+## The demo-uiux line
+
+`deploy-app.sh` deploys one of two lines. Each has its own block of pins at
+the top of the script:
+
+| | client-stable-uiux (the default) | demo-uiux |
+| --- | --- | --- |
+| Block | `RELEASE=`, `REVISION=`, `ODOO_IMAGE=`, `WEB_IMAGE=`, the module lists | `DEMO_RELEASE=`, `DEMO_REVISION=`, `DEMO_ODOO_IMAGE=`, `DEMO_WEB_IMAGE=`, the `DEMO_` module lists |
+| Release in this kit version | v1.2.2 | `demo-uiux-grey-v0.55.0`, the first grey release |
+| Workspaces | 4 (the client menu profile) | all 8 of the demo line |
+| A new database (`--init-db`) | no business data | the demo seed: sample data, mock screens and personas |
+| Accounts of a new database | `whadmin`, `admin1`, `admin2` / `perodua`; the business roles also `perodua` | `whadmin`, `admin1`, `admin2` / `perodua`; each other account a new random password, in `seeded-accounts.txt` (root only) |
+| Portal accounts | refused | portal mode `off` until portal users sign in through the hub |
+| 17:00 Job Order Inbound run | off | off |
+| Mock intake pulls (PROMISE, PSS, PSOS, P-Circle) | off while in mock mode, after `--init-db` and after a module upgrade | on, as on the demo line; a module upgrade keeps the flag that each one had |
+| Outgoing email | off until `SMTP_HOST` is set | the same (`PERODUA_MAIL=off` without `SMTP_HOST`) |
+| Default `PROJECT_NAME` and `DB_NAME` | `perodua-client-uiux`, `perodua` | `perodua-demo-uiux`, `perodua_demo` |
+
+The line is chosen at the first deployment of a directory, with
+`--line demo-uiux` or `PERODUA_LINE=demo-uiux` in its `app.env`. Every later
+run, `--upgrade` too, keeps it: `app.env` and `.deployment-identity` name it.
+A directory never changes its line. To move an environment to the other line,
+deploy that line in a **new directory with a new empty database**, with
+`--replace OLD_DIR` (below). The old directory, its database and its
+attachments stay as they are.
+
+### What demo-uiux-grey-v0.55.0 has
+
+The first grey release is revision `634599e7` of the app master (4 November
+2026), as the images `perodua-odoo:demo-uiux-grey-v0.55.0` (Odoo, profile
+`demo-uiux`, no mail password) and `perodua-odoo:demo-uiux-grey-web-v0.55.0`
+(web). It has:
+
+- **The sign-in hub** in its own module, `perodua_sso_hub` (app PR #2202):
+  stgiss is the OpenID Connect provider for the module names and for WOM and
+  TMS, as on v1.2.2. The module keeps the Odoo system parameters
+  `perodua_client_stable.*` (owner answer d05) and needs no
+  `perodua_client_stable`.
+- **W1 of the /my removal** (app PR #2224): the clean-up for the later waves
+  (the /my routes of Odoo stay), no menu that opens an external URL, the new
+  text of the IDDI and ECC PO release e-mails, and the `/web/health` probes.
+- **The Outcome 10.26, 10.27 and 10.30 rounds** (app PRs #2122 and #2195).
+
+It does not have the access door of app issue #1437 or W2 of the /my
+removal. A later grey release brings them.
+
+A kit version without a pin of this line (its block holds placeholders)
+stops every run with `--line demo-uiux` before it changes anything:
+`This scripts folder pins no release of the demo-uiux line yet`.
+
+### Switch the grey environment to the demo-uiux line
+
+The grey environment keeps `/dev/`, port 8110, the four host names
+(`stgiss`, `stgissrp`, `stgisssp`, `stgisscp.perodua.com.my`), the certificate
+and the issuer `https://stgiss.perodua.com.my/dev`. The HTTPS front and its
+routes file need no change. Only the names change: the old directory, project
+and database stay as they are, so the new deployment needs a new directory, a
+new project and a new database. The defaults of the line are those new names,
+`PROJECT_NAME=perodua-demo-uiux` and `DB_NAME=perodua_demo`. Each step on grey
+needs the owner's yes. The full steps are in
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#switch-an-environment-to-the-demo-uiux-line):
+
+1. On the DB server: a new empty database, such as `perodua_demo`, with
+   `deploy-db.sh` (`DB_MODE=empty`, `DB_NAME=perodua_demo`, the same
+   `DB_USER`). The database of the client line stays.
+2. On the App server, a new directory with its `app.env`: the line, the new
+   database and project, and the settings of the page as in
+   `/opt/perodua-app/app.env` (`HTTP_PORT`, `BIND_IP`, `PUBLIC_ROOT`,
+   `ENVIRONMENT_LABEL`, `PUBLIC_BASE_URL`), such as:
+
+   ```
+   PERODUA_LINE=demo-uiux
+   DB_HOST=<the DB server>
+   DB_NAME=perodua_demo
+   PROJECT_NAME=perodua-demo-uiux
+   HTTP_PORT=8110
+   BIND_IP=127.0.0.1
+   PUBLIC_ROOT=/dev
+   ENVIRONMENT_LABEL=DEV environment
+   PUBLIC_BASE_URL=https://stgiss.perodua.com.my/dev
+   ```
+
+3. Deploy it in the place of the client line:
+
+   ```bash
+   sudo bash deploy-app.sh --dir /opt/perodua-app-demo --init-db --replace /opt/perodua-app
+   ```
+
+   The new database gets its modules and its demo seed while the client line
+   still runs. Right before the new App starts, the App of `/opt/perodua-app`
+   stops; it is not removed. If the new App then fails its checks, the run
+   stops it and starts the old one again.
+4. `/opt/perodua-app-demo/rollback.sh` is the way back: it stops the
+   demo-uiux App and starts the client-stable-uiux App again, each with its
+   own data. `sudo cat /opt/perodua-app-demo/seeded-accounts.txt` lists the
+   passwords of the seeded accounts.
+
+### Upgrade the demo-uiux line
+
+`sudo bash deploy-app.sh --upgrade --dir /opt/perodua-app-demo` from the
+`scripts` folder of a newer kit version moves the directory to the grey
+release that it pins, as for the client line. A module upgrade (`-u`) runs
+only from a module fingerprint and a release that its demo-uiux block accepts
+(`DEMO_MODULE_UPGRADE_FROM`, `DEMO_OLD_RELEASES_ACCEPTED`: lists). The first
+pinned grey release accepts none. After a module upgrade, each account that
+still has the seed password `perodua` (such as a new persona) gets a new
+random password, added to `seeded-accounts.txt`; `whadmin`, `admin1` and
+`admin2` keep their passwords. A run that stops after the database has those
+passwords keeps them in `seeded-accounts.pending` (root only); the next run
+lists them. The cron flags go back as before the upgrade, the mock intake
+pulls too. The held mail is listed with the command of
+step 13 of [Upgrade an App server to v1.2.2](#upgrade-an-app-server-to-v122),
+with the database name of this directory (`-d perodua_demo`), and released with
+`sudo bash deploy-app.sh --release-queued-mail --dir /opt/perodua-app-demo`.
+
 ## Repository layout
 
 | Path | Contents |
 | --- | --- |
-| `scripts/` | `install-dependencies.sh`, `deploy-db.sh`, `deploy-app.sh`, `service.sh`, `uninstall.sh`, the helpers they use (`uat_guard.py`, `uat_admins.py`, `reset_database.py`), `iss-api.sh` (ISS-Oracle API), `rp-adapter.sh` (RP adapter), `https.sh` (HTTPS with nginx, the certificate from an issuer or Let's Encrypt), `client-check.ps1` (the check of each host name from a Windows PC) and the configuration templates. Your `deploy.conf`, backups and filestore archive also go here. |
+| `scripts/` | `install-dependencies.sh`, `deploy-db.sh`, `deploy-app.sh`, `service.sh`, `uninstall.sh`, the helpers they use (`uat_guard.py`, `uat_admins.py`, `uat_demo.py`, `reset_database.py`), `iss-api.sh` (ISS-Oracle API), `rp-adapter.sh` (RP adapter), `https.sh` (HTTPS with nginx, the certificate from an issuer or Let's Encrypt), `client-check.ps1` (the check of each host name from a Windows PC) and the configuration templates. Your `deploy.conf`, backups and filestore archive also go here. |
 | `docs/` | [DEPLOYMENT.md](docs/DEPLOYMENT.md) (full reference), [RUNBOOK.md](docs/RUNBOOK.md) (self-check after deployment) and [WAF-REDIRECT-LOOP-2026-10-08.md](docs/WAF-REDIRECT-LOOP-2026-10-08.md) (record of a redirect loop behind a WAF) |
 | `tests/` | Automated checks, see [tests/README.md](tests/README.md) |
 

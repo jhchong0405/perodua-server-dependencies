@@ -281,6 +281,8 @@ class PreflightModuleUpgradeTests(unittest.TestCase):
                         DB_USER=PG[2] if PG else 'odoo', DB_NAME=PG[4] if PG else 'perodua',
                         INIT_MODULES=','.join(INIT), RESTORED_MODULES=','.join(RESTORED), EXCLUDED_MODULE=EXCLUDED,
                         PYTHONDONTWRITEBYTECODE='1')
+        # Without the image profile, preflight.py takes the default line, client-stable-uiux.
+        self.env.pop('PERODUA_IMAGE_PROFILE', None)
         if PG:
             import psycopg2
             self.connection = psycopg2.connect(host=PG[0], port=PG[1], user=PG[2], password=PG[3], dbname=PG[4])
@@ -942,6 +944,128 @@ class PreflightModuleUpgradeTests(unittest.TestCase):
         # What keeps a running App safe was written all the same.
         self.assertEqual(self.actives(), {1: False})
         self.assertEqual(self.sql('SELECT state FROM mail_mail'), [('exception',)])
+
+    # ── the demo-uiux line ──────────────────────────────────────────────────
+    DEMO_INIT = [m for m in INIT if m != 'perodua_client_stable'] + ['perodua_sso_hub']
+
+    def demo_line(self):
+        """The database as the kit sets one up on the demo-uiux line: the hub
+        instead of perodua_client_stable, perodua_demo_client and the demo seed
+        (with the user agent), its profile, and the environment of its
+        compose.yml."""
+        self.addons(self.image, {'perodua_sso_hub': '19.0.2.0.0'})
+        self.addons(self.old_image, {'perodua_sso_hub': '19.0.1.0.0'})
+        self.new_fp, self.from_fp = fingerprint(self.image), fingerprint(self.old_image)
+        self.env.update(PERODUA_IMAGE_PROFILE='demo-uiux', INIT_MODULES=','.join(self.DEMO_INIT),
+                        RESTORED_MODULES=','.join(self.DEMO_INIT), EXCLUDED_MODULE='perodua_client_stable')
+        self.module('perodua_client_stable', state='uninstalled')
+        self.module('perodua_sso_hub')
+        self.module(EXCLUDED)
+        for key, value in (('perodua.runtime_profile', 'demo-uiux'), ('perodua.image_modhash', self.from_fp),
+                           ('perodua_demo.seed_mode', None), ('perodua_master_sync.sample_data', None),
+                           ('perodua_demo.seeded', '1')):
+            self.param(key, value)
+        self.sql("INSERT INTO res_users (login) VALUES ('agent')")
+
+    def demo_modules(self):
+        return ','.join(sorted(self.DEMO_INIT + [EXCLUDED, 'perodua_demo', 'perodua_ui']))
+
+    def test_a_demo_database_takes_its_module_upgrade_with_its_demo_seed(self):
+        self.demo_line()
+        # FROM is a list: one of its fingerprints is the stored one.
+        output = self.run_preflight('upgrade-check', 'f' * 32 + ',' + self.from_fp).splitlines()
+        self.assertEqual(output[-2:], ['MODULES ' + self.demo_modules(), 'MODULE_UPGRADE 1'])
+        self.assertEqual(self.params()['perodua.image_modhash'], self.from_fp)
+        # A list without the stored fingerprint, or none at all, takes no module upgrade.
+        for upgrade_from in ('f' * 32, ''):
+            with self.subTest(upgrade_from=upgrade_from):
+                self.assertIn('is not the fingerprint this release upgrades modules from',
+                              self.run_preflight('upgrade-check', upgrade_from, ok=False))
+
+    def test_each_line_refuses_the_database_of_the_other(self):
+        self.env['PERODUA_IMAGE_PROFILE'] = 'demo-uiux'
+        self.assertIn('runtime profile does not match demo-uiux; restore the correct database',
+                      self.run_preflight('check', ok=False))
+        self.demo_line()
+        self.env['PERODUA_IMAGE_PROFILE'] = 'client-stable-uiux'
+        self.assertIn('runtime profile does not match client-stable-uiux; restore the correct database',
+                      self.run_preflight('check', ok=False))
+        self.env['PERODUA_IMAGE_PROFILE'] = 'demo'
+        self.assertIn('the image profile demo is not a line of this scripts folder', self.run_preflight('check', ok=False))
+
+    def test_the_demo_line_refuses_perodua_client_stable(self):
+        self.demo_line()
+        self.module('perodua_client_stable')
+        self.assertIn('perodua_client_stable was installed into this UAT database after its initialization',
+                      self.check(ok=False))
+        self.module('perodua_client_stable', state='uninstalled')
+        self.module('perodua_e2e')
+        self.assertIn('Database preflight: module upgrade refused: perodua_e2e is installed', self.check(ok=False))
+
+    def test_a_demo_module_upgrade_marks_the_stored_fingerprint_and_keeps_the_demo_seed(self):
+        self.demo_line()
+        self.assertEqual(self.run_preflight('mark-upgrading', 'f' * 32 + ',' + self.from_fp, 'demo-uiux-grey-v0.1.0',
+                                            'demo-uiux-grey-v0.2.0'), 'MARKED')
+        self.assertEqual(self.params()['perodua.image_modhash'], 'upgrading:' + self.from_fp)
+        record = self.kit()
+        self.assertEqual((record['from_fingerprint'], record['from_release'], record['to_release'], record['agent_login']),
+                         (self.from_fp, 'demo-uiux-grey-v0.1.0', 'demo-uiux-grey-v0.2.0', True))
+        self.assertEqual(','.join(record['modules']), self.demo_modules())
+        self.after_module_upgrade()
+        self.module('perodua_client_stable', state='uninstalled')
+        self.module('perodua_sso_hub', version='19.0.2.0.0')
+        # The demo seed and the user agent are part of a demo-uiux database.
+        output = self.run_preflight('verify-upgrade')
+        self.assertTrue(output.endswith('UPGRADE_VERIFIED 0 0'), output)
+        self.assertEqual(self.params()['perodua.image_modhash'], 'upgraded:' + self.new_fp)
+        self.assertEqual(self.run_preflight('stamp-upgrade'), 'READY 1')
+
+    def test_a_demo_module_upgrade_keeps_the_mock_intake_pulls_as_they_were(self):
+        # A new demo-uiux database runs its four mock intake pulls, as the demo
+        # line does, while every system resolves to mock (no mode is set). The
+        # client-stable-uiux line keeps them off (test_without_a_mode_every_system_is_mock);
+        # the demo-uiux line gives each one the flag it had before the upgrade.
+        self.demo_line()
+        pulls = ('perodua_integration.cron_consume_promise_feed', 'perodua_orders_ext.cron_pull_pss_orders',
+                 'perodua_orders_ext.cron_pull_psos_orders', 'perodua_orders_ext.cron_pull_pcircle_orders')
+        for cron_id, xmlid in enumerate(pulls, 1):
+            self.cron(cron_id, cron_id != 4, xmlid)  # P-Circle was off
+        self.cron(5, False, 'perodua_supplier_execution.cron_perodua_inbound_job_orders')
+        self.assertEqual(self.run_preflight('mark-upgrading', self.from_fp, 'demo-uiux-grey-v0.1.0',
+                                            'demo-uiux-grey-v0.2.0'), 'MARKED')
+        # What -u did: data files switched flags off and on.
+        self.sql('UPDATE ir_cron SET active = %s WHERE id IN (1, 2)', (False,))
+        self.sql('UPDATE ir_cron SET active = %s WHERE id IN (4, 5)', (True,))
+        self.after_module_upgrade()
+        self.module('perodua_client_stable', state='uninstalled')
+        self.module('perodua_sso_hub', version='19.0.2.0.0')
+        output = self.run_preflight('verify-upgrade')
+        self.assertEqual(self.actives(), {1: True, 2: True, 3: True, 4: False, 5: False})
+        self.assertIn('Cron jobs: 4 flags put back as before the upgrade.', output)
+        self.assertNotIn('stays off', output)
+        self.assertTrue(output.endswith('UPGRADE_VERIFIED 0 0'), output)
+
+    def test_the_demo_line_knows_the_workspace_codes_of_the_hub(self):
+        # perodua_sso_hub puts the four workspaces without a host of their own
+        # on the rp host (owner answer d03 A).
+        table = {'signin': 'stgiss.perodua.com.my', 'workspaces': {
+            'stgiss.perodua.com.my': [],
+            'stgissrp.perodua.com.my': ['rp', 'forecast', 'agent_portal', 'system_generation', 'reporting'],
+            'stgisssp.perodua.com.my': ['sp'], 'stgisscp.perodua.com.my': ['cp']}}
+        self.demo_line()
+        self.param('perodua_client_stable.hosts', json.dumps(table))
+        self.assertTrue(self.check().endswith('MODULE_UPGRADE 1'))
+        self.param('perodua_client_stable.hosts', json.dumps(
+            {'signin': 'stgiss.perodua.com.my', 'workspaces': {'stgissrp.perodua.com.my': ['rp', 'ops']}}))
+        self.assertIn('Database preflight: module upgrade refused: perodua_client_stable.hosts names the workspace codes ops;'
+                      ' this release knows only rp, sp, cp, forecast, agent_portal, system_generation, reporting',
+                      self.check(ok=False))
+        # The client-stable-uiux release knows only rp, sp and cp.
+        self.setUp()
+        self.param('perodua_client_stable.hosts', json.dumps(table))
+        self.assertIn('Database preflight: module upgrade refused: perodua_client_stable.hosts names the workspace codes'
+                      ' agent_portal, forecast, reporting, system_generation; this release knows only rp, sp, cp',
+                      self.check(ok=False))
 
     # ── the retired data ────────────────────────────────────────────────────
     def test_retired_export(self):

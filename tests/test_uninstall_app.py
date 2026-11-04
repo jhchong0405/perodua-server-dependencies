@@ -497,6 +497,26 @@ class UninstallAppTests(unittest.TestCase):
         self.assertNotIn("fake-app-password", result.stdout + result.stderr)
         self.assertEqual(self.changes(), [])
 
+    def test_the_plan_names_the_seeded_passwords_and_the_way_back_it_deletes(self):
+        # Files of a demo-uiux deployment that took the place of another one.
+        result = self.run_script("--confirm", "another-project")
+        self.assertNotIn("seeded-accounts.txt", result.stdout)
+        self.assertNotIn("rollback.sh", result.stdout)
+        self.assertNotIn("seeded-accounts.pending", result.stdout)
+        (self.app / "seeded-accounts.txt").write_text("demo1\tfake-seeded-password\tuser\n")
+        (self.app / "seeded-accounts.pending").write_text("SEEDED_ACCOUNT\tdemo2\tfake-pending-password\tuser\n")
+        (self.app / "rollback.sh").write_text("#!/usr/bin/env bash\n")
+        result = self.run_script("--confirm", "another-project")
+        self.assertIn("and with it seeded-accounts.txt, the only list of the passwords of the seeded accounts",
+                      result.stdout)
+        self.assertIn("and with it seeded-accounts.pending, the new passwords of seeded accounts that a stopped"
+                      " deploy-app.sh run did not list yet", result.stdout)
+        self.assertIn("and with it rollback.sh, the way back to the deployment that this one took the place of",
+                      result.stdout)
+        self.assertNotIn("fake-seeded-password", result.stdout + result.stderr)
+        self.assertNotIn("fake-pending-password", result.stdout + result.stderr)
+        self.assertEqual(self.changes(), [])
+
     def test_a_wrong_confirmation_changes_nothing(self):
         result = self.run_script("--confirm", "another-project")
         self.assertNotEqual(result.returncode, 0)

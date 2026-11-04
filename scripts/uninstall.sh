@@ -224,6 +224,14 @@ uninstall_app() {
     # deploy-app.sh --upgrade keeps its backups there unless --backup-dir names another place.
     [[ ! -d $DEPLOY_DIR/backups ]] \
         || printf '  - and with it the backups that deploy-app.sh --upgrade saved in %s/backups: copy them elsewhere first to keep them\n' "$DEPLOY_DIR"
+    # The demo-uiux line: the only copy of the passwords of the seeded accounts,
+    # and the way back of a deploy-app.sh --replace.
+    [[ ! -f $DEPLOY_DIR/seeded-accounts.txt ]] \
+        || printf '  - and with it seeded-accounts.txt, the only list of the passwords of the seeded accounts of the demo seed\n'
+    [[ ! -f $DEPLOY_DIR/seeded-accounts.pending ]] \
+        || printf '  - and with it seeded-accounts.pending, the new passwords of seeded accounts that a stopped deploy-app.sh run did not list yet\n'
+    [[ ! -f $DEPLOY_DIR/rollback.sh ]] \
+        || printf '  - and with it rollback.sh, the way back to the deployment that this one took the place of (deploy-app.sh --replace); that deployment stays as it is\n'
     if ((PURGE)); then
         printf '  - delete the attachments volume %s\n' "$volume"
         for image in "${images[@]}"; do printf '  - delete the image %s\n' "${image%@*}"; done
