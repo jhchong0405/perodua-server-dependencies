@@ -351,7 +351,9 @@ only `from`. It checks:
   without them (0600, named in `restore.txt`) and keeps them in the new
   `app.env`; one without them keeps the mail off. A directory of an unknown
   grey release, or a database with another fingerprint, is refused before
-  the App stops, and nothing changes;
+  the App stops, and nothing changes. A run that stops at the question (no
+  `--confirm`) shows the lock line, the guard and the plan, and changes
+  nothing (grey step 3 of the README);
 - as root on Linux: the `service.sh` of v1.2.1
   (`fixtures/service-v1.2.1.sh`, pinned by its sha256) refuses `start`
   and `restart` on a marked database, before and after the switch, without

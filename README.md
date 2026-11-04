@@ -642,6 +642,8 @@ fingerprint, is refused before the App stops.
   12,800. When the count is more than the room, `--upgrade` stops before the
   App stops and prints the steps that give the DB server the room (as in
   "Before you start" of [Upgrade an App server to v1.2.2](#upgrade-an-app-server-to-v122)).
+  These steps restart PostgreSQL. Step 3 below shows the count before the
+  time when nobody works, so that you can plan them.
 - **The way back** is `restore.txt` in the backup folder, all of its steps,
   as after the module upgrade of the client line. Its step 5 runs
   `deploy-app.sh` from a `scripts` folder of the old release: keep it. With
@@ -657,19 +659,31 @@ On grey (v0.55.1, with `IMAGE_MAIL=on` and `MAIL_REDIRECT_TO=off`), in a
    `DEMO_REVISION=eefe5d72492b0cbfd81564b1dd6fd72faed394ee`.
 2. `sudo bash deploy-app.sh --check-config --dir /opt/perodua-app-demo` shows
    `Configuration valid for demo-uiux-grey-v0.56.1. Nothing was changed.`
-3. `sudo bash deploy-app.sh --upgrade --dir /opt/perodua-app-demo`. The first
+3. Before the time when nobody works, count the locks. Run the command of
+   step 4. It changes nothing, and the App keeps running. It pulls the
+   images, then shows
+   `Locks for the way back: ... With a margin of 1000 it can need M. The DB server has room for R: ...`.
+   At the question, press Enter without the name. It then shows
+   `Nothing was changed: /opt/perodua-app-demo still runs demo-uiux-grey-v0.55.1.`
+   - When R is M or more, the DB server needs no step.
+   - When the run stops with
+     `Database preflight: module upgrade refused: the way back can fail`, it
+     prints 5 steps. They stop the App, set `max_locks_per_transaction` on the
+     DB server (192.168.23.12) and restart PostgreSQL. Get the owner's yes,
+     and do them at the start of the time when nobody works, before step 4.
+4. `sudo bash deploy-app.sh --upgrade --dir /opt/perodua-app-demo`. The first
    part changes nothing, and the App keeps running. It shows
    `Database perodua_demo has the modules of demo-uiux-grey-v0.55.1 (fingerprint f439f02d565f7782f8f3d9461ca3cb70). demo-uiux-grey-v0.56.1 has other modules: this upgrade runs a module upgrade (-u) of 34 modules. N attachments.`,
    the lock line, `Retired data: none.`, the guard
    (`UAT guard: accepted: ... none is perodua_client_stable and none relies on it`)
    and the plan, then asks `Type perodua_demo to start the module upgrade:`.
-4. Type `perodua_demo`. From here the App is down until the end. It ends with
+5. Type `perodua_demo`. From here the App is down until the end. It ends with
    `Deployment verified: demo-uiux-grey-v0.56.1 (eefe5d72492b0cbfd81564b1dd6fd72faed394ee)`,
    the backup folder (`/opt/perodua-app-demo/backups/TIME-demo-uiux-grey-v0.55.1`),
    the line `Held mail: N ..., M ...` and
    `Outgoing email: the mail settings inside the Odoo image (IMAGE_MAIL=on), every email to its real recipients.`
-5. Review the held mail with the owner, then release it (above).
-6. `sudo cat /opt/perodua-app-demo/seeded-accounts.txt`: the lines after
+6. Review the held mail with the owner, then release it (above).
+7. `sudo cat /opt/perodua-app-demo/seeded-accounts.txt`: the lines after
    `# TIME, module upgrade to demo-uiux-grey-v0.56.1:` name the accounts that
    got a new password. When there is no such line, no account changed.
 

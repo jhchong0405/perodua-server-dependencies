@@ -847,6 +847,24 @@ class DemoModuleUpgradeTests(ModuleUpgradeFixture, unittest.TestCase):
         self.assert_demo_refused_before_the_stop(
             result, GREY, f'It upgrades modules (-u) only from the modules of {names} (fingerprint {DEMO_FROM[0]})')
 
+    def test_a_run_that_stops_at_the_question_shows_the_locks_and_changes_nothing(self):
+        # Grey step 3 of README.md: before the time when nobody works, a run
+        # that stops at the confirmation shows the lock line and the guard,
+        # and changes nothing.
+        result = self.run_script()  # --non-interactive, no --confirm
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn('Locks for the way back: restore.txt step 3 restores database perodua in one transaction', result.stdout)
+        self.assertIn('UAT guard: accepted: fixture', result.stdout)
+        self.assertIn('Point of no return', result.stdout)
+        self.assertIn('A module upgrade needs a confirmation: run on a terminal, or pass --confirm perodua', result.stdout)
+        self.assertIn(f'Nothing was changed: {self.deploy_dir} still runs {GREY}.', result.stdout)
+        self.assertEqual(self.names(), ['pull', 'pull', 'staged preflight upgrade-check', 'staged uat_guard guard',
+                                        'staged uat_guard demo-flag'])
+        self.assertEqual((self.deploy_dir / '.deployment-identity').read_text(), self.identity)
+        self.assertEqual((self.deploy_dir / 'app.env').read_text(), self.app_env)
+        self.assertEqual(self.backups(), [])
+        self.assertEqual(self.db_state(), 'from')
+
 
 @unittest.skipUnless(hasattr(os, 'geteuid') and os.geteuid() == 0 and Path('/proc/self/fd').is_dir(),
                      'service.sh needs root on Linux (the test image)')

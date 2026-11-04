@@ -2250,7 +2250,10 @@ folder of a newer kit version works as on the client line (the backup,
   room for 12800. A grey database with more data or modules can need more.
   Then `upgrade-check` refuses before the App stops, and `deploy-app.sh`
   prints the steps that give the DB server the room
-  ([The lock table of the way back](#the-lock-table-of-the-way-back)).
+  ([The lock table of the way back](#the-lock-table-of-the-way-back)). They
+  restart PostgreSQL. Step 3 of the grey steps in README.md counts the locks
+  before the time when nobody works: a run that stops at the question
+  changes nothing.
 - **The way back** is `restore.txt`, all of its steps. Step 5 runs
   `deploy-app.sh` from a `scripts` folder of the old release (kit `fec880e`
   or `7af6a40` for v0.55.1, `f7f7486` for v0.55.0). It copies back the
