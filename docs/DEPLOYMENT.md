@@ -1941,13 +1941,13 @@ with `sed`: `RELEASE=` and `REVISION=` for a directory of the client line,
 
 | Setting | demo-uiux |
 | --- | --- |
-| `DEMO_RELEASE`, `DEMO_REVISION` | the numbered grey release `demo-uiux-grey-vX.Y.Z` and its commit of perodua-odoo. In this kit version: `demo-uiux-grey-v0.55.0`, revision `634599e70b38471b6ecb9bf331177fc5be31e822` (the app master after PR #2224). |
-| `DEMO_ODOO_IMAGE` | `perodua-deploy.novutal.com/perodua-odoo:demo-uiux-grey-vX.Y.Z@sha256:...`: the Odoo image of profile `demo-uiux`, built without the mail password of the demo images. In this kit version: `demo-uiux-grey-v0.55.0@sha256:ef83c1f11dcad817ffefda3b9a6477a49d1b3a0354c83128a94af6813bfb9235` (an index with `linux/amd64`, the digest that CI published to GHCR). |
-| `DEMO_WEB_IMAGE` | `perodua-deploy.novutal.com/perodua-odoo:demo-uiux-grey-web-vX.Y.Z@sha256:...`: the web image built from `docker/uiux/Dockerfile.client-stable-uiux` (the page under `PUBLIC_ROOT`, the closed paths, the frame headers). In this kit version: `demo-uiux-grey-web-v0.55.0@sha256:14d068e06196493402d0a7c1001f8d56d010bd366f1d82a7d2a5c0c6bacac4d4`. |
+| `DEMO_RELEASE`, `DEMO_REVISION` | the numbered grey release `demo-uiux-grey-vX.Y.Z` and its commit of perodua-odoo. In this kit version: `demo-uiux-grey-v0.55.1`, revision `634599e70b38471b6ecb9bf331177fc5be31e822` (the app master after PR #2224), the revision of v0.55.0 too. |
+| `DEMO_ODOO_IMAGE` | `perodua-deploy.novutal.com/perodua-odoo:demo-uiux-grey-vX.Y.Z@sha256:...`: the Odoo image of profile `demo-uiux`. v0.55.0 was built without the mail settings of the demo images; from v0.55.1 it is the demo-uiux image, with the owner's test Gmail settings and app password ([Mail from the image](#mail-from-the-image-image_mail)). In this kit version: `demo-uiux-grey-v0.55.1@sha256:bbbc994a6091d775a41a42d18f5f5fed6ce57776c77d30607b09b33c513004df` (an index with `linux/amd64`, the digest that CI published to GHCR as `demo-uiux-sha-634599e70b38`). |
+| `DEMO_WEB_IMAGE` | `perodua-deploy.novutal.com/perodua-odoo:demo-uiux-grey-web-vX.Y.Z@sha256:...`: the web image built from `docker/uiux/Dockerfile.client-stable-uiux` (the page under `PUBLIC_ROOT`, the closed paths, the frame headers). In this kit version: `demo-uiux-grey-web-v0.55.1@sha256:14d068e06196493402d0a7c1001f8d56d010bd366f1d82a7d2a5c0c6bacac4d4`, the web image of v0.55.0. |
 | `DEMO_INIT_MODULES` | the init list of the `demo-uiux` profile of `docker/entrypoint.sh` (`perodua_demo_ui`, `perodua_portal`, `perodua_portal_workspaces`, `perodua_agent_portal`, `perodua_demo_client`, `perodua_gateway`, `perodua_forecast_workbook`, `perodua_demo_profile`, `perodua_supplier_execution`, `perodua_uiux_api`, `perodua_sso_hub`; the entrypoint of the pinned revision has `perodua_sso_hub` in the list too) |
 | `DEMO_EXCLUDED_MODULE` | `perodua_client_stable`: the client menu profile, which the entrypoint of the image refuses on this profile |
 | `DEMO_RESTORED_MODULES` | the same as `DEMO_INIT_MODULES` |
-| `DEMO_MODULE_UPGRADE_FROM`, `DEMO_OLD_RELEASES_ACCEPTED` | empty: the first grey release takes no module upgrade |
+| `DEMO_MODULE_UPGRADE_FROM`, `DEMO_OLD_RELEASES_ACCEPTED` | the fingerprints and the names of the earlier grey releases. In this kit version: `f439f02d565f7782f8f3d9461ca3cb70` and `demo-uiux-grey-v0.55.0`. That fingerprint is also the one of v0.55.1 (the same Odoo modules), so `--upgrade` from v0.55.0 runs no `-u`. |
 
 The database rules of each line are in `preflight.py` (`LINE_RULES`), chosen
 by the image profile that `compose.yml` sets:
@@ -1975,7 +1975,7 @@ image without a digest), as in the kit versions before the first pin, stops
 every run of that line before Docker, `--check-config` too: `This scripts
 folder pins no release of the demo-uiux line yet`. `service.sh reset` of a
 demo-uiux directory stops in the same way. This kit version pins
-`demo-uiux-grey-v0.55.0` (README.md, "What demo-uiux-grey-v0.55.0 has").
+`demo-uiux-grey-v0.55.1` (README.md, "What demo-uiux-grey-v0.55.1 has").
 
 ### What --init-db does on the demo-uiux line
 
@@ -2041,10 +2041,68 @@ stopped in between, as on the client line.
   demo line. A module upgrade gives each one the flag that it had before the
   upgrade.
 
-**Outgoing email.** The grey Odoo image has no mail password. Without
-`SMTP_HOST`, `compose.yml` sets `PERODUA_MAIL: "off"`, so a mail setting that
-the image itself may carry is never used. With `SMTP_HOST`, the mail settings
-of `app.env` apply as on the client line ([Outgoing email](#outgoing-email-v122-or-later)).
+**Outgoing email.** Without `SMTP_HOST` and without `IMAGE_MAIL=on`,
+`compose.yml` sets `PERODUA_MAIL: "off"`, so a mail setting that the image
+itself carries is never used. With `SMTP_HOST`, the mail settings of
+`app.env` apply as on the client line ([Outgoing email](#outgoing-email-v122-or-later)).
+With `IMAGE_MAIL=on`, the mail settings of the image apply (below).
+
+### Mail from the image (IMAGE_MAIL)
+
+**Owner decision, 4 November 2026** ("it just a test email, so don't mind
+just pack inside the image"): from `demo-uiux-grey-v0.55.1`, the grey Odoo
+image carries the owner's test Gmail settings and the app password of that
+Gmail account, in `/etc/perodua/mail/demo-uiux.env` and
+`/etc/perodua/mail/demo-uiux.password` (`root:odoo`, 0640 and 0440). The file
+names `smtp.gmail.com`, port 587, `starttls`, the Gmail address as the user
+and the sender, the sender name `Perodua SPD (test)` and that address as
+`PERODUA_MAIL_REDIRECT_TO`. Anyone who can pull the image, or has root on the
+grey App server, can read the password. To stop it, revoke the app password
+in that Google account: the mail of the image then fails to sign in. The
+Odoo image of v0.55.0 has no such file.
+
+`IMAGE_MAIL=on` in the `app.env` of a demo-uiux directory uses these
+settings. `deploy-app.sh` then writes, in `compose.yml`:
+
+```yaml
+      PERODUA_MAIL: "on"
+      PERODUA_MAIL_REDIRECT_TO: "<MAIL_REDIRECT_TO of app.env>"
+```
+
+and no `PERODUA_SMTP_*` value and no `smtp_password` secret. The entrypoint
+of the image (`configure_mail` of `docker/entrypoint.sh`) reads the mail file
+of the image when `PERODUA_SMTP_HOST` is empty, and a value of the
+environment takes the place of the value of the file: so
+`PERODUA_MAIL_REDIRECT_TO` of `app.env` wins over the test address of the
+file. `PERODUA_MAIL: "on"` makes the container stop with `PERODUA_MAIL=on
+needs PERODUA_SMTP_HOST or a mail file in the image` when the image has no
+mail file, so a wrong pin does not quietly send nothing.
+
+| Setting | Rule |
+| --- | --- |
+| `IMAGE_MAIL` | `on` or empty. Empty: the mail of earlier kit versions, unchanged. |
+| `MAIL_REDIRECT_TO` | required with `IMAGE_MAIL=on`: one test address that gets every email (with `[TEST for <recipient>]` before its subject), or `off`: **every email goes to its real recipients** (users, suppliers and customers) |
+| `SMTP_HOST` and the other `SMTP_` settings | refused with `IMAGE_MAIL=on`: one source of the mail settings |
+| The line | refused on the client-stable-uiux line: its image carries no mail settings |
+| `--mail` | refused with `IMAGE_MAIL=on`: remove `IMAGE_MAIL` first to use other SMTP settings |
+
+`--check-config` checks these rules before Docker. `sudo bash deploy-app.sh
+--send-test-mail ADDRESS --dir DIR` sends one test email through the image's
+`perodua-mail-test`, with the same redirect. The status line of each run says
+`Outgoing email: the mail settings inside the Odoo image (IMAGE_MAIL=on),
+every email to its real recipients` (or `to the test address ...`). At its
+first start with mail on, Odoo holds the mail that waited in the queue
+("Held: outgoing email settings changed"): review it in Settings > Technical >
+Emails, then Retry or Cancel it.
+
+On grey, for the real recipients, add these two lines to
+`/opt/perodua-app-demo/app.env` (0600), then run `deploy-app.sh --upgrade`
+(from v0.55.0) or `deploy-app.sh --dir /opt/perodua-app-demo`:
+
+```
+IMAGE_MAIL=on
+MAIL_REDIRECT_TO=off
+```
 
 ### Switch an environment to the demo-uiux line
 
@@ -2117,7 +2175,11 @@ not start. A stopped App stays stopped after a reboot.
 folder of a newer kit version works as on the client line (the backup,
 `restore.txt`, the held mail), with the rules of the demo-uiux line:
 
-- A release with the same Odoo modules needs no module upgrade.
+- A release with the same Odoo modules needs no module upgrade. v0.55.0 to
+  v0.55.1 is such an upgrade: `preflight.py upgrade-check` finds the
+  fingerprint of the image in the database and answers `READY` ("the same
+  Odoo modules"), so `deploy-app.sh` runs no `-u` and does not read
+  `DEMO_OLD_RELEASES_ACCEPTED`.
 - A module upgrade (`-u`) starts only from a fingerprint in
   `DEMO_MODULE_UPGRADE_FROM` and in a directory of a release in
   `DEMO_OLD_RELEASES_ACCEPTED`. Both lists grow with each pin, so the
@@ -2143,8 +2205,9 @@ folder of a newer kit version works as on the client line (the backup,
 Each pin of a grey release (a change of this kit, after the owner's yes):
 
 1. The numbered grey release of perodua-odoo: the Odoo image
-   `perodua-odoo:demo-uiux-grey-vX.Y.Z` (profile `demo-uiux`, no mail
-   password) and the web image `perodua-odoo:demo-uiux-grey-web-vX.Y.Z`, both
+   `perodua-odoo:demo-uiux-grey-vX.Y.Z` (profile `demo-uiux`; from v0.55.1
+   with the test mail of the image, owner decision of 4 November 2026) and
+   the web image `perodua-odoo:demo-uiux-grey-web-vX.Y.Z`, both
    of one revision, copied registry to registry to
    `perodua-deploy.novutal.com`.
 2. `DEMO_RELEASE`, `DEMO_REVISION`, `DEMO_ODOO_IMAGE` and `DEMO_WEB_IMAGE`
@@ -2155,7 +2218,9 @@ Each pin of a grey release (a change of this kit, after the owner's yes):
    `uat_guard.py` mounted as `compose.yml` does it). Review each finding of
    `references_in_install_set`, and write its entry with the sha256 of the
    reviewed file and the reason; remove each placeholder that the image does
-   not confirm. A placeholder (no sha256) never accepts a finding.
+   not confirm. A placeholder (no sha256) never accepts a finding. An entry
+   of an earlier pin stays valid for a file with the same bytes: the guard of
+   v0.55.1 accepts the 16 entries of v0.55.0 as they are.
 4. `preflight.py`, `LINE_RULES['demo-uiux']['host_codes']`: the keys of
    `WORKSPACE_CODES` in `perodua_sso_hub/controllers/hosts.py` of the release.
    This kit version lists the seven of option A phase 1; check that the
