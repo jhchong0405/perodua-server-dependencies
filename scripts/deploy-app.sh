@@ -60,21 +60,24 @@ OLD_RELEASES_ACCEPTED=client-stable-uiux-v1.2.1
 # database gets its demo seed (sample data, mock screens and the personas).
 # Its release is a numbered grey release, copied registry to registry to the
 # private registry as the client images are: the Odoo image
-# perodua-odoo:demo-uiux-grey-vX.Y.Z (profile demo-uiux, built without the
-# mail password of the demo images) and the web image
+# perodua-odoo:demo-uiux-grey-vX.Y.Z (profile demo-uiux; v0.55.0 without the
+# mail settings of the demo images, from v0.55.1 the demo image with them) and
+# the web image
 # perodua-odoo:demo-uiux-grey-web-vX.Y.Z (built from the web Dockerfile of the
 # client line: the page under PUBLIC_ROOT, the closed paths, the frame
 # headers). It has PUBLIC_ROOT, the hand-over and the mail code of the client
 # line from its first release.
-# The first grey release, demo-uiux-grey-v0.55.0: built by CI from
-# DEMO_REVISION (the app master after #2224) and published to GHCR, then
+# The grey release demo-uiux-grey-v0.55.1: the same DEMO_REVISION (the app
+# master after #2224) as v0.55.0, built by CI and published to GHCR, then
 # copied to the private registry, registry to registry, with no new build: the
-# digests are the ones CI built. Its Odoo image has no /etc/perodua (no mail
-# settings, no mail password).
-DEMO_RELEASE=demo-uiux-grey-v0.55.0
+# digests are the ones CI built. Its Odoo image is the demo-uiux image of that
+# revision, with the test Gmail settings and app password of the owner in
+# /etc/perodua/mail (owner decision 2026-11-04): IMAGE_MAIL=on in app.env
+# sends with them. The web image is the one of v0.55.0.
+DEMO_RELEASE=demo-uiux-grey-v0.55.1
 DEMO_REVISION=634599e70b38471b6ecb9bf331177fc5be31e822
-DEMO_ODOO_IMAGE=perodua-deploy.novutal.com/perodua-odoo:demo-uiux-grey-v0.55.0@sha256:ef83c1f11dcad817ffefda3b9a6477a49d1b3a0354c83128a94af6813bfb9235
-DEMO_WEB_IMAGE=perodua-deploy.novutal.com/perodua-odoo:demo-uiux-grey-web-v0.55.0@sha256:14d068e06196493402d0a7c1001f8d56d010bd366f1d82a7d2a5c0c6bacac4d4
+DEMO_ODOO_IMAGE=perodua-deploy.novutal.com/perodua-odoo:demo-uiux-grey-v0.55.1@sha256:bbbc994a6091d775a41a42d18f5f5fed6ce57776c77d30607b09b33c513004df
+DEMO_WEB_IMAGE=perodua-deploy.novutal.com/perodua-odoo:demo-uiux-grey-web-v0.55.1@sha256:14d068e06196493402d0a7c1001f8d56d010bd366f1d82a7d2a5c0c6bacac4d4
 # --init-db: the modules the entrypoint of the image installs on a new database
 # of the demo-uiux profile (docker/entrypoint.sh, DEFAULT_INIT_MODULES), and
 # perodua_sso_hub, with the demo seed of their install hooks. uat_guard.py
@@ -85,10 +88,11 @@ DEMO_EXCLUDED_MODULE=perodua_client_stable
 DEMO_RESTORED_MODULES=perodua_demo_ui,perodua_portal,perodua_portal_workspaces,perodua_agent_portal,perodua_demo_client,perodua_gateway,perodua_forecast_workbook,perodua_demo_profile,perodua_supplier_execution,perodua_uiux_api,perodua_sso_hub
 # --upgrade from an earlier grey release: a module upgrade (-u) starts only
 # from one of these module fingerprints (comma-separated), and only in a
-# directory of one of these releases. Empty until a second grey release is
-# pinned: the first one takes no module upgrade.
-DEMO_MODULE_UPGRADE_FROM=
-DEMO_OLD_RELEASES_ACCEPTED=
+# directory of one of these releases. The fingerprint of v0.55.0 is also the
+# one of v0.55.1 (the same Odoo modules), so --upgrade from v0.55.0 keeps the
+# modules and runs no -u.
+DEMO_MODULE_UPGRADE_FROM=f439f02d565f7782f8f3d9461ca3cb70
+DEMO_OLD_RELEASES_ACCEPTED=demo-uiux-grey-v0.55.0
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 DEPLOY_DIR=/opt/perodua-app
 CONFIG='' NON_INTERACTIVE=0 INIT_DB=0 CHECK_ONLY=0 TEMP_DIR='' AUTH_DIR='' STARTED=0
@@ -126,6 +130,9 @@ PUBLIC_ROOT='' ENVIRONMENT_LABEL='' PUBLIC_BASE_URL=''
 # it is staged as a secret, as the database password does.
 SMTP_HOST='' SMTP_PORT='' SMTP_ENCRYPTION='' SMTP_USER='' SMTP_PASSWORD_FILE='' SMTP_FROM='' SMTP_FROM_NAME='' MAIL_REDIRECT_TO=''
 MAIL_KEYS=(SMTP_HOST SMTP_PORT SMTP_ENCRYPTION SMTP_USER SMTP_PASSWORD_FILE SMTP_FROM SMTP_FROM_NAME MAIL_REDIRECT_TO)
+# IMAGE_MAIL=on (the demo-uiux line only): the other source of the mail
+# settings, those inside the pinned Odoo image, each email to MAIL_REDIRECT_TO.
+IMAGE_MAIL=''
 MAIL=0 TEST_MAIL='' smtp_password=''
 # The settings the configuration file gives a value, and whether that file is an
 # app.env written by hand in the deployment directory before its first run.
@@ -185,6 +192,9 @@ SMTP_PORT, SMTP_ENCRYPTION (starttls, ssl or none), SMTP_USER,
 SMTP_PASSWORD_FILE (an absolute path; there is no password option), SMTP_FROM,
 SMTP_FROM_NAME and MAIL_REDIRECT_TO (one test address that gets every email,
 or off). A first run on a terminal asks whether to configure it.
+IMAGE_MAIL=on (the demo-uiux line only, in place of the SMTP_ settings) sends
+with the mail settings inside the pinned Odoo image, each email to
+MAIL_REDIRECT_TO (required: one test address, or off for the real recipients).
 --mail asks the outgoing email questions again, with the saved answers as
 defaults, then deploys as usual. It needs a terminal.
 --send-test-mail ADDRESS sends one test email through the running deployment.
@@ -197,7 +207,7 @@ mock screens and personas) and each seeded account a new random password,
 listed only in --dir/seeded-accounts.txt (root only; a run that stops before
 it lists them keeps them in --dir/seeded-accounts.pending, root only, and a
 rerun lists them); the portal mode is off and the 17:00 Job Order Inbound run
-stays off. Without SMTP_HOST, mail is off.
+stays off. Without SMTP_HOST or IMAGE_MAIL=on, mail is off.
 --replace DIR: this deployment takes the place of the one in DIR, which has
 another project and another database, such as the client-stable-uiux line on
 the same port. Right before this App starts, the App of DIR stops; nothing of
@@ -452,7 +462,7 @@ if [[ -n $CONFIG ]]; then
         [[ $line =~ ^([A-Z_]+)=(.*)$ ]] || fail 'Configuration must contain literal KEY=VALUE lines'
         key=${BASH_REMATCH[1]} value=${BASH_REMATCH[2]}
         case $key in
-            DB_HOST|DB_PORT|DB_NAME|DB_USER|DB_PASSWORD_FILE|PROJECT_NAME|HTTP_PORT|BIND_IP|STARTUP_TIMEOUT|INIT_TIMEOUT|PUBLIC_ROOT|ENVIRONMENT_LABEL|PUBLIC_BASE_URL|SMTP_HOST|SMTP_PORT|SMTP_ENCRYPTION|SMTP_USER|SMTP_PASSWORD_FILE|SMTP_FROM|SMTP_FROM_NAME|MAIL_REDIRECT_TO|PERODUA_LINE)
+            DB_HOST|DB_PORT|DB_NAME|DB_USER|DB_PASSWORD_FILE|PROJECT_NAME|HTTP_PORT|BIND_IP|STARTUP_TIMEOUT|INIT_TIMEOUT|PUBLIC_ROOT|ENVIRONMENT_LABEL|PUBLIC_BASE_URL|SMTP_HOST|SMTP_PORT|SMTP_ENCRYPTION|SMTP_USER|SMTP_PASSWORD_FILE|SMTP_FROM|SMTP_FROM_NAME|MAIL_REDIRECT_TO|IMAGE_MAIL|PERODUA_LINE)
                 printf -v "$key" '%s' "$value"
                 [[ -z $value ]] || SET[$key]=1 ;;
             *) fail "Unknown configuration key: $key" ;;
@@ -504,6 +514,15 @@ if ((MAIL_SUPPORTED == 0)); then
     for key in "${MAIL_KEYS[@]}"; do
         [[ -z ${!key} ]] || fail "$key is set, but outgoing email $MAIL_NEEDS, or remove the SMTP_ settings and MAIL_REDIRECT_TO from $CONFIG"
     done
+fi
+# IMAGE_MAIL=on: the mail settings that the pinned Odoo image of the demo-uiux
+# line carries (/etc/perodua/mail). A client-stable-uiux image carries none.
+if [[ -n $IMAGE_MAIL ]]; then
+    [[ $IMAGE_MAIL == on ]] || fail 'IMAGE_MAIL must be on or empty: on sends with the mail settings inside the pinned Odoo image'
+    [[ $LINE == demo-uiux ]] \
+        || fail "IMAGE_MAIL=on applies only to the demo-uiux line, whose Odoo image carries the mail settings. On the $LINE line, outgoing email uses the SMTP_ settings: remove IMAGE_MAIL from $CONFIG"
+    ((MAIL == 0)) \
+        || fail "--mail asks the SMTP questions, and $CONFIG has IMAGE_MAIL=on, the mail settings inside the Odoo image. To use other SMTP settings, remove IMAGE_MAIL from $CONFIG first"
 fi
 # --check-config never asks: there must be settings to check.
 ((CHECK_ONLY == 0)) || [[ -n $CONFIG ]] || fail "--check-config needs --config or $DEPLOY_DIR/app.env"
@@ -572,10 +591,14 @@ ask_mail_value() {  # $1 setting, $2 question, $3 what no value means when it ma
     printf -v "$name" '%s' "$answer"
 }
 mail_summary() {  # the outgoing email settings in one line, without the password
-    printf '%s:%s %s, ' "$SMTP_HOST" "$SMTP_PORT" "$SMTP_ENCRYPTION"
-    if [[ -n $SMTP_USER ]]; then printf 'sign-in as %s, ' "$SMTP_USER"; else printf 'no sign-in, '; fi
-    printf 'from %s' "$SMTP_FROM"
-    [[ -z $SMTP_FROM_NAME ]] || printf ' as "%s"' "$SMTP_FROM_NAME"
+    if [[ -n $IMAGE_MAIL ]]; then
+        printf 'the mail settings inside the Odoo image (IMAGE_MAIL=on)'
+    else
+        printf '%s:%s %s, ' "$SMTP_HOST" "$SMTP_PORT" "$SMTP_ENCRYPTION"
+        if [[ -n $SMTP_USER ]]; then printf 'sign-in as %s, ' "$SMTP_USER"; else printf 'no sign-in, '; fi
+        printf 'from %s' "$SMTP_FROM"
+        [[ -z $SMTP_FROM_NAME ]] || printf ' as "%s"' "$SMTP_FROM_NAME"
+    fi
     if [[ $MAIL_REDIRECT_TO == off ]]; then
         printf ', every email to its real recipients'
     else
@@ -844,8 +867,18 @@ fi
 # Outgoing email: Odoo sends through SMTP_HOST, each email to MAIL_REDIRECT_TO
 # unless it is off. Without SMTP_HOST there is no outgoing email, and the other
 # mail settings have no meaning. The encryption and the port get their
-# defaults here, so app.env and compose.yml name them.
-if [[ -z $SMTP_HOST ]]; then
+# defaults here, so app.env and compose.yml name them. IMAGE_MAIL=on takes
+# the settings of the image instead: then only MAIL_REDIRECT_TO applies.
+if [[ -n $IMAGE_MAIL ]]; then
+    for key in "${MAIL_KEYS[@]}"; do
+        [[ $key == MAIL_REDIRECT_TO || -z ${!key} ]] \
+            || fail "IMAGE_MAIL=on and $key name two sources of the mail settings: IMAGE_MAIL=on uses the settings inside the Odoo image. Remove $key, or remove IMAGE_MAIL to use the SMTP_ settings"
+    done
+    [[ -n $MAIL_REDIRECT_TO ]] \
+        || fail 'MAIL_REDIRECT_TO is required with IMAGE_MAIL=on: one test address that gets every email, or off to send each email to its real recipients'
+    problem=$(mail_problem MAIL_REDIRECT_TO "$MAIL_REDIRECT_TO")
+    [[ -z $problem ]] || fail "$problem"
+elif [[ -z $SMTP_HOST ]]; then
     for key in "${MAIL_KEYS[@]}"; do
         [[ -z ${!key} ]] || fail "$key applies only with SMTP_HOST, the SMTP server. Set SMTP_HOST, or remove $key for no outgoing email"
     done
@@ -1010,12 +1043,17 @@ if [[ -n $TEST_MAIL ]]; then
     # perodua-mail-test sends it with Odoo, so MAIL_REDIRECT_TO applies to it
     # as to every other email.
     ! unverified || fail "The first deployment in $DEPLOY_DIR stopped before it used its database. Finish it with deploy-app.sh first"
-    [[ -n $SMTP_HOST ]] \
+    [[ -n $SMTP_HOST || -n $IMAGE_MAIL ]] \
         || fail "Outgoing email is off in $DEPLOY_DIR (no SMTP_HOST in $CONFIG). Configure it first: sudo bash deploy-app.sh --mail --dir $DEPLOY_DIR"
     printf 'Sending one test email to %s: %s...\n' "$TEST_MAIL" "$(mail_summary)"
+    if [[ -n $IMAGE_MAIL ]]; then
+        settings_hint='The mail settings are those inside the Odoo image: check that the image has them (the [entrypoint] mail line above), that their sign-in is still valid, and that this server reaches their SMTP server'
+    else
+        settings_hint='Check the SMTP settings with sudo bash deploy-app.sh --mail, and that this server reaches the SMTP server'
+    fi
     docker compose --project-name "$PROJECT_NAME" --file "$DEPLOY_DIR/compose.yml" \
         run --rm --no-deps -T odoo perodua-mail-test "$TEST_MAIL" </dev/null \
-        || fail 'The test email was not sent, for the reason above. Check the SMTP settings with sudo bash deploy-app.sh --mail, and that this server reaches the SMTP server'
+        || fail "The test email was not sent, for the reason above. $settings_hint"
     if [[ $MAIL_REDIRECT_TO == off ]]; then
         printf 'Test email sent to %s. Check that it arrives.\n' "$TEST_MAIL"
     else
@@ -1924,9 +1962,10 @@ with connect(db) as cn:
             print(restore_locks_line(restore_locks(cur)))
         print('READY ' + str(attachments))
 PY
-# Outgoing email, only when SMTP_HOST is set: without it, compose.yml stays as
-# earlier runs wrote it. The values go inside "..." as they are, which is safe
-# only because the checks above refuse " \ and $ in each of them.
+# Outgoing email, only when SMTP_HOST or IMAGE_MAIL=on is set: without them,
+# compose.yml stays as earlier runs wrote it. The values go inside "..." as
+# they are, which is safe only because the checks above refuse " \ and $ in
+# each of them.
 mail_environment='' mail_secret='' odoo_secrets=db_password
 if [[ -n $SMTP_HOST ]]; then
     mail_environment+=$'\n'"      PERODUA_SMTP_HOST: \"$SMTP_HOST\""
@@ -1941,17 +1980,25 @@ if [[ -n $SMTP_HOST ]]; then
     mail_environment+=$'\n'"      PERODUA_SMTP_FROM: \"$SMTP_FROM\""
     [[ -z $SMTP_FROM_NAME ]] || mail_environment+=$'\n'"      PERODUA_SMTP_FROM_NAME: \"$SMTP_FROM_NAME\""
     mail_environment+=$'\n'"      PERODUA_MAIL_REDIRECT_TO: \"$MAIL_REDIRECT_TO\""
+elif [[ -n $IMAGE_MAIL ]]; then
+    # The settings and the password of the image (its mail file), with the
+    # redirect of app.env: a value of the environment wins over the file
+    # (configure_mail of docker/entrypoint.sh). PERODUA_MAIL=on makes the
+    # container stop when the image has no mail file, not send nothing.
+    mail_environment+=$'\n'"      PERODUA_MAIL: \"on\""
+    mail_environment+=$'\n'"      PERODUA_MAIL_REDIRECT_TO: \"$MAIL_REDIRECT_TO\""
 fi
 # The demo-uiux line: its personas (the persona seed of perodua_demo runs only
-# with this switch), mail off unless SMTP_HOST is set (whatever mail settings
-# the image itself may carry), and the helper of its UAT setup. No
+# with this switch), mail off unless SMTP_HOST or IMAGE_MAIL=on is set
+# (whatever mail settings the image itself may carry), and the helper of its
+# UAT setup. No
 # PERODUA_DEMO_SEED: the image profile gives the sample data and the mock
 # screens, as on the demo line. The client-stable-uiux line gets none of
 # these lines, so its compose.yml stays as earlier kit versions write it.
 line_environment='' line_volumes=''
 if [[ $LINE == demo-uiux ]]; then
     line_environment+=$'\n'"      PERODUA_DEMO_PERSONAS: \"1\""
-    [[ -n $SMTP_HOST ]] || line_environment+=$'\n'"      PERODUA_MAIL: \"off\""
+    [[ -n $SMTP_HOST || -n $IMAGE_MAIL ]] || line_environment+=$'\n'"      PERODUA_MAIL: \"off\""
     line_volumes=$'\n'"      - ./uat_demo.py:/opt/deploy/uat_demo.py:ro"
 fi
 cat > "$TEMP_DIR/compose.yml" <<YAML
@@ -2493,7 +2540,7 @@ mv -f -- "$TEMP_DIR/identity" "$DEPLOY_DIR/.deployment-identity"
         [[ -z ${!key} ]] || printf '%s=%s\n' "$key" "${!key}"
     done
     # The same for the mail settings: the scripts of v1.2.1 and earlier refuse them.
-    for key in SMTP_HOST SMTP_PORT SMTP_ENCRYPTION SMTP_USER SMTP_FROM SMTP_FROM_NAME MAIL_REDIRECT_TO; do
+    for key in IMAGE_MAIL SMTP_HOST SMTP_PORT SMTP_ENCRYPTION SMTP_USER SMTP_FROM SMTP_FROM_NAME MAIL_REDIRECT_TO; do
         [[ -z ${!key} ]] || printf '%s=%s\n' "$key" "${!key}"
     done
     [[ -z $SMTP_USER ]] || printf 'SMTP_PASSWORD_FILE=%s/secrets/smtp_password\n' "$DEPLOY_DIR"
@@ -2964,7 +3011,7 @@ else
 fi
 [[ -z $PUBLIC_BASE_URL ]] || printf 'Public URL (through the front proxy or F5): %s/app/\n' "$PUBLIC_BASE_URL"
 printf 'Compose: %s/compose.yml\nFilestore volume: %s_filestore\n' "$DEPLOY_DIR" "$PROJECT_NAME"
-if [[ -n $SMTP_HOST ]]; then
+if [[ -n $SMTP_HOST || -n $IMAGE_MAIL ]]; then
     printf 'Outgoing email: %s.\n' "$(mail_summary)"
     printf 'When these settings change, Odoo holds the mail that waited in the queue: review it in Settings > Technical > Emails (status Delivery Failed), then Retry or Cancel it.\n'
     printf 'Send a test email with: sudo bash deploy-app.sh --send-test-mail ADDRESS --dir %q\n' "$DEPLOY_DIR"

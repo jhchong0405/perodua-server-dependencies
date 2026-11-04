@@ -26,8 +26,8 @@ server needs no step.
 
 `deploy-app.sh` also has a second line: **demo-uiux**, the demo line with the
 sign-in hub, in its own block. A directory runs one line, the one of its first
-deployment. This kit version pins the first grey release of that line,
-`demo-uiux-grey-v0.55.0`. See [The demo-uiux line](#the-demo-uiux-line).
+deployment. This kit version pins the grey release `demo-uiux-grey-v0.55.1`
+of that line. See [The demo-uiux line](#the-demo-uiux-line).
 
 ## What v1.2.2 changes
 
@@ -425,14 +425,14 @@ the top of the script:
 | | client-stable-uiux (the default) | demo-uiux |
 | --- | --- | --- |
 | Block | `RELEASE=`, `REVISION=`, `ODOO_IMAGE=`, `WEB_IMAGE=`, the module lists | `DEMO_RELEASE=`, `DEMO_REVISION=`, `DEMO_ODOO_IMAGE=`, `DEMO_WEB_IMAGE=`, the `DEMO_` module lists |
-| Release in this kit version | v1.2.2 | `demo-uiux-grey-v0.55.0`, the first grey release |
+| Release in this kit version | v1.2.2 | `demo-uiux-grey-v0.55.1` (`--upgrade` from `demo-uiux-grey-v0.55.0`) |
 | Workspaces | 4 (the client menu profile) | all 8 of the demo line |
 | A new database (`--init-db`) | no business data | the demo seed: sample data, mock screens and personas |
 | Accounts of a new database | `whadmin`, `admin1`, `admin2` / `perodua`; the business roles also `perodua` | `whadmin`, `admin1`, `admin2` / `perodua`; each other account a new random password, in `seeded-accounts.txt` (root only) |
 | Portal accounts | refused | portal mode `off` until portal users sign in through the hub |
 | 17:00 Job Order Inbound run | off | off |
 | Mock intake pulls (PROMISE, PSS, PSOS, P-Circle) | off while in mock mode, after `--init-db` and after a module upgrade | on, as on the demo line; a module upgrade keeps the flag that each one had |
-| Outgoing email | off until `SMTP_HOST` is set | the same (`PERODUA_MAIL=off` without `SMTP_HOST`) |
+| Outgoing email | off until `SMTP_HOST` is set | the same (`PERODUA_MAIL=off` without `SMTP_HOST`), or `IMAGE_MAIL=on`: the test Gmail settings inside the Odoo image (below) |
 | Default `PROJECT_NAME` and `DB_NAME` | `perodua-client-uiux`, `perodua` | `perodua-demo-uiux`, `perodua_demo` |
 
 The line is chosen at the first deployment of a directory, with
@@ -443,12 +443,14 @@ deploy that line in a **new directory with a new empty database**, with
 `--replace OLD_DIR` (below). The old directory, its database and its
 attachments stay as they are.
 
-### What demo-uiux-grey-v0.55.0 has
+### What demo-uiux-grey-v0.55.1 has
 
-The first grey release is revision `634599e7` of the app master (4 November
-2026), as the images `perodua-odoo:demo-uiux-grey-v0.55.0` (Odoo, profile
-`demo-uiux`, no mail password) and `perodua-odoo:demo-uiux-grey-web-v0.55.0`
-(web). It has:
+The grey releases v0.55.0 and v0.55.1 are both revision `634599e7` of the app
+master (4 November 2026), with the same Odoo modules and the same web image
+(`perodua-odoo:demo-uiux-grey-web-v0.55.x`). The Odoo image of v0.55.0 has no
+mail settings. The Odoo image of v0.55.1 (`perodua-odoo:demo-uiux-grey-v0.55.1`)
+is the demo-uiux image of that revision, with the test mail settings of the
+owner (below). Both have:
 
 - **The sign-in hub** in its own module, `perodua_sso_hub` (app PR #2202):
   stgiss is the OpenID Connect provider for the module names and for WOM and
@@ -462,6 +464,42 @@ The first grey release is revision `634599e7` of the app master (4 November
 
 It does not have the access door of app issue #1437 or W2 of the /my
 removal. A later grey release brings them.
+
+### Mail from the image (IMAGE_MAIL)
+
+**Owner decision, 4 November 2026:** from `demo-uiux-grey-v0.55.1`, the grey
+Odoo image carries the owner's test Gmail settings and the app password of
+that Gmail account (`/etc/perodua/mail/demo-uiux.env` and
+`demo-uiux.password`). It is only a test account. Anyone who can pull the
+image, or has root on the grey App server, can read the password. To stop it,
+revoke the app password in that Google account; the mail of the image then
+fails to sign in, and nothing else changes.
+
+The `app.env` of the demo-uiux directory chooses the mail:
+
+| `app.env` | Outgoing email |
+| --- | --- |
+| no `IMAGE_MAIL`, no `SMTP_HOST` | off (`PERODUA_MAIL=off`), as before |
+| `IMAGE_MAIL=on`, `MAIL_REDIRECT_TO=you@example.com` | the settings of the image, every email to that one test address |
+| `IMAGE_MAIL=on`, `MAIL_REDIRECT_TO=off` | the settings of the image, **every email to its real recipients** |
+| `SMTP_HOST` and the other `SMTP_` settings | the settings of `app.env`, as on the client line |
+
+- `IMAGE_MAIL=on` needs `MAIL_REDIRECT_TO`. It refuses the `SMTP_` settings
+  (one mail source), `--mail`, and the client-stable-uiux line.
+- The value of `MAIL_REDIRECT_TO` in `app.env` takes the place of the test
+  address that the image file names.
+- `--check-config` checks these settings. `sudo bash deploy-app.sh
+  --send-test-mail ADDRESS --dir /opt/perodua-app-demo` sends one test email
+  with them.
+- At its first start with mail on, Odoo holds the mail that waited in the
+  queue: review it in Settings > Technical > Emails, then Retry or Cancel it.
+
+The grey `app.env` for the real recipients has these two lines:
+
+```
+IMAGE_MAIL=on
+MAIL_REDIRECT_TO=off
+```
 
 A kit version without a pin of this line (its block holds placeholders)
 stops every run with `--line demo-uiux` before it changes anything:
@@ -520,9 +558,14 @@ needs the owner's yes. The full steps are in
 `scripts` folder of a newer kit version moves the directory to the grey
 release that it pins, as for the client line. A module upgrade (`-u`) runs
 only from a module fingerprint and a release that its demo-uiux block accepts
-(`DEMO_MODULE_UPGRADE_FROM`, `DEMO_OLD_RELEASES_ACCEPTED`: lists). The first
-pinned grey release accepts none. After a module upgrade, each account that
-still has the seed password `perodua` (such as a new persona) gets a new
+(`DEMO_MODULE_UPGRADE_FROM`, `DEMO_OLD_RELEASES_ACCEPTED`: lists). This kit
+version accepts `demo-uiux-grey-v0.55.0`, whose Odoo modules are those of
+v0.55.1: that `--upgrade` keeps the modules and runs no `-u`. To send mail
+with the settings of the image after it, add `IMAGE_MAIL=on` and
+`MAIL_REDIRECT_TO` to `/opt/perodua-app-demo/app.env` before the `--upgrade`
+([Mail from the image](#mail-from-the-image-image_mail)). After a module
+upgrade, each account that still has the seed password `perodua` (such as a
+new persona) gets a new
 random password, added to `seeded-accounts.txt`; `whadmin`, `admin1` and
 `admin2` keep their passwords. A run that stops after the database has those
 passwords keeps them in `seeded-accounts.pending` (root only); the next run

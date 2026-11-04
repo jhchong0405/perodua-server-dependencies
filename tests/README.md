@@ -221,6 +221,9 @@ directory's own, or the staged one of the new release) and the release that
 - after the upgrade, `.deployment-identity` differs from the old one only in
   `release=` and `revision=`, `app.env` and the password are unchanged, and
   `compose.yml` names the new image and the same attachments volume;
+- a demo-uiux directory of the earlier grey release (`DEMO_OLD_RELEASES_ACCEPTED`)
+  with `IMAGE_MAIL=on` moves to the pinned grey release with the same Odoo
+  modules and no `-u`, and its new `compose.yml` has the mail of the image;
 - the backup folder (`backups/TIME-OLD_RELEASE`, 0700, or under `--backup-dir`)
   holds the dump, the archive, the old identity and `app.env`, and
   `restore.txt`, which is printed as well and names each restore command: step
@@ -1001,14 +1004,23 @@ compose file, `app.env` and identity get no line settings.
 - `test_deploy_app_uat.py` copies the scripts folder with test pins in the demo
   block (`DEMO_PINS`). It checks that the shipped block pins a grey release
   (the release name, a 40-digit revision, two image digests with the tags of
-  the release) that `--check-config` accepts without Docker; that the
-  placeholders of the kit versions before the first pin (`PLACEHOLDER_PINS`)
+  the release) that `--check-config` accepts without Docker, and the
+  fingerprints and names of the earlier grey releases that it upgrades from;
+  that the placeholders of the kit versions before the first pin (`PLACEHOLDER_PINS`)
   stop every run before Docker (`--check-config` too); that `--line` and
   `PERODUA_LINE` must agree and name a known line; that a directory keeps the
   line of its first deployment, both ways; the demo init list (the entrypoint
   list and `perodua_sso_hub`); the guard call with `--line demo-uiux`; the
   compose settings (`PERODUA_IMAGE_PROFILE`, `PERODUA_DEMO_PERSONAS`,
-  `PERODUA_MAIL: "off"` without `SMTP_HOST`, `uat_demo.py` mounted); that
+  `PERODUA_MAIL: "off"` without `SMTP_HOST` or `IMAGE_MAIL=on`, `uat_demo.py`
+  mounted); `IMAGE_MAIL=on` (`PERODUA_MAIL: "on"` and
+  `PERODUA_MAIL_REDIRECT_TO` from `app.env`, no `PERODUA_SMTP_*` and no SMTP
+  secret, `IMAGE_MAIL=on` in `app.env`, the status line, `--check-config`),
+  its refusals before Docker (no `MAIL_REDIRECT_TO`, a bad address, a value
+  other than `on`, an `SMTP_` setting, the client-stable-uiux line, `--mail`
+  on a terminal) and `--send-test-mail` with it, to a test address and to
+  the real recipient; an `app.env` without `IMAGE_MAIL` keeps the earlier
+  compose file and status line; that
   `uat_demo.py` runs in `odoo shell` in two steps (the plan, then the apply
   step with the plan on file descriptor 3), without a Docker log; that
   `seeded-accounts.txt` gets mode 0600 and one row per account, and that no

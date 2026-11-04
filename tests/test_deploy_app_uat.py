@@ -12,7 +12,9 @@ import http.server
 import json
 import os
 from pathlib import Path
+import pty
 import re
+import select
 import shutil
 import subprocess
 import tempfile
@@ -146,6 +148,8 @@ if args and args[0] == 'compose':
             code = int(os.environ.get('FAKE_ADMINS_EXIT', '0'))
             reply('UAT admins: ready: whadmin, admin1, admin2' if code == 0 else 'boom', code)
         if cmd[:2] == ['python3', '-c']: reply()
+        if cmd[:1] == ['perodua-mail-test']:
+            reply('fake perodua-mail-test: one test email to ' + cmd[-1], int(os.environ.get('FAKE_MAIL_TEST_EXIT', '0')))
 print('Fake Docker rejected unexpected command: ' + ' '.join(args), file=sys.stderr)
 sys.exit(93)
 '''
@@ -666,6 +670,18 @@ class UatOrchestrationTests(unittest.TestCase):
         self.assertIn(f'Configuration valid for {pins["DEMO_RELEASE"]}. Nothing was changed.', result.stdout)
         self.assertEqual(self.calls(), [])
 
+    def test_the_real_demo_block_upgrades_from_the_earlier_grey_releases(self):
+        text = SCRIPT.read_text(encoding='utf-8')
+        release = re.search(r'^DEMO_RELEASE=(\S+)$', text, re.M).group(1)
+        sources = re.search(r'^DEMO_MODULE_UPGRADE_FROM=(\S*)$', text, re.M).group(1).split(',')
+        accepted = re.search(r'^DEMO_OLD_RELEASES_ACCEPTED=(\S*)$', text, re.M).group(1).split(',')
+        # From the second pin on: the fingerprints and the names of the earlier grey releases.
+        for fingerprint in sources:
+            self.assertRegex(fingerprint, r'^[0-9a-f]{32}$')
+        for name in accepted:
+            self.assertRegex(name, r'^demo-uiux-grey-v\d+\.\d+\.\d+$')
+            self.assertNotEqual(name, release)
+
     def test_the_demo_line_stops_while_its_block_holds_placeholders(self):
         self.script = demo_release_copy(Path(self.temp.name) / 'placeholders', PLACEHOLDER_PINS)
         self.configure(PERODUA_LINE='demo-uiux')
@@ -874,6 +890,9 @@ class UatOrchestrationTests(unittest.TestCase):
         # The personas, mail off (the image may carry settings of its own), and
         # no PERODUA_DEMO_SEED: the image profile gives the sample data.
         self.assertEqual((odoo['PERODUA_DEMO_PERSONAS'], odoo['PERODUA_MAIL']), ('1', 'off'))
+        self.assertNotIn('PERODUA_MAIL_REDIRECT_TO', odoo)
+        self.assertNotIn('IMAGE_MAIL', (self.deploy_dir / 'app.env').read_text())
+        self.assertIn('Outgoing email: off. Configure it with: sudo bash deploy-app.sh --mail', result.stdout)
         self.assertNotIn('PERODUA_DEMO_SEED', odoo)
         self.assertIn(f'    image: {DEMO_PINS["DEMO_ODOO_IMAGE"]}\n', compose)
         self.assertIn(f'    image: {DEMO_PINS["DEMO_WEB_IMAGE"]}\n', compose)
@@ -887,6 +906,123 @@ class UatOrchestrationTests(unittest.TestCase):
         odoo = service_environment((self.deploy_dir / 'compose.yml').read_text(), 'odoo')
         self.assertNotIn('PERODUA_MAIL', odoo)
         self.assertEqual(odoo['PERODUA_SMTP_HOST'], '10.10.0.25')
+        self.assertNotIn('IMAGE_MAIL', (self.deploy_dir / 'app.env').read_text())
+
+    # ── IMAGE_MAIL=on: the mail settings inside the Odoo image ──────────────
+    def test_image_mail_uses_the_mail_settings_of_the_image(self):
+        for redirect, text in (('inbox@example.com', 'every email to the test address inbox@example.com'),
+                               ('off', 'every email to its real recipients')):
+            with self.subTest(redirect=redirect):
+                self.demo(IMAGE_MAIL='on', MAIL_REDIRECT_TO=redirect)
+                result = self.run_script('READY 0')
+                self.assertEqual(result.returncode, 0, result.stdout)
+                compose = (self.deploy_dir / 'compose.yml').read_text()
+                odoo = service_environment(compose, 'odoo')
+                # No PERODUA_MAIL off: the image's settings and password, with the redirect of app.env.
+                self.assertEqual((odoo['PERODUA_MAIL'], odoo['PERODUA_MAIL_REDIRECT_TO']), ('on', redirect))
+                self.assertNotIn('PERODUA_MAIL: "off"', compose)
+                self.assertEqual([key for key in odoo if key.startswith('PERODUA_SMTP_')], [])
+                self.assertNotIn('smtp_password', compose)
+                app_env = (self.deploy_dir / 'app.env').read_text().splitlines()
+                self.assertIn('IMAGE_MAIL=on', app_env)
+                self.assertIn('MAIL_REDIRECT_TO=' + redirect, app_env)
+                self.assertFalse([line for line in app_env if line.startswith('SMTP_')], app_env)
+                self.assertIn(f'Outgoing email: the mail settings inside the Odoo image (IMAGE_MAIL=on), {text}.\n',
+                              result.stdout)
+                # --check-config accepts the settings, and runs no Docker.
+                self.log.unlink(missing_ok=True)
+                result = self.run_script('READY 0', '--check-config')
+                self.assertEqual(result.returncode, 0, result.stdout)
+                self.assertEqual(self.calls(), [])
+
+    def test_image_mail_refusals_before_docker(self):
+        two_sources = 'name two sources of the mail settings: IMAGE_MAIL=on uses the settings inside the Odoo image'
+        cases = (
+            ({'IMAGE_MAIL': 'on'}, 'MAIL_REDIRECT_TO is required with IMAGE_MAIL=on'),
+            ({'IMAGE_MAIL': 'on', 'MAIL_REDIRECT_TO': 'inbox'}, 'MAIL_REDIRECT_TO must be one email address'),
+            ({'IMAGE_MAIL': 'yes', 'MAIL_REDIRECT_TO': 'off'}, 'IMAGE_MAIL must be on or empty'),
+            ({'IMAGE_MAIL': 'on', 'MAIL_REDIRECT_TO': 'off', 'SMTP_HOST': 'smtp.example.com',
+              'SMTP_FROM': 'no-reply@example.com'}, 'IMAGE_MAIL=on and SMTP_HOST ' + two_sources),
+            ({'IMAGE_MAIL': 'on', 'MAIL_REDIRECT_TO': 'off', 'SMTP_FROM': 'no-reply@example.com'},
+             'IMAGE_MAIL=on and SMTP_FROM ' + two_sources),
+        )
+        for updates, message in cases:
+            for extra in ((), ('--check-config',)):
+                with self.subTest(updates=updates, extra=extra):
+                    self.demo(**updates)
+                    result = self.run_script('EMPTY', *extra)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(message, result.stdout)
+                    self.assertEqual(self.calls(), [])
+                    self.assertFalse(self.deploy_dir.exists())
+        # The client-stable-uiux line: its image carries no mail settings.
+        self.script = SCRIPT
+        self.configure(IMAGE_MAIL='on', MAIL_REDIRECT_TO='off')
+        for extra in ((), ('--check-config',)):
+            with self.subTest(line='client-stable-uiux', extra=extra):
+                result = self.run_script('EMPTY', *extra)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('IMAGE_MAIL=on applies only to the demo-uiux line', result.stdout)
+                self.assertEqual(self.calls(), [])
+
+    def test_the_mail_option_is_refused_with_image_mail(self):
+        # --mail asks the SMTP questions: on a terminal, it stops before the first one.
+        self.demo(IMAGE_MAIL='on', MAIL_REDIRECT_TO='off')
+        pid, master = pty.fork()
+        if pid == 0:
+            os.execvpe('bash', ['bash', str(self.script), '--config', str(self.config), '--dir', str(self.deploy_dir),
+                                '--mail'], self.env)
+        output = b''
+        while True:
+            ready, _, _ = select.select([master], [], [], 20)
+            if not ready:
+                os.kill(pid, 9)
+                break
+            try:
+                chunk = os.read(master, 65536)
+            except OSError:
+                break
+            if not chunk:
+                break
+            output += chunk
+        _, status = os.waitpid(pid, 0)
+        os.close(master)
+        text = output.decode(errors='replace')
+        self.assertNotEqual(os.waitstatus_to_exitcode(status), 0, text)
+        self.assertIn('--mail asks the SMTP questions, and', text)
+        self.assertIn('has IMAGE_MAIL=on, the mail settings inside the Odoo image', text)
+        self.assertNotIn('SMTP server, host name or IP address', text)
+        self.assertEqual(self.calls(), [])
+
+    def test_send_test_mail_with_image_mail(self):
+        self.demo(IMAGE_MAIL='on', MAIL_REDIRECT_TO='inbox@example.com')
+        self.assertEqual(self.run_script('READY 0').returncode, 0)
+
+        def send(address='you@example.com'):
+            self.log.unlink(missing_ok=True)
+            return subprocess.run(['bash', str(self.script), '--dir', str(self.deploy_dir), '--send-test-mail', address],
+                                  env=self.env, text=True, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                  stderr=subprocess.STDOUT, timeout=60)
+        result = send()
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn('Sending one test email to you@example.com: the mail settings inside the Odoo image '
+                      '(IMAGE_MAIL=on), every email to the test address inbox@example.com...', result.stdout)
+        self.assertEqual(self.run_commands(), [['perodua-mail-test', 'you@example.com']])
+        self.assertIn('fake perodua-mail-test: one test email to you@example.com', result.stdout)
+        self.assertIn('MAIL_REDIRECT_TO sends it to the test address inbox@example.com, with [TEST for you@example.com]',
+                      result.stdout)
+        self.env['FAKE_MAIL_TEST_EXIT'] = '1'
+        result = send()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('The test email was not sent, for the reason above. The mail settings are those inside the Odoo'
+                      ' image', result.stdout)
+        del self.env['FAKE_MAIL_TEST_EXIT']
+        # To the real recipients.
+        self.demo(IMAGE_MAIL='on', MAIL_REDIRECT_TO='off')
+        self.assertEqual(self.run_script('READY 0').returncode, 0)
+        result = send()
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn('Test email sent to you@example.com. Check that it arrives.', result.stdout)
 
     def test_the_demo_line_has_new_names_and_the_addresses_of_app_env(self):
         # The switch keeps the old directory, project and database, so the
@@ -925,6 +1061,7 @@ class UatOrchestrationTests(unittest.TestCase):
         self.assertIn('      PERODUA_IMAGE_PROFILE: client-stable-uiux\n', compose)
         self.assertNotIn('line=', (self.deploy_dir / '.deployment-identity').read_text())
         self.assertNotIn('PERODUA_LINE', (self.deploy_dir / 'app.env').read_text())
+        self.assertNotIn('IMAGE_MAIL', (self.deploy_dir / 'app.env').read_text())
         for name in ('uat_demo.py', 'seeded-accounts.txt', 'rollback.sh'):
             self.assertFalse((self.deploy_dir / name).exists(), name)
 

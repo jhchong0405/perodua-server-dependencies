@@ -74,6 +74,9 @@ SHA256 = re.compile(r'[0-9a-f]{64}')
 _DEMO_PIN = ('the pinned demo-uiux-grey-v0.55.0 image '
              '(sha256:ef83c1f11dcad817ffefda3b9a6477a49d1b3a0354c83128a94af6813bfb9235) of revision '
              '634599e70b38471b6ecb9bf331177fc5be31e822')
+_DEMO_SAME_BYTES = ('The image of demo-uiux-grey-v0.55.1 '
+                    '(sha256:bbbc994a6091d775a41a42d18f5f5fed6ce57776c77d30607b09b33c513004df), the '
+                    'demo-uiux image of the same revision, has the same bytes of this file.')
 
 
 def _review(file, sha256, constants, reason):
@@ -82,7 +85,7 @@ def _review(file, sha256, constants, reason):
     reviewed file has the same code objects as its source at the pinned
     revision, compiled by the Python of the image."""
     reason += (f' Reviewed against {_DEMO_PIN}, whose {file} is the compiled '
-               f'custom_addons/{file[:-1]} of that revision.')
+               f'custom_addons/{file[:-1]} of that revision. {_DEMO_SAME_BYTES}')
     return tuple({'file': file, 'finding': f'constant {constant!r}', 'sha256': sha256, 'reason': reason}
                  for constant in constants)
 
@@ -165,7 +168,8 @@ REVIEWED_REFERENCES = {
                 'files differ only in the source time in the .pyc header.'),
         },
     ),
-    # The 16 findings of the guard of the demo-uiux-grey-v0.55.0 image
+    # The 16 findings of the guard of the demo-uiux-grey-v0.55.0 image, and the
+    # same 16 in the same bytes in the v0.55.1 image
     # (--line demo-uiux, DEMO_INIT_MODULES and DEMO_RESTORED_MODULES), in 11
     # files of perodua_demo, perodua_demo_profile and perodua_sso_hub. Each
     # file was read at the pinned revision; perodua_sso_hub keeps the names of
