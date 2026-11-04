@@ -71,21 +71,30 @@ DEFAULT_LINE = 'client-stable-uiux'
 SHA256 = re.compile(r'[0-9a-f]{64}')
 
 
-_DEMO_PIN = ('the pinned demo-uiux-grey-v0.55.0 image '
-             '(sha256:ef83c1f11dcad817ffefda3b9a6477a49d1b3a0354c83128a94af6813bfb9235) of revision '
-             '634599e70b38471b6ecb9bf331177fc5be31e822')
-_DEMO_SAME_BYTES = ('The image of demo-uiux-grey-v0.55.1 '
-                    '(sha256:bbbc994a6091d775a41a42d18f5f5fed6ce57776c77d30607b09b33c513004df), the '
-                    'demo-uiux image of the same revision, has the same bytes of this file.')
+_DEMO_PIN = ('the pinned demo-uiux-grey-v0.56.1 image '
+             '(sha256:74286eb8321a965dbcdd0541ae5961135645be6e38da1a0a7acdce3c2544ae73) of revision '
+             'eefe5d72492b0cbfd81564b1dd6fd72faed394ee')
+_DEMO_EARLIER = ('the images of demo-uiux-grey-v0.55.0 '
+                 '(sha256:ef83c1f11dcad817ffefda3b9a6477a49d1b3a0354c83128a94af6813bfb9235) and v0.55.1 '
+                 '(sha256:bbbc994a6091d775a41a42d18f5f5fed6ce57776c77d30607b09b33c513004df) of revision '
+                 '634599e70b38471b6ecb9bf331177fc5be31e822')
 
 
-def _review(file, sha256, constants, reason):
+def _review(file, sha256, constants, reason, earlier, change=None):
     """The review of one file of the pinned demo-uiux image: an entry for each
     of its findings, all pinned to the sha256 of the reviewed bytes. The
     reviewed file has the same code objects as its source at the pinned
-    revision, compiled by the Python of the image."""
+    revision, compiled by the Python of the image. ``earlier`` is the sha256
+    of the file that the first pin reviewed (v0.55.0, the same bytes in
+    v0.55.1), and ``change`` what its source changed since (None: nothing)."""
     reason += (f' Reviewed against {_DEMO_PIN}, whose {file} is the compiled '
-               f'custom_addons/{file[:-1]} of that revision. {_DEMO_SAME_BYTES}')
+               f'custom_addons/{file[:-1]} of that revision. ')
+    if change is None:
+        reason += (f'The file of {_DEMO_EARLIER} (sha256 {earlier}) has the same code objects: only the source '
+                   'time in the header of the .pyc differs.')
+    else:
+        reason += (f'The source changed since the file of {_DEMO_EARLIER} (sha256 {earlier}): {change} '
+                   'The use of each reviewed constant is as before.')
     return tuple({'file': file, 'finding': f'constant {constant!r}', 'sha256': sha256, 'reason': reason}
                  for constant in constants)
 
@@ -100,10 +109,11 @@ _MENU_SNAPSHOT = (
     'version, and a missing or empty key gives no snapshot: the script returns without a write. Odoo 19 '
     'runs a migration script only for a module that it upgrades (odoo/modules/migration.py, migrate_module: '
     'load_state "to upgrade"), never in the -i of a new database, and only when the installed version is '
-    'lower than the version of the script. The image has perodua_demo_profile 19.0.1.237.0, so neither '
-    '--init-db nor a module upgrade from this release runs this script, and the first grey release takes '
-    'no module upgrade (DEMO_MODULE_UPGRADE_FROM is empty). A demo-uiux database has no such key. A '
-    'migration of an earlier version, not reliance.')
+    'lower than the version of the script. The image has perodua_demo_profile 19.0.1.240.0. --init-db runs '
+    'no migration script, and the module upgrade from v0.55.0 or v0.55.1 (perodua_demo_profile '
+    '19.0.1.237.0, DEMO_MODULE_UPGRADE_FROM) runs only its scripts above 19.0.1.237.0, and the image has '
+    'none (the last one is 19.0.1.196.0): so neither runs this script. A demo-uiux database has no such key. '
+    'A migration of an earlier version, not reliance.')
 # References that were read and found NOT to be reliance, per line, each pinned
 # to the exact bytes of the file it was reviewed in. A changed file voids its
 # entry, so a different image can never inherit an old judgement: it is
@@ -168,15 +178,15 @@ REVIEWED_REFERENCES = {
                 'files differ only in the source time in the .pyc header.'),
         },
     ),
-    # The 16 findings of the guard of the demo-uiux-grey-v0.55.0 image, and the
-    # same 16 in the same bytes in the v0.55.1 image
+    # The 16 findings of the guard of the demo-uiux-grey-v0.56.1 image
     # (--line demo-uiux, DEMO_INIT_MODULES and DEMO_RESTORED_MODULES), in 11
-    # files of perodua_demo, perodua_demo_profile and perodua_sso_hub. Each
-    # file was read at the pinned revision; perodua_sso_hub keeps the names of
-    # perodua_client_stable for its parameters and its signatures.
+    # files of perodua_demo, perodua_demo_profile and perodua_sso_hub: the 16
+    # of v0.55.0 and v0.55.1, in other bytes. Each file was read at the pinned
+    # revision; perodua_sso_hub keeps the names of perodua_client_stable for
+    # its parameters and its signatures.
     'demo-uiux': (
         *_review(
-            'perodua_demo/gallery.pyc', 'a46f478959bc7b30948ead7010b8f2cf5fa27901e9d905d4f4e504d375b8b535',
+            'perodua_demo/gallery.pyc', '6a53291c1916ece242132ed2c226dce9089e184022017a994b0401817862756a',
             ('perodua_client_stable',),
             'EXPORT_MOCK_BLOCKING_MODULE, a module name as a search value, not an import, an XML ID or a '
             'path: mock_data_refusal() counts the ir.module.module rows of that name in a state other than '
@@ -187,34 +197,44 @@ REVIEWED_REFERENCES = {
             'perodua_demo.seed_mode not "none" and PERODUA_IMAGE_PROFILE=demo-uiux (NO_SAMPLE_PROFILES of '
             'perodua_master_sync holds only client-stable-uiux) the function returns False: the demo seed '
             'loads its mock data, as the line needs. The module is absent in the normal case. Optional '
-            'detection, not reliance.'),
+            'detection, not reliance.',
+            'a46f478959bc7b30948ead7010b8f2cf5fa27901e9d905d4f4e504d375b8b535'),
         *(review
-          for version, sha256, change in (
-              ('19.0.1.100.0', 'a9f21831d2c25141574a3eb51b5dcb3e31bf2cd78d86b44dbe3e5c1645f740a1',
+          for version, sha256, earlier, change in (
+              ('19.0.1.100.0', '9181ec9e17a4843546e813a0323e0efe71daab8067c1d1b8ca1e299a6edd2993',
+               'a9f21831d2c25141574a3eb51b5dcb3e31bf2cd78d86b44dbe3e5c1645f740a1',
                'Outcome 10.22 Setup > Material (#1721): Part Material, Storage Zone and Car Model'),
-              ('19.0.1.102.0', '200abc91b84d2bcfbd6ab3980d9a840325736edc817e3a57ee4868dd166185fa',
+              ('19.0.1.102.0', '0700bf7a08518779dfc375ae171857ad4fac1fea1fa724fe933766a3f9720ac2',
+               '200abc91b84d2bcfbd6ab3980d9a840325736edc817e3a57ee4868dd166185fa',
                'Outcome 10.22 Setup > Material (#1721): Box Size'),
-              ('19.0.1.103.0', '30b6ae9e2872c13e432ef362debfef0898ba7eddc93e019c0ab58379f405e728',
+              ('19.0.1.103.0', '53168e099c94107a307056610a76f1b66c00233a183b7f28e2f02d318b09b11f',
+               '30b6ae9e2872c13e432ef362debfef0898ba7eddc93e019c0ab58379f405e728',
                'Test Outcome 10.22 R28 (#1738): Public Holiday'),
-              ('19.0.1.128.0', 'b270c1bb58c9692b58af07ed62cb3d9cecd108ef302a0afddcda7817c37c12af',
+              ('19.0.1.128.0', '5e25dec3dc2bd40c8986dfae089b0fdcd9a93142426cbb3d4403e1aa7d7e1ce5',
+               'b270c1bb58c9692b58af07ed62cb3d9cecd108ef302a0afddcda7817c37c12af',
                'Test Outcome 10.26 Menu Arrangement tab (#1887) and Sales Order (#1906): five menus'),
-              ('19.0.1.196.0', '9925054de5bd788841d7913692c6d605d4541ea7603c5d77f58429be8481700a',
+              ('19.0.1.196.0', '361826f5327d126fafd38f4cfafbfbdb026c52f80172e2d73e3c2086191f22f0',
+               '9925054de5bd788841d7913692c6d605d4541ea7603c5d77f58429be8481700a',
                'Test Outcome 10.27 R41 (#1991): Direct Delivery Job'))
           for review in _review(
               f'perodua_demo_profile/migrations/{version}/post-migrate.pyc', sha256,
               ('perodua_client_stable.menu_arrangement.v1',),
-              f'The post-migrate script of version {version} ({change}). ' + _MENU_SNAPSHOT)),
+              f'The post-migrate script of version {version} ({change}). ' + _MENU_SNAPSHOT, earlier)),
         *_review(
-            'perodua_sso_hub/controllers/hosts.pyc', '252a27a17b4e3c3793f3bf0ed8cea7d3fc03f6c667d11e926ba36e6fd4fd39c8',
+            'perodua_sso_hub/controllers/hosts.pyc', 'c4fd93355f2dac808105f5802f0427c043e1dc55cd96382b998afefb79e21985',
             ('perodua_client_stable.hosts',),
             'HOSTS_PARAM, ' + _PARAMETER + ': host_table() reads the host table (JSON) with get_param, and '
             'without the key, or with a value that is not valid, it uses DEFAULT_HOSTS of the same file '
             '(stgiss the sign-in host; stgissrp, stgisssp and stgisscp the module hosts). The workspace codes '
             'are WORKSPACE_CODES of the same file, the seven codes of LINE_RULES of preflight.py, which reads '
             'the same key. A new demo-uiux database has no such key and uses the default table. Not '
-            'reliance.'),
+            'reliance.',
+            '252a27a17b4e3c3793f3bf0ed8cea7d3fc03f6c667d11e926ba36e6fd4fd39c8',
+            'app PR #2242 (W2 of the /my removal) adds CODE_ROLES (the external roles that the codes cp and sp '
+            'admit) and external_roles(), which reads the same table through host_table(). WORKSPACE_CODES '
+            'keeps its seven codes.'),
         *_review(
-            'perodua_sso_hub/controllers/handover.pyc', '1d1cb61c53ac8a70b758eb405d9053a8fd21b33f0906c92bb0c2aa2883e117bc',
+            'perodua_sso_hub/controllers/handover.pyc', 'beddf5ba2ec071bba5b30fa758d68cb91514ca7b294136d26180bbb865bc23df',
             ('perodua_client_stable.handover.pending.v1', 'perodua_client_stable.handover.spent.',
              'perodua_client_stable.handover.v1', 'perodua_client_stable.handover.verifier.v1',
              'perodua_client_stable.module_signin'),
@@ -227,25 +247,32 @@ REVIEWED_REFERENCES = {
             'PENDING_SCOPE (perodua_client_stable.handover.v1, .handover.verifier.v1 and '
             '.handover.pending.v1) are each ' + _HMAC_SCOPE + '. They keep the signatures of the ticket and '
             'of the two hand-over cookies apart. No row, field or code of perodua_client_stable is used. Not '
-            'reliance.'),
+            'reliance.',
+            '1d1cb61c53ac8a70b758eb405d9053a8fd21b33f0906c92bb0c2aa2883e117bc',
+            'app PR #2242 (W2 of the /my removal) lets _eligible() admit a share account to a module host only '
+            'while the parameter perodua_sso_hub.external_signin is on (a name of perodua_sso_hub, off without '
+            'the row), while external_door of perodua_uiux_api serves the account, and only for a role that '
+            'hosts.external_roles() gives that host.'),
         *_review(
             'perodua_sso_hub/controllers/oidc_clients.pyc',
-            '221ec7ce1c5cd0dd51d298e7c919a5338c91a128a7624a994c0adb4312f6d1ee',
+            'b64beb5336f4a5622d1e44ce7f616a4f7c7f8f598b525273bc7c04ce48d3b1f9',
             ('perodua_client_stable.oidc.sid.v2', 'perodua_client_stable.oidc_clients'),
             'Two names. CLIENTS_PARAM (perodua_client_stable.oidc_clients) is ' + _PARAMETER + ': '
             'external_clients() reads it with get_param, and without the key it uses default_clients() of '
             'the same file (wom and tms); the clients of the module hosts are built in code from the host '
             'table. SID_SCOPE (perodua_client_stable.oidc.sid.v2) is ' + _HMAC_SCOPE + ', in family_sid(). '
             'The field that family_sid() reads, res.users.perodua_oidc_sid_generations, is declared by '
-            'perodua_sso_hub itself (models/res_users.py). Not reliance.'),
+            'perodua_sso_hub itself (models/res_users.py). Not reliance.',
+            '221ec7ce1c5cd0dd51d298e7c919a5338c91a128a7624a994c0adb4312f6d1ee'),
         *_review(
-            'perodua_sso_hub/controllers/binding.pyc', '838cb6dcad8f0d712deaf6f117da35bc80ecc3939ac0c9947572a3a84ce67cd0',
+            'perodua_sso_hub/controllers/binding.pyc', 'b93d541abcdaeaea6ded012f05586b1129338cfd7d1f919e1b46dbb1e17334f0',
             ('perodua_client_stable.bind.v1',),
             'SCOPE, ' + _HMAC_SCOPE + ', for the value of the __Host-perodua_bind_<env> cookie (an HMAC '
             'of the random perodua_bind value of the session). It is not a key of ir.config_parameter. Not '
-            'reliance.'),
+            'reliance.',
+            '838cb6dcad8f0d712deaf6f117da35bc80ecc3939ac0c9947572a3a84ce67cd0'),
         *_review(
-            'perodua_sso_hub/hooks.pyc', 'c4e762e454e4ad18767d80e911a6182a339c2374d1e8d1d560c10eae741c07af',
+            'perodua_sso_hub/hooks.pyc', '7d30f39d4d43122bcbd3af8c26748297dca46df4e0408348861c12493e186af4',
             ('perodua_client_stable',),
             'FORMER_OWNER, a module name as a value in the SQL of pre_init_hook, not an import, an XML ID or '
             'a path: the hook moves to perodua_sso_hub the ir_model_data rows of that module, and the '
@@ -255,7 +282,10 @@ REVIEWED_REFERENCES = {
             '(models/oidc.py, models/res_users.py). On a database where perodua_client_stable was never '
             'installed, as each new demo-uiux database, the queries find no row: nothing moves, no row is '
             'left, and the hook logs zero counts (former_constraint_ids gives no row also when the module has '
-            'no ir_module_module row). It moves rows; it does not install or need the module. Not reliance.'),
+            'no ir_module_module row). The module upgrade from v0.55.0 or v0.55.1 does not run the hook: Odoo '
+            'runs pre_init_hook only when it installs the module. It moves rows; it does not install or need the '
+            'module. Not reliance.',
+            'c4e762e454e4ad18767d80e911a6182a339c2374d1e8d1d560c10eae741c07af'),
     ),
 }
 

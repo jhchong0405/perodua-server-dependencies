@@ -11,6 +11,7 @@ import importlib.util
 import json
 from pathlib import Path
 import py_compile
+import re
 import subprocess
 import sys
 import tempfile
@@ -351,11 +352,18 @@ class GuardTests(unittest.TestCase):
             'perodua_sso_hub/controllers/binding.pyc', 'perodua_sso_hub/controllers/handover.pyc',
             'perodua_sso_hub/controllers/hosts.pyc', 'perodua_sso_hub/controllers/oidc_clients.pyc',
             'perodua_sso_hub/hooks.pyc'])
+        release = re.search(r'^DEMO_RELEASE=(\S+)$', (SCRIPTS / 'deploy-app.sh').read_text(encoding='utf-8'),
+                            re.M).group(1)
         hashes = {}
         for review in reviews:
             self.assertRegex(review['sha256'], r'^[0-9a-f]{64}$')
             self.assertRegex(review['finding'], r"^constant 'perodua_client_stable[.']")
-            self.assertIn('demo-uiux-grey-v0.55.0', review['reason'])
+            # Reviewed in the image that deploy-app.sh pins, and compared with
+            # the file that the first pin (v0.55.0) reviewed, in other bytes.
+            self.assertIn(f'Reviewed against the pinned {release} image', review['reason'])
+            earlier = re.search(r'demo-uiux-grey-v0\.55\.0 .* \(sha256 ([0-9a-f]{64})\)', review['reason'])
+            self.assertIsNotNone(earlier, review['reason'])
+            self.assertNotEqual(earlier.group(1), review['sha256'])
             hashes.setdefault(review['file'], set()).add(review['sha256'])
         # The entries of one file name the same reviewed bytes.
         self.assertEqual({file: len(found) for file, found in hashes.items()}, dict.fromkeys(hashes, 1))
