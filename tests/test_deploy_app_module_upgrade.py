@@ -680,6 +680,174 @@ class ModuleUpgradeTests(ModuleUpgradeFixture, unittest.TestCase):
         self.assertEqual(self.module_steps(), [])
 
 
+# The demo-uiux block of deploy-app.sh.
+DEMO_RELEASE = re.search(r'^DEMO_RELEASE=(\S+)$', TEXT, re.M).group(1)
+DEMO_REVISION = re.search(r'^DEMO_REVISION=([0-9a-f]{40})$', TEXT, re.M).group(1)
+DEMO_ODOO_IMAGE = re.search(r'^DEMO_ODOO_IMAGE=(\S+)$', TEXT, re.M).group(1)
+DEMO_FROM = re.search(r'^DEMO_MODULE_UPGRADE_FROM=(\S+)$', TEXT, re.M).group(1).split(',')
+DEMO_ACCEPTED = re.search(r'^DEMO_OLD_RELEASES_ACCEPTED=(\S+)$', TEXT, re.M).group(1).split(',')
+NO_IMAGE_MAIL = re.search(r'^NO_IMAGE_MAIL_RELEASES=(\S+)$', TEXT, re.M).group(1).split(',')
+# Grey runs v0.55.1 with IMAGE_MAIL=on and MAIL_REDIRECT_TO=off, on a database
+# that v0.55.0 set up: both releases have this module fingerprint.
+GREY, FIRST_GREY = 'demo-uiux-grey-v0.55.1', 'demo-uiux-grey-v0.55.0'
+GREY_REVISION = '634599e70b38471b6ecb9bf331177fc5be31e822'
+GREY_FINGERPRINT = 'f439f02d565f7782f8f3d9461ca3cb70'
+DEMO_MODULES = 'perodua_portal,perodua_sso_hub,perodua_uiux_api'
+# After the switch, the demo-uiux line gives a new password to each account
+# that still has the seed password (uat_demo.py upgrade), before the App starts.
+DEMO_DEPLOY = DEPLOY[:1] + ['uat_demo plan'] + DEPLOY[1:]
+IMAGE_MAIL_LINES = ('IMAGE_MAIL=', 'MAIL_REDIRECT_TO=')
+
+
+class DemoModuleUpgradeTests(ModuleUpgradeFixture, unittest.TestCase):
+    """A demo-uiux directory of an earlier grey release, on a database with
+    its modules: the module upgrade to the grey release that the kit pins."""
+    def setUp(self):
+        super().setUp()
+        self.env['FAKE_MODULES'] = DEMO_MODULES
+        self.demo_directory(GREY)
+
+    def demo_directory(self, release, image_mail=True):
+        """A directory as the kit of release left it: grey adds IMAGE_MAIL=on
+        and MAIL_REDIRECT_TO=off to app.env (owner decision 2026-11-04)."""
+        self.deployed(release, GREY_REVISION)
+        self.identity += 'line=demo-uiux\n'
+        (self.deploy_dir / '.deployment-identity').write_text(self.identity)
+        mail = {'IMAGE_MAIL': 'on', 'MAIL_REDIRECT_TO': 'off'} if image_mail else {}
+        self.write_app_env(PERODUA_LINE='demo-uiux', **mail)
+        self.set_db('from')
+        self.log.unlink(missing_ok=True)
+
+    def assert_demo_refused_before_the_stop(self, result, release, message):
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn(message, result.stdout)
+        self.assertIn(f'Nothing was changed: {self.deploy_dir} still runs {release}.', result.stdout)
+        self.assertEqual(self.names(), ['pull', 'pull', 'staged preflight upgrade-check'])
+        self.assertEqual((self.deploy_dir / '.deployment-identity').read_text(), self.identity)
+        self.assertEqual((self.deploy_dir / 'app.env').read_text(), self.app_env)
+        self.assertEqual(self.backups(), [])
+        self.assertEqual(self.db_state(), 'from')
+
+    def test_the_demo_block_upgrades_the_modules_of_grey(self):
+        # The fingerprint that the database of grey has, and both directories
+        # that can carry it. The pinned image has another fingerprint, so the
+        # database check of an --upgrade answers MODULE_UPGRADE.
+        self.assertIn(GREY_FINGERPRINT, DEMO_FROM)
+        self.assertEqual(DEMO_ACCEPTED, [FIRST_GREY, GREY])
+        self.assertNotIn(DEMO_RELEASE, DEMO_ACCEPTED)
+        # The scripts folder of v0.55.0 refuses IMAGE_MAIL; that of v0.55.1 knows it.
+        self.assertEqual(NO_IMAGE_MAIL, [FIRST_GREY])
+
+    def test_a_directory_of_v0_55_1_takes_the_module_upgrade_to_the_pinned_release(self):
+        result = self.upgrade()
+        self.assertEqual(result.returncode, 0, result.stdout)
+        steps = self.module_steps()
+        self.assertEqual([name for name, _ in steps], CHECKS + BACKUP + RECHECK + UPGRADE + DEMO_DEPLOY)
+        switch = [name for name, _ in steps].index('preflight check --accept-pending')
+        self.assertEqual({release for _, release in steps[:switch]}, {GREY})
+        self.assertEqual({release for _, release in steps[switch:]}, {DEMO_RELEASE})
+        self.assertIn(f'Upgrade of {self.deploy_dir} from {GREY} ({GREY_REVISION}) to {DEMO_RELEASE} ({DEMO_REVISION}).',
+                      result.stdout)
+        fingerprints = DEMO_FROM[0] if len(DEMO_FROM) == 1 else 'one of ' + ', '.join(DEMO_FROM)
+        self.assertIn(f'Database perodua has the modules of {GREY} (fingerprint {fingerprints}). {DEMO_RELEASE} has other '
+                      'modules: this upgrade runs a module upgrade (-u) of 3 modules.', result.stdout)
+        # The guard of the -u keeps perodua_client_stable out, with the reviews of the demo-uiux line.
+        [guard] = [e['args'] for e in self.calls() if 'guard' in e['args'] and '/opt/deploy/uat_guard.py' in e['args']]
+        for option, value in (('--modules', DEMO_MODULES), ('--exclude', 'perodua_client_stable'), ('--line', 'demo-uiux')):
+            self.assertEqual(guard[guard.index(option) + 1], value)
+        [run] = [e['args'] for e in self.calls() if any(' -u ' in a for a in e['args'])]
+        self.assertIn(f'PERODUA_UPGRADE_MODULES={DEMO_MODULES}', run)
+        self.assertEqual(self.db_state(), 'new')
+        self.assertEqual((self.deploy_dir / '.deployment-identity').read_text(),
+                         self.identity.replace(f'release={GREY}', f'release={DEMO_RELEASE}')
+                                      .replace(f'revision={GREY_REVISION}', f'revision={DEMO_REVISION}'))
+        self.assertIn(f'image: {DEMO_ODOO_IMAGE}', (self.deploy_dir / 'compose.yml').read_text())
+        self.assertIn(f'Deployment verified: {DEMO_RELEASE} ({DEMO_REVISION})', result.stdout)
+        self.assertIn('Held mail: 2 that the module upgrade queued, 1 that waited in the queue before the upgrade.', result.stdout)
+        self.assertIn('Review the held mail: README.md, "Upgrade the demo-uiux line", lists it with psql on the DB server',
+                      result.stdout)
+        [backup] = self.backups()
+        self.assertEqual(backup.name.split('-', 1)[1], GREY)
+        hint = (backup / 'restore.txt').read_text()
+        self.assertIn('This upgrade runs a module upgrade (-u).', hint)
+        self.assertIn(f'Then, from a scripts folder of {GREY}: sudo bash deploy-app.sh --dir {self.deploy_dir}', hint)
+
+    def test_the_image_mail_lines_stay_in_app_env_through_the_module_upgrade_and_the_backup(self):
+        result = self.upgrade()
+        self.assertEqual(result.returncode, 0, result.stdout)
+        # The new app.env keeps the mail of the image, to the real recipients.
+        lines = (self.deploy_dir / 'app.env').read_text().splitlines(keepends=True)
+        self.assertEqual(sorted(lines), sorted(self.app_env.splitlines(keepends=True)))
+        self.assertIn('IMAGE_MAIL=on\n', lines)
+        self.assertIn('MAIL_REDIRECT_TO=off\n', lines)
+        # The compose file of the -u run and of the App (the staged file, moved
+        # at the switch): the mail of the image, and no SMTP setting.
+        compose = (self.deploy_dir / 'compose.yml').read_text()
+        self.assertIn('      PERODUA_MAIL: "on"\n', compose)
+        self.assertIn('      PERODUA_MAIL_REDIRECT_TO: "off"\n', compose)
+        self.assertNotIn('PERODUA_MAIL: "off"', compose)
+        self.assertNotIn('PERODUA_SMTP_', compose)
+        self.assertIn('Outgoing email: the mail settings inside the Odoo image (IMAGE_MAIL=on), every email to its'
+                      ' real recipients.', result.stdout)
+        # The way back runs deploy-app.sh of v0.55.1, which knows IMAGE_MAIL:
+        # the backup keeps app.env byte for byte, with the two lines.
+        [backup] = self.backups()
+        self.assertEqual((backup / 'app.env').read_text(), self.app_env)
+        restore = (backup / 'restore.txt').read_text()
+        self.assertIn(f'   sudo cp -p {backup}/app.env {self.deploy_dir}/app.env\n', restore)
+        self.assertNotIn('has no IMAGE_MAIL', restore)
+        # The mail hold comes after -u and before the App starts with the mail on.
+        names = self.names()
+        self.assertLess(names.index('staged odoo -u'), names.index('staged preflight verify-upgrade'))
+        self.assertLess(names.index('staged preflight verify-upgrade'), names.index('uat_demo plan'))
+        self.assertLess(names.index('uat_demo plan'), names.index('up'))
+
+    def test_a_directory_of_v0_55_0_with_image_mail_gets_a_backup_app_env_without_it(self):
+        # The two lines were added by hand before the --upgrade from v0.55.0.
+        self.demo_directory(FIRST_GREY)
+        result = self.upgrade()
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn(f'Database perodua has the modules of {FIRST_GREY}', result.stdout)
+        self.assertIn('staged odoo -u', self.names())
+        [backup] = self.backups()
+        saved = (backup / 'app.env').read_text()
+        self.assertEqual(saved, ''.join(line for line in self.app_env.splitlines(keepends=True)
+                                        if not line.startswith(IMAGE_MAIL_LINES)))
+        self.assertIn('PERODUA_LINE=demo-uiux\n', saved)
+        self.assertEqual((backup / 'app.env').stat().st_mode & 0o777, 0o600)
+        self.assertIn(f'   (This app.env has no IMAGE_MAIL and no MAIL_REDIRECT_TO: {FIRST_GREY} refuses them, and its'
+                      ' mail stays off.)\n', (backup / 'restore.txt').read_text())
+        # The pinned release knows them: the new app.env keeps them.
+        self.assertIn('IMAGE_MAIL=on\n', (self.deploy_dir / 'app.env').read_text())
+
+    def test_a_directory_of_v0_55_0_without_image_mail_keeps_the_mail_off(self):
+        self.demo_directory(FIRST_GREY, image_mail=False)
+        result = self.upgrade()
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn('staged odoo -u', self.names())
+        [backup] = self.backups()
+        self.assertEqual((backup / 'app.env').read_text(), self.app_env)
+        self.assertNotIn('IMAGE_MAIL', (self.deploy_dir / 'app.env').read_text())
+        self.assertIn('      PERODUA_MAIL: "off"\n', (self.deploy_dir / 'compose.yml').read_text())
+
+    def test_a_directory_of_an_unknown_release_is_refused(self):
+        # A grey release that this scripts folder does not name, on a database
+        # with an accepted fingerprint: refused before the App stops.
+        for old in ('demo-uiux-grey-v0.54.0', 'demo-uiux-grey-v0.55.2'):
+            with self.subTest(old=old):
+                self.demo_directory(old)
+                result = self.upgrade()
+                self.assert_demo_refused_before_the_stop(
+                    result, old, f'{DEMO_RELEASE} upgrades the Odoo modules only of a deployment of '
+                                 f'{", ".join(DEMO_ACCEPTED)}, and {self.deploy_dir} runs {old}. Upgrade it to one of those first')
+
+    def test_another_fingerprint_is_refused(self):
+        result = self.upgrade(other_fingerprint=1)
+        names = ', '.join(release.rsplit('-', 1)[1] for release in DEMO_ACCEPTED)
+        self.assert_demo_refused_before_the_stop(
+            result, GREY, f'It upgrades modules (-u) only from the modules of {names} (fingerprint {DEMO_FROM[0]})')
+
+
 @unittest.skipUnless(hasattr(os, 'geteuid') and os.geteuid() == 0 and Path('/proc/self/fd').is_dir(),
                      'service.sh needs root on Linux (the test image)')
 class OldServiceShTests(ModuleUpgradeFixture, unittest.TestCase):
