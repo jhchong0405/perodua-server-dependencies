@@ -340,13 +340,25 @@ class GuardTests(unittest.TestCase):
         code, report, stderr = self.run_guard()
         self.assertEqual((report['line'], report['excluded']), ('client-stable-uiux', EXCLUDED), stderr)
 
-    def test_the_demo_reviews_are_placeholders_until_the_first_pin(self):
+    def test_the_demo_reviews_are_pinned_to_eleven_files(self):
         reviews = uat_guard.REVIEWED_REFERENCES['demo-uiux']
-        self.assertTrue(reviews)
+        self.assertEqual(len({(review['file'], review['finding']) for review in reviews}), len(reviews))
+        self.assertEqual(len(reviews), 16)
+        self.assertEqual(sorted({review['file'] for review in reviews}), [
+            'perodua_demo/gallery.pyc',
+            *(f'perodua_demo_profile/migrations/{version}/post-migrate.pyc'
+              for version in ('19.0.1.100.0', '19.0.1.102.0', '19.0.1.103.0', '19.0.1.128.0', '19.0.1.196.0')),
+            'perodua_sso_hub/controllers/binding.pyc', 'perodua_sso_hub/controllers/handover.pyc',
+            'perodua_sso_hub/controllers/hosts.pyc', 'perodua_sso_hub/controllers/oidc_clients.pyc',
+            'perodua_sso_hub/hooks.pyc'])
+        hashes = {}
         for review in reviews:
-            self.assertIsNone(review['sha256'], review)
-            self.assertTrue(review['reason'].startswith('PLACEHOLDER until the first pin'), review)
+            self.assertRegex(review['sha256'], r'^[0-9a-f]{64}$')
             self.assertRegex(review['finding'], r"^constant 'perodua_client_stable[.']")
+            self.assertIn('demo-uiux-grey-v0.55.0', review['reason'])
+            hashes.setdefault(review['file'], set()).add(review['sha256'])
+        # The entries of one file name the same reviewed bytes.
+        self.assertEqual({file: len(found) for file, found in hashes.items()}, dict.fromkeys(hashes, 1))
 
     def demo_tree(self, constant="HOSTS_PARAM = 'perodua_client_stable.hosts'\n"):
         """A demo-uiux graph: the hub module, which keeps a parameter name of
@@ -363,20 +375,32 @@ class GuardTests(unittest.TestCase):
 
     def test_a_placeholder_review_never_accepts_a_finding(self):
         compiled = self.demo_tree()
-        code, report, stderr = self.run_demo_guard()
-        self.assertEqual(code, uat_guard.REFUSED, stderr)
+        args = argparse.Namespace(modules='perodua_sso_hub', exclude=None, line='demo-uiux', odoo_config=None,
+                                  addons_path=f'{self.core},{self.addons}', json=True)
+        placeholder = {'file': 'perodua_sso_hub/controllers/hosts.pyc',
+                       'finding': "constant 'perodua_client_stable.hosts'", 'sha256': None,
+                       'reason': 'a parameter key, before the review of the pinned bytes'}
+        report = uat_guard.run_guard(args, reviewed=[placeholder])
+        self.assertEqual(report['verdict'], 'refused')
         self.assertEqual(report['excluded'], 'perodua_client_stable')
         self.assertEqual(report['placeholder_reviews'],
                          ["perodua_sso_hub/controllers/hosts.pyc: constant 'perodua_client_stable.hosts'"])
-        self.assertIn('placeholder review of the demo-uiux line', stderr)
-        # The review the first pin writes, with the sha256 of the reviewed bytes, accepts it.
-        args = argparse.Namespace(modules='perodua_sso_hub', exclude=None, line='demo-uiux', odoo_config=None,
-                                  addons_path=f'{self.core},{self.addons}', json=True)
-        entry = {'file': 'perodua_sso_hub/controllers/hosts.pyc', 'finding': "constant 'perodua_client_stable.hosts'",
-                 'sha256': hashlib.sha256(compiled.read_bytes()).hexdigest(), 'reason': 'a parameter key'}
+        self.assertTrue(any('placeholder review of the demo-uiux line' in problem for problem in report['problems']))
+        # The review of a pin, with the sha256 of the reviewed bytes, accepts it.
+        entry = dict(placeholder, sha256=hashlib.sha256(compiled.read_bytes()).hexdigest())
         report = uat_guard.run_guard(args, reviewed=[entry])
         self.assertEqual(report['verdict'], 'accepted')
         self.assertEqual(report['placeholder_reviews'], [])
+
+    def test_the_shipped_demo_reviews_accept_only_the_bytes_of_the_pinned_image(self):
+        # The finding of the pinned image, in a hosts.pyc with other bytes.
+        self.demo_tree()
+        code, report, stderr = self.run_demo_guard()
+        self.assertEqual(code, uat_guard.REFUSED, stderr)
+        self.assertEqual(report['references_in_install_set'], {
+            'perodua_sso_hub': ["perodua_sso_hub/controllers/hosts.pyc: constant 'perodua_client_stable.hosts'"]})
+        self.assertEqual((report['reviewed_references'], report['placeholder_reviews']), ({}, []))
+        self.assertNotIn('placeholder review', stderr)
 
     def test_the_demo_line_keeps_perodua_client_stable_out(self):
         self.demo_tree(constant='X = 1\n')

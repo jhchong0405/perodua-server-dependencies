@@ -71,17 +71,36 @@ DEFAULT_LINE = 'client-stable-uiux'
 SHA256 = re.compile(r'[0-9a-f]{64}')
 
 
-def _placeholder(file, constant, reason):
-    """A review the first pin of a demo-uiux release makes: the finding the
-    pinned image is expected to show, and why it is expected not to be
-    reliance. Without its sha256 it matches no file, so the finding stays
-    refused until someone reviews the pinned bytes and fills it in."""
-    return {'file': file, 'finding': f'constant {constant!r}', 'sha256': None,
-            'reason': 'PLACEHOLDER until the first pin of a demo-uiux release: ' + reason}
+_DEMO_PIN = ('the pinned demo-uiux-grey-v0.55.0 image '
+             '(sha256:ef83c1f11dcad817ffefda3b9a6477a49d1b3a0354c83128a94af6813bfb9235) of revision '
+             '634599e70b38471b6ecb9bf331177fc5be31e822')
+
+
+def _review(file, sha256, constants, reason):
+    """The review of one file of the pinned demo-uiux image: an entry for each
+    of its findings, all pinned to the sha256 of the reviewed bytes. The
+    reviewed file has the same code objects as its source at the pinned
+    revision, compiled by the Python of the image."""
+    reason += (f' Reviewed against {_DEMO_PIN}, whose {file} is the compiled '
+               f'custom_addons/{file[:-1]} of that revision.')
+    return tuple({'file': file, 'finding': f'constant {constant!r}', 'sha256': sha256, 'reason': reason}
+                 for constant in constants)
 
 
 _PARAMETER = ('a key of ir.config_parameter that keeps the name it has on the client-stable-uiux line '
               '(owner answer d05), not an XML ID, an import or a path')
+_HMAC_SCOPE = ('the scope label of odoo.tools.misc.hmac, which signs repr((scope, message)) with '
+               'database.secret: it reads no row, and it is not an XML ID, an import or a path')
+_MENU_SNAPSHOT = (
+    'CLIENT_STATE_KEY, ' + _PARAMETER + ': the snapshot of the menu states that perodua_client_stable '
+    'writes when it applies its menu arrangement. migrate() reads it only when Odoo gives an installed '
+    'version, and a missing or empty key gives no snapshot: the script returns without a write. Odoo 19 '
+    'runs a migration script only for a module that it upgrades (odoo/modules/migration.py, migrate_module: '
+    'load_state "to upgrade"), never in the -i of a new database, and only when the installed version is '
+    'lower than the version of the script. The image has perodua_demo_profile 19.0.1.237.0, so neither '
+    '--init-db nor a module upgrade from this release runs this script, and the first grey release takes '
+    'no module upgrade (DEMO_MODULE_UPGRADE_FROM is empty). A demo-uiux database has no such key. A '
+    'migration of an earlier version, not reliance.')
 # References that were read and found NOT to be reliance, per line, each pinned
 # to the exact bytes of the file it was reviewed in. A changed file voids its
 # entry, so a different image can never inherit an old judgement: it is
@@ -146,33 +165,93 @@ REVIEWED_REFERENCES = {
                 'files differ only in the source time in the .pyc header.'),
         },
     ),
-    # PLACEHOLDERS until the first pin: the references to perodua_client_stable
-    # that the demo-uiux image is expected to hold in the modules it installs
-    # (perodua_sso_hub keeps the parameter names of perodua_client_stable).
-    # The first pin runs the guard of that image (--line demo-uiux --json),
-    # reviews each finding of references_in_install_set, and writes its entry
-    # with the sha256 of the reviewed file; an entry it does not confirm goes.
+    # The 16 findings of the guard of the demo-uiux-grey-v0.55.0 image
+    # (--line demo-uiux, DEMO_INIT_MODULES and DEMO_RESTORED_MODULES), in 11
+    # files of perodua_demo, perodua_demo_profile and perodua_sso_hub. Each
+    # file was read at the pinned revision; perodua_sso_hub keeps the names of
+    # perodua_client_stable for its parameters and its signatures.
     'demo-uiux': (
-        _placeholder('perodua_demo/gallery.pyc', 'perodua_client_stable',
-                     'EXPORT_MOCK_BLOCKING_MODULE, the module whose install state mock_data_refusal reads: '
-                     'a search value, and on this line the module is not installed, so the mock data loads'),
-        *(_placeholder(f'perodua_demo_profile/migrations/{version}/post-migrate.pyc',
-                       'perodua_client_stable.menu_arrangement.v1',
-                       'CLIENT_STATE_KEY, ' + _PARAMETER + '; a migration of an earlier version, which a fresh '
-                       'database never runs')
-          for version in ('19.0.1.100.0', '19.0.1.102.0', '19.0.1.103.0', '19.0.1.128.0', '19.0.1.196.0')),
-        _placeholder('perodua_sso_hub/controllers/hosts.pyc', 'perodua_client_stable.hosts', 'HOSTS_PARAM, ' + _PARAMETER),
-        *(_placeholder('perodua_sso_hub/controllers/handover.pyc', key, _PARAMETER)
-          for key in ('perodua_client_stable.module_signin', 'perodua_client_stable.handover.v1',
-                      'perodua_client_stable.handover.verifier.v1', 'perodua_client_stable.handover.pending.v1',
-                      'perodua_client_stable.handover.spent.')),
-        *(_placeholder('perodua_sso_hub/controllers/oidc_clients.pyc', key, _PARAMETER)
-          for key in ('perodua_client_stable.oidc_clients', 'perodua_client_stable.oidc.sid.v2')),
-        _placeholder('perodua_sso_hub/controllers/binding.pyc', 'perodua_client_stable.bind.v1', _PARAMETER),
-        _placeholder('perodua_sso_hub/hooks.pyc', 'perodua_client_stable',
-                     'the module name in the SQL of the pre_init_hook that gives perodua_sso_hub the records '
-                     'of the OIDC models of perodua_client_stable (plan row P1-03): it moves rows, it does not '
-                     'install or need the module'),
+        *_review(
+            'perodua_demo/gallery.pyc', 'a46f478959bc7b30948ead7010b8f2cf5fa27901e9d905d4f4e504d375b8b535',
+            ('perodua_client_stable',),
+            'EXPORT_MOCK_BLOCKING_MODULE, a module name as a search value, not an import, an XML ID or a '
+            'path: mock_data_refusal() counts the ir.module.module rows of that name in a state other than '
+            'uninstalled or uninstallable, and only then refuses the mock data ("perodua_client_stable is '
+            'installed"). The constant has no other use. On the demo-uiux line the module is never '
+            'installed: this guard keeps it out of the install set, and preflight.py verify-fresh refuses a '
+            'database that has it (LINE_RULES, never_installed). So the count is 0, and with '
+            'perodua_demo.seed_mode not "none" and PERODUA_IMAGE_PROFILE=demo-uiux (NO_SAMPLE_PROFILES of '
+            'perodua_master_sync holds only client-stable-uiux) the function returns False: the demo seed '
+            'loads its mock data, as the line needs. The module is absent in the normal case. Optional '
+            'detection, not reliance.'),
+        *(review
+          for version, sha256, change in (
+              ('19.0.1.100.0', 'a9f21831d2c25141574a3eb51b5dcb3e31bf2cd78d86b44dbe3e5c1645f740a1',
+               'Outcome 10.22 Setup > Material (#1721): Part Material, Storage Zone and Car Model'),
+              ('19.0.1.102.0', '200abc91b84d2bcfbd6ab3980d9a840325736edc817e3a57ee4868dd166185fa',
+               'Outcome 10.22 Setup > Material (#1721): Box Size'),
+              ('19.0.1.103.0', '30b6ae9e2872c13e432ef362debfef0898ba7eddc93e019c0ab58379f405e728',
+               'Test Outcome 10.22 R28 (#1738): Public Holiday'),
+              ('19.0.1.128.0', 'b270c1bb58c9692b58af07ed62cb3d9cecd108ef302a0afddcda7817c37c12af',
+               'Test Outcome 10.26 Menu Arrangement tab (#1887) and Sales Order (#1906): five menus'),
+              ('19.0.1.196.0', '9925054de5bd788841d7913692c6d605d4541ea7603c5d77f58429be8481700a',
+               'Test Outcome 10.27 R41 (#1991): Direct Delivery Job'))
+          for review in _review(
+              f'perodua_demo_profile/migrations/{version}/post-migrate.pyc', sha256,
+              ('perodua_client_stable.menu_arrangement.v1',),
+              f'The post-migrate script of version {version} ({change}). ' + _MENU_SNAPSHOT)),
+        *_review(
+            'perodua_sso_hub/controllers/hosts.pyc', '252a27a17b4e3c3793f3bf0ed8cea7d3fc03f6c667d11e926ba36e6fd4fd39c8',
+            ('perodua_client_stable.hosts',),
+            'HOSTS_PARAM, ' + _PARAMETER + ': host_table() reads the host table (JSON) with get_param, and '
+            'without the key, or with a value that is not valid, it uses DEFAULT_HOSTS of the same file '
+            '(stgiss the sign-in host; stgissrp, stgisssp and stgisscp the module hosts). The workspace codes '
+            'are WORKSPACE_CODES of the same file, the seven codes of LINE_RULES of preflight.py, which reads '
+            'the same key. A new demo-uiux database has no such key and uses the default table. Not '
+            'reliance.'),
+        *_review(
+            'perodua_sso_hub/controllers/handover.pyc', '1d1cb61c53ac8a70b758eb405d9053a8fd21b33f0906c92bb0c2aa2883e117bc',
+            ('perodua_client_stable.handover.pending.v1', 'perodua_client_stable.handover.spent.',
+             'perodua_client_stable.handover.v1', 'perodua_client_stable.handover.verifier.v1',
+             'perodua_client_stable.module_signin'),
+            'Five names. SIGNIN_PARAM (perodua_client_stable.module_signin) is ' + _PARAMETER + ': '
+            'module_signin() reads it with SQL at each request, and without the row the module sign-in uses '
+            'the oidc wire (with a usable signing key; without one it is unavailable and fails closed). '
+            'SPENT_PREFIX (perodua_client_stable.handover.spent.) starts the keys of the ir_config_parameter '
+            'rows that this file itself writes and deletes with SQL (_spend, _spent) for a refused or used '
+            'ticket or id_token: a new database has none and needs none. TICKET_SCOPE, VERIFIER_SCOPE and '
+            'PENDING_SCOPE (perodua_client_stable.handover.v1, .handover.verifier.v1 and '
+            '.handover.pending.v1) are each ' + _HMAC_SCOPE + '. They keep the signatures of the ticket and '
+            'of the two hand-over cookies apart. No row, field or code of perodua_client_stable is used. Not '
+            'reliance.'),
+        *_review(
+            'perodua_sso_hub/controllers/oidc_clients.pyc',
+            '221ec7ce1c5cd0dd51d298e7c919a5338c91a128a7624a994c0adb4312f6d1ee',
+            ('perodua_client_stable.oidc.sid.v2', 'perodua_client_stable.oidc_clients'),
+            'Two names. CLIENTS_PARAM (perodua_client_stable.oidc_clients) is ' + _PARAMETER + ': '
+            'external_clients() reads it with get_param, and without the key it uses default_clients() of '
+            'the same file (wom and tms); the clients of the module hosts are built in code from the host '
+            'table. SID_SCOPE (perodua_client_stable.oidc.sid.v2) is ' + _HMAC_SCOPE + ', in family_sid(). '
+            'The field that family_sid() reads, res.users.perodua_oidc_sid_generations, is declared by '
+            'perodua_sso_hub itself (models/res_users.py). Not reliance.'),
+        *_review(
+            'perodua_sso_hub/controllers/binding.pyc', '838cb6dcad8f0d712deaf6f117da35bc80ecc3939ac0c9947572a3a84ce67cd0',
+            ('perodua_client_stable.bind.v1',),
+            'SCOPE, ' + _HMAC_SCOPE + ', for the value of the __Host-perodua_bind_<env> cookie (an HMAC '
+            'of the random perodua_bind value of the session). It is not a key of ir.config_parameter. Not '
+            'reliance.'),
+        *_review(
+            'perodua_sso_hub/hooks.pyc', 'c4e762e454e4ad18767d80e911a6182a339c2374d1e8d1d560c10eae741c07af',
+            ('perodua_client_stable',),
+            'FORMER_OWNER, a module name as a value in the SQL of pre_init_hook, not an import, an XML ID or '
+            'a path: the hook moves to perodua_sso_hub the ir_model_data rows of that module, and the '
+            'ir_model_constraint rows of its ir_module_module row, for the hub models perodua.oidc.pending '
+            'and perodua.oidc.signin and the field res.users.perodua_oidc_sid_generations (option A, an '
+            'upgrade of a client-stable-uiux database). perodua_sso_hub declares these models and the field '
+            '(models/oidc.py, models/res_users.py). On a database where perodua_client_stable was never '
+            'installed, as each new demo-uiux database, the queries find no row: nothing moves, no row is '
+            'left, and the hook logs zero counts (former_constraint_ids gives no row also when the module has '
+            'no ir_module_module row). It moves rows; it does not install or need the module. Not reliance.'),
     ),
 }
 
