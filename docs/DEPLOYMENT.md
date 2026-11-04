@@ -2242,7 +2242,10 @@ folder of a newer kit version works as on the client line (the backup,
   password and has an email address; with `MAIL_REDIRECT_TO=off`, to that
   address. On grey this concerns only an account that someone gave the
   password `perodua` by hand: `--init-db` gave every seeded account a random
-  one.
+  one. The known ones are the SSO test accounts `womtest1` and `tmstest1`, which have
+  no email address. By the owner's decision of 4 November 2026 they keep
+  `perodua`: step 8 of the grey steps in README.md, "Upgrade the demo-uiux
+  line", gives it to them again after each module upgrade.
 - **The lock table of the way back.** A local database of the demo-uiux
   image v0.52.0 (162 modules, 671 MB, counted on 4 November 2026) has 5552
   relations and 6226 other objects: with the margin, 12778 locks, and a DB

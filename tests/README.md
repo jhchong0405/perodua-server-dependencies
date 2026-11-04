@@ -353,7 +353,10 @@ only `from`. It checks:
   grey release, or a database with another fingerprint, is refused before
   the App stops, and nothing changes. A run that stops at the question (no
   `--confirm`) shows the lock line, the guard and the plan, and changes
-  nothing (grey step 3 of the README);
+  nothing (grey step 3 of the README). The grey step of the README that
+  gives `womtest1` and `tmstest1` the password `perodua` again runs `odoo
+  shell` with the options that `deploy-app.sh` uses for `uat_admins.py`, in
+  the compose project of the demo-uiux line;
 - as root on Linux: the `service.sh` of v1.2.1
   (`fixtures/service-v1.2.1.sh`, pinned by its sha256) refuses `start`
   and `restart` on a marked database, before and after the switch, without

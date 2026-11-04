@@ -865,6 +865,25 @@ class DemoModuleUpgradeTests(ModuleUpgradeFixture, unittest.TestCase):
         self.assertEqual(self.backups(), [])
         self.assertEqual(self.db_state(), 'from')
 
+    def test_the_grey_steps_give_the_sso_test_accounts_perodua_again(self):
+        # uat_demo.py upgrade gives a new password to each account that still
+        # has perodua, except the UAT administrators. womtest1 and tmstest1
+        # keep perodua by the owner's decision of 2026-11-04, so the grey
+        # steps of README.md give it again, with odoo shell run as
+        # deploy-app.sh runs it for uat_admins.py.
+        uat_demo = (SCRIPTS / 'uat_demo.py').read_text(encoding='utf-8')
+        self.assertIn("UAT_LOGINS = ('whadmin', 'admin1', 'admin2')", uat_demo)
+        section = README.split('\n### Upgrade the demo-uiux line\n', 1)[1].split('\n## ', 1)[0]
+        shell = re.search(r"bash -c '(PGPASSWORD=\"\$DB_PASSWORD\" exec odoo shell [^']*?) < /opt/deploy/uat_admins\.py'",
+                          TEXT).group(1)
+        self.assertIn(f"  bash -c '{shell}' <<'EOF'\n", section)
+        self.assertIn('[[ -n ${SET[PROJECT_NAME]:-} ]] || PROJECT_NAME=perodua-demo-uiux', TEXT)
+        self.assertIn('sudo docker compose --project-name perodua-demo-uiux --file /opt/perodua-app-demo/compose.yml '
+                      'run --rm --no-deps -T odoo \\\n', section)
+        self.assertIn("search([('login', 'in', ['womtest1', 'tmstest1'])])", section)
+        self.assertIn("users.write({'password': 'perodua'})", section)
+        self.assertIn('perodua again: tmstest1 womtest1', section)
+
 
 @unittest.skipUnless(hasattr(os, 'geteuid') and os.geteuid() == 0 and Path('/proc/self/fd').is_dir(),
                      'service.sh needs root on Linux (the test image)')

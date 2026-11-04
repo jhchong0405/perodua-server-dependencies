@@ -628,7 +628,10 @@ fingerprint, is refused before the App stops.
 - **The seeded accounts.** After the check of `-u`, each account that still
   has the seed password `perodua` gets a new random password, added to
   `seeded-accounts.txt`, except `whadmin`, `admin1` and `admin2`. This
-  includes an account that someone gave the password `perodua` by hand. Odoo 19
+  includes an account that someone gave the password `perodua` by hand. On
+  grey, the known ones are the SSO test accounts `womtest1` and `tmstest1`. By the
+  owner's decision of 4 November 2026 they keep `perodua`, so step 8 below
+  gives it to them again. Odoo 19
   sends the email "Security Update: Password Changed" at once to each such
   account that has an email address: with `MAIL_REDIRECT_TO=off`, to that
   address. This email is not held. A run that stops after the database has
@@ -686,6 +689,24 @@ On grey (v0.55.1, with `IMAGE_MAIL=on` and `MAIL_REDIRECT_TO=off`), in a
 7. `sudo cat /opt/perodua-app-demo/seeded-accounts.txt`: the lines after
    `# TIME, module upgrade to demo-uiux-grey-v0.56.1:` name the accounts that
    got a new password. When there is no such line, no account changed.
+8. The SSO test accounts `womtest1` and `tmstest1` keep the password
+   `perodua` (owner decision, 4 November 2026; the SSO guide for Asolute
+   gives it). When step 7 names them, give them `perodua` again.
+   On the App server, run Odoo's shell as `deploy-app.sh` does:
+
+   ```bash
+   sudo docker compose --project-name perodua-demo-uiux --file /opt/perodua-app-demo/compose.yml run --rm --no-deps -T odoo \
+     bash -c 'PGPASSWORD="$DB_PASSWORD" exec odoo shell -c /etc/odoo/odoo.conf -d "$DB_NAME" --db_host="$DB_HOST" --db_port="$DB_PORT" --db_user="$DB_USER"' <<'EOF'
+   users = env['res.users'].with_context(active_test=False).search([('login', 'in', ['womtest1', 'tmstest1'])])
+   users.write({'password': 'perodua'})
+   env.cr.commit()
+   print('perodua again:', ' '.join(sorted(users.mapped('login'))))
+   EOF
+   ```
+
+   It shows `perodua again: tmstest1 womtest1`. The two accounts have no
+   email address, so Odoo sends them no "Security Update" email. Each later
+   module upgrade gives them a new password again: do this step after each.
 
 ## Repository layout
 
