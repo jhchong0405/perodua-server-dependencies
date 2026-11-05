@@ -71,9 +71,9 @@ DEFAULT_LINE = 'client-stable-uiux'
 SHA256 = re.compile(r'[0-9a-f]{64}')
 
 
-_DEMO_PIN = ('the pinned demo-uiux-grey-v0.56.1 image '
-             '(sha256:74286eb8321a965dbcdd0541ae5961135645be6e38da1a0a7acdce3c2544ae73) of revision '
-             'eefe5d72492b0cbfd81564b1dd6fd72faed394ee')
+_DEMO_PIN = ('the pinned demo-uiux-grey-v0.57.0-test1 image '
+             '(sha256:de346c665e280f6015456f0f4d606e7ae25157a18925bde7fe550ef95fe8fdd1) of revision '
+             'a2df87c0c03912d63df1ce80876ae97b8f445fb7')
 _DEMO_EARLIER = ('the images of demo-uiux-grey-v0.55.0 '
                  '(sha256:ef83c1f11dcad817ffefda3b9a6477a49d1b3a0354c83128a94af6813bfb9235) and v0.55.1 '
                  '(sha256:bbbc994a6091d775a41a42d18f5f5fed6ce57776c77d30607b09b33c513004df) of revision '
@@ -111,8 +111,8 @@ _MENU_SNAPSHOT = (
     'load_state "to upgrade"), never in the -i of a new database, and only when the installed version is '
     'lower than the version of the script. The image has perodua_demo_profile 19.0.1.240.0. --init-db runs '
     'no migration script, and the module upgrade from v0.55.0 or v0.55.1 (perodua_demo_profile '
-    '19.0.1.237.0, DEMO_MODULE_UPGRADE_FROM) runs only its scripts above 19.0.1.237.0, and the image has '
-    'none (the last one is 19.0.1.196.0): so neither runs this script. A demo-uiux database has no such key. '
+    '19.0.1.237.0) or from v0.56.1 (19.0.1.240.0, DEMO_MODULE_UPGRADE_FROM) runs only its scripts above '
+    'that version, and the image has none (the last one is 19.0.1.196.0): so neither runs this script. A demo-uiux database has no such key. '
     'A migration of an earlier version, not reliance.')
 # References that were read and found NOT to be reliance, per line, each pinned
 # to the exact bytes of the file it was reviewed in. A changed file voids its
@@ -186,7 +186,7 @@ REVIEWED_REFERENCES = {
     # its parameters and its signatures.
     'demo-uiux': (
         *_review(
-            'perodua_demo/gallery.pyc', '6a53291c1916ece242132ed2c226dce9089e184022017a994b0401817862756a',
+            'perodua_demo/gallery.pyc', '7c3a2f06d275d9c874575d5c832395c0cc50c3a06b6fa55e77d2a79b9c857399',
             ('perodua_client_stable',),
             'EXPORT_MOCK_BLOCKING_MODULE, a module name as a search value, not an import, an XML ID or a '
             'path: mock_data_refusal() counts the ir.module.module rows of that name in a state other than '
@@ -201,19 +201,19 @@ REVIEWED_REFERENCES = {
             'a46f478959bc7b30948ead7010b8f2cf5fa27901e9d905d4f4e504d375b8b535'),
         *(review
           for version, sha256, earlier, change in (
-              ('19.0.1.100.0', '9181ec9e17a4843546e813a0323e0efe71daab8067c1d1b8ca1e299a6edd2993',
+              ('19.0.1.100.0', 'c0c9ed69e5d4e68e95d131edfbdb8fdb1447327623ae55eb67c35ee4f10cdec0',
                'a9f21831d2c25141574a3eb51b5dcb3e31bf2cd78d86b44dbe3e5c1645f740a1',
                'Outcome 10.22 Setup > Material (#1721): Part Material, Storage Zone and Car Model'),
-              ('19.0.1.102.0', '0700bf7a08518779dfc375ae171857ad4fac1fea1fa724fe933766a3f9720ac2',
+              ('19.0.1.102.0', 'feee48c007594164ee9da69885103eb0a3958c8065d74fb2ff4bdef77e1eeb6d',
                '200abc91b84d2bcfbd6ab3980d9a840325736edc817e3a57ee4868dd166185fa',
                'Outcome 10.22 Setup > Material (#1721): Box Size'),
-              ('19.0.1.103.0', '53168e099c94107a307056610a76f1b66c00233a183b7f28e2f02d318b09b11f',
+              ('19.0.1.103.0', 'c53db6ad6a1873ebe3754c11705765ab7722b92948c6c2e0104e3b9fa902f0e8',
                '30b6ae9e2872c13e432ef362debfef0898ba7eddc93e019c0ab58379f405e728',
                'Test Outcome 10.22 R28 (#1738): Public Holiday'),
-              ('19.0.1.128.0', '5e25dec3dc2bd40c8986dfae089b0fdcd9a93142426cbb3d4403e1aa7d7e1ce5',
+              ('19.0.1.128.0', '1aabf73184987f3a12d7fca4ae6b7b76b77a7f64f57d8376a4c2db63fc4eab6a',
                'b270c1bb58c9692b58af07ed62cb3d9cecd108ef302a0afddcda7817c37c12af',
                'Test Outcome 10.26 Menu Arrangement tab (#1887) and Sales Order (#1906): five menus'),
-              ('19.0.1.196.0', '361826f5327d126fafd38f4cfafbfbdb026c52f80172e2d73e3c2086191f22f0',
+              ('19.0.1.196.0', '276b85ee1839e205feef6311d04de42045abc8ad58a0197a452500c6d853ca2d',
                '9925054de5bd788841d7913692c6d605d4541ea7603c5d77f58429be8481700a',
                'Test Outcome 10.27 R41 (#1991): Direct Delivery Job'))
           for review in _review(
@@ -221,7 +221,7 @@ REVIEWED_REFERENCES = {
               ('perodua_client_stable.menu_arrangement.v1',),
               f'The post-migrate script of version {version} ({change}). ' + _MENU_SNAPSHOT, earlier)),
         *_review(
-            'perodua_sso_hub/controllers/hosts.pyc', 'c4fd93355f2dac808105f5802f0427c043e1dc55cd96382b998afefb79e21985',
+            'perodua_sso_hub/controllers/hosts.pyc', 'f01b0a2710c6ec918dd9d56fdaaf220a1e9704cc52168b04c7bbd43ecd43c1d0',
             ('perodua_client_stable.hosts',),
             'HOSTS_PARAM, ' + _PARAMETER + ': host_table() reads the host table (JSON) with get_param, and '
             'without the key, or with a value that is not valid, it uses DEFAULT_HOSTS of the same file '
@@ -234,7 +234,7 @@ REVIEWED_REFERENCES = {
             'admit) and external_roles(), which reads the same table through host_table(). WORKSPACE_CODES '
             'keeps its seven codes.'),
         *_review(
-            'perodua_sso_hub/controllers/handover.pyc', 'beddf5ba2ec071bba5b30fa758d68cb91514ca7b294136d26180bbb865bc23df',
+            'perodua_sso_hub/controllers/handover.pyc', 'f9a3b5787feaed9fe65d5b1aeda372ad7575300fda5a2bfc93979ea73e8f294c',
             ('perodua_client_stable.handover.pending.v1', 'perodua_client_stable.handover.spent.',
              'perodua_client_stable.handover.v1', 'perodua_client_stable.handover.verifier.v1',
              'perodua_client_stable.module_signin'),
@@ -255,7 +255,7 @@ REVIEWED_REFERENCES = {
             'hosts.external_roles() gives that host.'),
         *_review(
             'perodua_sso_hub/controllers/oidc_clients.pyc',
-            'b64beb5336f4a5622d1e44ce7f616a4f7c7f8f598b525273bc7c04ce48d3b1f9',
+            '1b67fbc631e0d08e2457c75d9c4542935931e476431a1b391d256dc4894fb3f1',
             ('perodua_client_stable.oidc.sid.v2', 'perodua_client_stable.oidc_clients'),
             'Two names. CLIENTS_PARAM (perodua_client_stable.oidc_clients) is ' + _PARAMETER + ': '
             'external_clients() reads it with get_param, and without the key it uses default_clients() of '
@@ -265,14 +265,14 @@ REVIEWED_REFERENCES = {
             'perodua_sso_hub itself (models/res_users.py). Not reliance.',
             '221ec7ce1c5cd0dd51d298e7c919a5338c91a128a7624a994c0adb4312f6d1ee'),
         *_review(
-            'perodua_sso_hub/controllers/binding.pyc', 'b93d541abcdaeaea6ded012f05586b1129338cfd7d1f919e1b46dbb1e17334f0',
+            'perodua_sso_hub/controllers/binding.pyc', '51f25c7796c4d6e987132515d61f6a091eb922cfba72cd579f4b758315e41323',
             ('perodua_client_stable.bind.v1',),
             'SCOPE, ' + _HMAC_SCOPE + ', for the value of the __Host-perodua_bind_<env> cookie (an HMAC '
             'of the random perodua_bind value of the session). It is not a key of ir.config_parameter. Not '
             'reliance.',
             '838cb6dcad8f0d712deaf6f117da35bc80ecc3939ac0c9947572a3a84ce67cd0'),
         *_review(
-            'perodua_sso_hub/hooks.pyc', '7d30f39d4d43122bcbd3af8c26748297dca46df4e0408348861c12493e186af4',
+            'perodua_sso_hub/hooks.pyc', '83e5eccd7b90efdce12ad422a5399aaa2d4fddec3a3d160f970ec1a77c0d0a11',
             ('perodua_client_stable',),
             'FORMER_OWNER, a module name as a value in the SQL of pre_init_hook, not an import, an XML ID or '
             'a path: the hook moves to perodua_sso_hub the ir_model_data rows of that module, and the '
@@ -282,7 +282,7 @@ REVIEWED_REFERENCES = {
             '(models/oidc.py, models/res_users.py). On a database where perodua_client_stable was never '
             'installed, as each new demo-uiux database, the queries find no row: nothing moves, no row is '
             'left, and the hook logs zero counts (former_constraint_ids gives no row also when the module has '
-            'no ir_module_module row). The module upgrade from v0.55.0 or v0.55.1 does not run the hook: Odoo '
+            'no ir_module_module row). The module upgrade from v0.55.0, v0.55.1 or v0.56.1 does not run the hook: Odoo '
             'runs pre_init_hook only when it installs the module. It moves rows; it does not install or need the '
             'module. Not reliance.',
             'c4e762e454e4ad18767d80e911a6182a339c2374d1e8d1d560c10eae741c07af'),

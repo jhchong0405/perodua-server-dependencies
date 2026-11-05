@@ -76,10 +76,10 @@ OLD_RELEASES_ACCEPTED=client-stable-uiux-v1.2.1
 # /etc/perodua/mail (owner decision 2026-11-04), as in v0.55.1: IMAGE_MAIL=on
 # in app.env sends with them. The web image is the one of v0.56.0, which is
 # v0.56.1 without the mail settings, as v0.55.0 was to v0.55.1.
-DEMO_RELEASE=demo-uiux-grey-v0.56.1
-DEMO_REVISION=eefe5d72492b0cbfd81564b1dd6fd72faed394ee
-DEMO_ODOO_IMAGE=perodua-deploy.novutal.com/perodua-odoo:demo-uiux-grey-v0.56.1@sha256:74286eb8321a965dbcdd0541ae5961135645be6e38da1a0a7acdce3c2544ae73
-DEMO_WEB_IMAGE=perodua-deploy.novutal.com/perodua-odoo:demo-uiux-grey-web-v0.56.1@sha256:0cd02045cec3fc0d266b40bdc3b8b2f379af9d50cfe329e858f4fef7268c5622
+DEMO_RELEASE=demo-uiux-grey-v0.57.0-test1
+DEMO_REVISION=a2df87c0c03912d63df1ce80876ae97b8f445fb7
+DEMO_ODOO_IMAGE=perodua-deploy.novutal.com/perodua-odoo:demo-uiux-grey-v0.57.0-test1@sha256:de346c665e280f6015456f0f4d606e7ae25157a18925bde7fe550ef95fe8fdd1
+DEMO_WEB_IMAGE=perodua-deploy.novutal.com/perodua-odoo:demo-uiux-grey-web-v0.57.0-test1@sha256:852c397e26d2974a804d03ea0d677eaf24a17a00fbff503e4b97c69d371045bc
 # --init-db: the modules the entrypoint of the image installs on a new database
 # of the demo-uiux profile (docker/entrypoint.sh, DEFAULT_INIT_MODULES), and
 # perodua_sso_hub, with the demo seed of their install hooks. uat_guard.py
@@ -95,8 +95,8 @@ DEMO_RESTORED_MODULES=perodua_demo_ui,perodua_portal,perodua_portal_workspaces,p
 # (fingerprint 64c105d49204847ccc054fc50c1c28a5: 11 new versions, and the new
 # dependencies perodua_external_access of perodua_portal and auth_totp_mail
 # of perodua_uiux_api), so --upgrade from either of them runs a -u.
-DEMO_MODULE_UPGRADE_FROM=f439f02d565f7782f8f3d9461ca3cb70
-DEMO_OLD_RELEASES_ACCEPTED=demo-uiux-grey-v0.55.0,demo-uiux-grey-v0.55.1
+DEMO_MODULE_UPGRADE_FROM=f439f02d565f7782f8f3d9461ca3cb70,64c105d49204847ccc054fc50c1c28a5
+DEMO_OLD_RELEASES_ACCEPTED=demo-uiux-grey-v0.55.0,demo-uiux-grey-v0.55.1,demo-uiux-grey-v0.56.1
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 DEPLOY_DIR=/opt/perodua-app
 CONFIG='' NON_INTERACTIVE=0 INIT_DB=0 CHECK_ONLY=0 TEMP_DIR='' AUTH_DIR='' STARTED=0

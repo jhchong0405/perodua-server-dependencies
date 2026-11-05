@@ -692,6 +692,8 @@ NO_IMAGE_MAIL = re.search(r'^NO_IMAGE_MAIL_RELEASES=(\S+)$', TEXT, re.M).group(1
 GREY, FIRST_GREY = 'demo-uiux-grey-v0.55.1', 'demo-uiux-grey-v0.55.0'
 GREY_REVISION = '634599e70b38471b6ecb9bf331177fc5be31e822'
 GREY_FINGERPRINT = 'f439f02d565f7782f8f3d9461ca3cb70'
+LATEST_GREY, LATEST_GREY_REVISION = 'demo-uiux-grey-v0.56.1', 'eefe5d72492b0cbfd81564b1dd6fd72faed394ee'
+LATEST_GREY_FINGERPRINT = '64c105d49204847ccc054fc50c1c28a5'
 DEMO_MODULES = 'perodua_portal,perodua_sso_hub,perodua_uiux_api'
 # After the switch, the demo-uiux line gives a new password to each account
 # that still has the seed password (uat_demo.py upgrade), before the App starts.
@@ -707,10 +709,10 @@ class DemoModuleUpgradeTests(ModuleUpgradeFixture, unittest.TestCase):
         self.env['FAKE_MODULES'] = DEMO_MODULES
         self.demo_directory(GREY)
 
-    def demo_directory(self, release, image_mail=True):
+    def demo_directory(self, release, image_mail=True, revision=GREY_REVISION):
         """A directory as the kit of release left it: grey adds IMAGE_MAIL=on
         and MAIL_REDIRECT_TO=off to app.env (owner decision 2026-11-04)."""
-        self.deployed(release, GREY_REVISION)
+        self.deployed(release, revision)
         self.identity += 'line=demo-uiux\n'
         (self.deploy_dir / '.deployment-identity').write_text(self.identity)
         mail = {'IMAGE_MAIL': 'on', 'MAIL_REDIRECT_TO': 'off'} if image_mail else {}
@@ -733,7 +735,8 @@ class DemoModuleUpgradeTests(ModuleUpgradeFixture, unittest.TestCase):
         # that can carry it. The pinned image has another fingerprint, so the
         # database check of an --upgrade answers MODULE_UPGRADE.
         self.assertIn(GREY_FINGERPRINT, DEMO_FROM)
-        self.assertEqual(DEMO_ACCEPTED, [FIRST_GREY, GREY])
+        self.assertIn(LATEST_GREY_FINGERPRINT, DEMO_FROM)
+        self.assertEqual(DEMO_ACCEPTED, [FIRST_GREY, GREY, LATEST_GREY])
         self.assertNotIn(DEMO_RELEASE, DEMO_ACCEPTED)
         # The scripts folder of v0.55.0 refuses IMAGE_MAIL; that of v0.55.1 knows it.
         self.assertEqual(NO_IMAGE_MAIL, [FIRST_GREY])
@@ -771,6 +774,24 @@ class DemoModuleUpgradeTests(ModuleUpgradeFixture, unittest.TestCase):
         hint = (backup / 'restore.txt').read_text()
         self.assertIn('This upgrade runs a module upgrade (-u).', hint)
         self.assertIn(f'Then, from a scripts folder of {GREY}: sudo bash deploy-app.sh --dir {self.deploy_dir}', hint)
+
+    def test_a_directory_of_v0_56_1_takes_the_module_upgrade_to_the_pinned_release(self):
+        self.demo_directory(LATEST_GREY, revision=LATEST_GREY_REVISION)
+        result = self.upgrade()
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn(f'Upgrade of {self.deploy_dir} from {LATEST_GREY} ({LATEST_GREY_REVISION}) to {DEMO_RELEASE} '
+                      f'({DEMO_REVISION}).', result.stdout)
+        self.assertIn(f'Database perodua has the modules of {LATEST_GREY} (fingerprint one of {", ".join(DEMO_FROM)}). '
+                      f'{DEMO_RELEASE} has other modules: this upgrade runs a module upgrade (-u) of 3 modules.',
+                      result.stdout)
+        self.assertIn('staged odoo -u', self.names())
+        self.assertIn(f'Deployment verified: {DEMO_RELEASE} ({DEMO_REVISION})', result.stdout)
+        [backup] = self.backups()
+        self.assertEqual(backup.name.split('-', 1)[1], LATEST_GREY)
+        self.assertEqual((backup / 'app.env').read_text(), self.app_env)
+        self.assertIn(f'Then, from a scripts folder of {LATEST_GREY}: sudo bash deploy-app.sh --dir {self.deploy_dir}',
+                      (backup / 'restore.txt').read_text())
+        self.assertIn('IMAGE_MAIL=on\n', (self.deploy_dir / 'app.env').read_text())
 
     def test_the_image_mail_lines_stay_in_app_env_through_the_module_upgrade_and_the_backup(self):
         result = self.upgrade()
@@ -844,8 +865,9 @@ class DemoModuleUpgradeTests(ModuleUpgradeFixture, unittest.TestCase):
     def test_another_fingerprint_is_refused(self):
         result = self.upgrade(other_fingerprint=1)
         names = ', '.join(release.rsplit('-', 1)[1] for release in DEMO_ACCEPTED)
+        fingerprints = DEMO_FROM[0] if len(DEMO_FROM) == 1 else 'one of ' + ', '.join(DEMO_FROM)
         self.assert_demo_refused_before_the_stop(
-            result, GREY, f'It upgrades modules (-u) only from the modules of {names} (fingerprint {DEMO_FROM[0]})')
+            result, GREY, f'It upgrades modules (-u) only from the modules of {names} (fingerprint {fingerprints})')
 
     def test_a_run_that_stops_at_the_question_shows_the_locks_and_changes_nothing(self):
         # Grey step 3 of README.md: before the time when nobody works, a run
