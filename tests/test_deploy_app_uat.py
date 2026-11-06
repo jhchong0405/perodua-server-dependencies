@@ -17,6 +17,7 @@ import re
 import select
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -741,6 +742,7 @@ class UatOrchestrationTests(unittest.TestCase):
         self.assertIn('odoo shell log line', (self.deploy_dir / 'uat-demo.log').read_text())
         self.assertIn('UAT administrators (UAT only, fixed password): whadmin, admin1, admin2 / perodua', result.stdout)
         self.assertIn('Portal mode: off', result.stdout)
+        self.assertIn('The 17:00 Job Order Inbound run: on.', result.stdout)
         # The directory names its line.
         self.assertIn('line=demo-uiux\n', (self.deploy_dir / '.deployment-identity').read_text())
         self.assertTrue((self.deploy_dir / 'app.env').read_text().startswith('PERODUA_LINE=demo-uiux\n'))
@@ -1373,6 +1375,213 @@ class UatAdminScriptTests(unittest.TestCase):
         self.assertIn("PASSWORD = 'perodua'", self.source)
         self.assertIn("LOGINS = (('whadmin', 'WH Admin'), ('admin1', 'Admin 1'), ('admin2', 'Admin 2'))",
                       self.source)
+
+
+INBOUND_JOB = 'perodua_supplier_execution.cron_perodua_inbound_job_orders'
+
+# A fake `odoo shell` for uat_demo.py: the ORM calls and the SQL that the
+# script makes, on a small demo database. Arguments: the script and a file for
+# the state at the end. FAKE_JOB_ACTIVE is the flag of the 17:00 Job Order
+# Inbound run before the job; FAKE_PORTAL_MODE=0 is an image without the
+# portal mode model. Any other model or SQL stops the run.
+FAKE_ODOO_SHELL = r"""
+import json, os, sys
+script, state_path = sys.argv[1], sys.argv[2]
+os.dup2(0, 3)  # as deploy-app.sh: exec 3<&0
+state = {'writes': [], 'refs': [], 'committed': False}
+config = {}
+
+class Crypt:
+    def verify(self, password, hashed):
+        return hashed == 'hash:' + password
+
+class User:
+    def __init__(self, id, login, share=False, active=True, password='perodua'):
+        self.id, self.login, self.share, self.active = id, login, share, active
+        self.password = 'hash:' + password if password else ''
+    def write(self, values):
+        state['writes'].append(['res.users', self.login, sorted(values)])
+        if set(values) != {'password'}:
+            raise AssertionError('unexpected write on res.users: %r' % sorted(values))
+        self.password = 'hash:' + values['password']
+
+class Records:
+    def __init__(self, model, ids):
+        self.model, self.ids = model, list(ids)
+    def __iter__(self):
+        return (self.model.rows[i] for i in self.ids)
+    def __bool__(self):
+        return bool(self.ids)
+    def __len__(self):
+        return len(self.ids)
+    def __or__(self, other):
+        return Records(self.model, self.ids + [i for i in other.ids if i not in self.ids])
+    def __and__(self, other):
+        return Records(self.model, [i for i in self.ids if i in other.ids])
+    def mapped(self, name):
+        return [getattr(row, name) for row in self]
+    def filtered(self, test):
+        return Records(self.model, [row.id for row in self if test(row)])
+    def sorted(self, name):
+        return Records(self.model, [row.id for row in sorted(self, key=lambda row: getattr(row, name))])
+
+class Users:
+    _fields = {'login': None, 'password': None, 'share': None, 'active': None}
+    def __init__(self, rows):
+        self.rows = {row.id: row for row in rows}
+    def with_context(self, **context):
+        return self
+    def _crypt_context(self):
+        return Crypt()
+    def browse(self, ids=()):
+        return Records(self, ids)
+    def search(self, domain):
+        [(field, operator, values)] = domain
+        if (field, operator) != ('login', 'in'):
+            raise AssertionError('unexpected search: %r' % domain)
+        return Records(self, [row.id for row in self.rows.values() if row.login in values])
+
+class Job:
+    def __init__(self, active):
+        self.active = active
+    def write(self, values):
+        state['writes'].append(['ir.cron', 'cron_perodua_inbound_job_orders', sorted(values)])
+        self.__dict__.update(values)
+
+class PortalMode:
+    def set_mode(self, mode):
+        config['perodua_uiux_api.portal_mode'] = mode
+
+class Cursor:
+    result = []
+    def execute(self, query, params=()):
+        if query.startswith("SELECT id, COALESCE(password, '') FROM res_users WHERE id IN "):
+            self.result = [(i, users.rows[i].password) for i in params[0]]
+        elif query == "SELECT id FROM res_users WHERE COALESCE(password, '') <> '' ORDER BY id":
+            self.result = [(i,) for i in sorted(users.rows) if users.rows[i].password]
+        elif query == 'SELECT value FROM ir_config_parameter WHERE key = %s':
+            self.result = [(config[params[0]],)] if params[0] in config else []
+        else:
+            raise AssertionError('unexpected SQL: ' + query)
+    def fetchall(self):
+        return self.result
+    def fetchone(self):
+        return self.result[0] if self.result else None
+    def commit(self):
+        state['committed'] = True
+
+class Env:
+    cr = Cursor()
+    def __init__(self, models, refs):
+        self.models, self.refs = models, refs
+    def __contains__(self, name):
+        return name in self.models
+    def __getitem__(self, name):
+        if name not in self.models:
+            raise AssertionError('unexpected model: ' + name)
+        return self.models[name]
+    def ref(self, xmlid, raise_if_not_found=True):
+        state['refs'].append(xmlid)
+        if xmlid not in self.refs and raise_if_not_found:
+            raise ValueError(xmlid)
+        return self.refs.get(xmlid)
+    def flush_all(self):
+        pass
+
+users = Users([User(1, '__system__', password=''), User(2, 'admin', active=False), User(3, 'whadmin'),
+               User(4, 'admin1'), User(5, 'admin2'), User(6, 'buyer'),
+               User(7, 'supplier1', share=True, password=os.environ.get('FAKE_SUPPLIER_PASSWORD', 'perodua'))])
+job = Job(os.environ['FAKE_JOB_ACTIVE'] == '1')
+models = {'res.users': users}
+if os.environ.get('FAKE_PORTAL_MODE', '1') == '1':
+    models['perodua.portal.mode'] = PortalMode()
+env = Env(models, {'base.user_root': users.browse([1]), 'base.user_admin': users.browse([2]),
+                   'perodua_supplier_execution.cron_perodua_inbound_job_orders': job})
+try:
+    with open(script, encoding='utf-8') as source:
+        exec(compile(source.read(), script, 'exec'), {'env': env, '__name__': '__main__'})
+finally:
+    state.update(job_active=job.active, config=config)
+    with open(state_path, 'w', encoding='utf-8') as out:
+        json.dump(state, out)
+"""
+
+
+class UatDemoScriptTests(unittest.TestCase):
+    """uat_demo.py itself, in a fake `odoo shell` (FAKE_ODOO_SHELL). A real
+    Odoo database is proven by the lab rehearsal of a demo-uiux image."""
+
+    source = (SCRIPTS / 'uat_demo.py').read_text(encoding='utf-8')
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix='perodua-uat-demo-test-')
+        self.addCleanup(temp.cleanup)
+        self.state_path = Path(temp.name) / 'state.json'
+
+    def shell(self, mode, step, plan='', job_active=True, **fake):
+        environment = {**os.environ, 'PERODUA_UAT_DEMO': mode, 'PERODUA_UAT_DEMO_STEP': step,
+                       'FAKE_JOB_ACTIVE': '1' if job_active else '0', **fake}
+        result = subprocess.run([sys.executable, '-c', FAKE_ODOO_SHELL, str(SCRIPTS / 'uat_demo.py'),
+                                 str(self.state_path)], input=plan, capture_output=True, text=True,
+                                env=environment, timeout=60)
+        state = json.loads(self.state_path.read_text(encoding='utf-8'))
+        return result, state
+
+    def job(self, mode, job_active=True, **fake):
+        """The plan step, then the apply step with the lines of the plan, as deploy-app.sh runs them."""
+        plan, state = self.shell(mode, 'plan', job_active=job_active, **fake)
+        self.assertEqual(plan.returncode, 0, plan.stderr)
+        self.assertEqual(state['writes'], [])
+        self.assertFalse(state['committed'])
+        lines = [line for line in plan.stdout.splitlines() if line.startswith('SEEDED_ACCOUNT\t')]
+        self.assertEqual(plan.stdout.splitlines()[-1], f'UAT demo: planned: {len(lines)}')
+        apply, state = self.shell(mode, 'apply', ''.join(line + '\n' for line in lines), job_active, **fake)
+        self.assertEqual(apply.returncode, 0, apply.stderr)
+        return [line.split('\t')[1] for line in lines], apply, state
+
+    def test_compiles(self):
+        compile(self.source, 'uat_demo.py', 'exec')
+
+    def test_the_install_job_leaves_the_17_00_job_order_inbound_run_as_the_image_installs_it(self):
+        # Owner decision 2026-11-07 reverses w4d on the demo-uiux line: the
+        # install job does not change the active flag of the run, on or off.
+        for job_active in (True, False):
+            with self.subTest(job_active=job_active):
+                logins, apply, state = self.job('install', job_active)
+                self.assertEqual(state['job_active'], job_active)
+                self.assertEqual([write for write in state['writes'] if write[0] != 'res.users'], [])
+                self.assertNotIn(INBOUND_JOB, state['refs'])
+                # The rest of the install job is as before.
+                self.assertEqual(logins, ['buyer', 'supplier1'])
+                self.assertEqual(state['writes'], [['res.users', 'buyer', ['password']],
+                                                   ['res.users', 'supplier1', ['password']]])
+                self.assertEqual(state['config'], {'perodua_uiux_api.portal_mode': 'off'})
+                self.assertTrue(state['committed'])
+                self.assertEqual(apply.stdout.splitlines()[-1],
+                                 'UAT demo: ready: 2 seeded accounts have a new random password; portal mode off')
+        self.assertNotIn('cron_perodua_inbound_job_orders', self.source)
+        self.assertNotIn('ir.cron', self.source)
+
+    def test_the_install_job_stops_on_an_image_without_the_portal_mode_switch(self):
+        for step in ('plan', 'apply'):
+            with self.subTest(step=step):
+                result, state = self.shell('install', step, FAKE_PORTAL_MODE='0')
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('UAT demo: perodua.portal.mode is missing: the image has no portal mode switch',
+                              result.stderr)
+                self.assertEqual(result.stdout, '')
+                self.assertEqual(state['writes'], [])
+                self.assertFalse(state['committed'])
+                self.assertTrue(state['job_active'])
+
+    def test_the_upgrade_job_changes_only_the_passwords_that_are_still_perodua(self):
+        logins, apply, state = self.job('upgrade', FAKE_SUPPLIER_PASSWORD='changed')
+        self.assertEqual(logins, ['buyer'])
+        self.assertEqual(state['writes'], [['res.users', 'buyer', ['password']]])
+        self.assertEqual(state['config'], {})
+        self.assertTrue(state['job_active'])
+        self.assertTrue(state['committed'])
+        self.assertEqual(apply.stdout.splitlines()[-1], 'UAT demo: ready: 1 seeded accounts have a new random password')
 
 
 if __name__ == '__main__':

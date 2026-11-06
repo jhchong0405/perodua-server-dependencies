@@ -430,7 +430,7 @@ the top of the script:
 | A new database (`--init-db`) | no business data | the demo seed: sample data, mock screens and personas |
 | Accounts of a new database | `whadmin`, `admin1`, `admin2` / `perodua`; the business roles also `perodua` | `whadmin`, `admin1`, `admin2` / `perodua`; each other account a new random password, in `seeded-accounts.txt` (root only) |
 | Portal accounts | refused | portal mode `off` until portal users sign in through the hub |
-| 17:00 Job Order Inbound run | off | off |
+| 17:00 Job Order Inbound run | off | on (owner decision of 2026-11-07; w4d stays on the client-stable-uiux line) |
 | Mock intake pulls (PROMISE, PSS, PSOS, P-Circle) | off while in mock mode, after `--init-db` and after a module upgrade | on, as on the demo line; a module upgrade keeps the flag that each one had |
 | Outgoing email | off until `SMTP_HOST` is set | the same (`PERODUA_MAIL=off` without `SMTP_HOST`), or `IMAGE_MAIL=on`: the test Gmail settings inside the Odoo image (below) |
 | Default `PROJECT_NAME` and `DB_NAME` | `perodua-client-uiux`, `perodua` | `perodua-demo-uiux`, `perodua_demo` |

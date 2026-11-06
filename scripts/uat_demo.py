@@ -13,8 +13,9 @@
 #            them "perodua", as on the client-stable-uiux line), the native
 #            Administrator (uat_admins.py archives it) and the technical
 #            superuser. Then the portal mode is off, through its own switch:
-#            portal accounts sign in through the hub only later. And the 17:00
-#            run of Job Order Inbound is off (owner decision w4d).
+#            portal accounts sign in through the hub only later. The job does
+#            not touch the 17:00 run of Job Order Inbound: the owner decision
+#            of 2026-11-07 reverses w4d on the demo-uiux line.
 #   upgrade  after a module upgrade (-u) to another demo-uiux release: each
 #            account with the same exceptions whose password is still
 #            "perodua" (such as a persona that the new release adds) gets a
@@ -63,7 +64,6 @@ LENGTH = 20
 PORTAL_MODE_MODEL = 'perodua.portal.mode'
 PORTAL_MODE_PARAM = 'perodua_uiux_api.portal_mode'
 PORTAL_MODE = 'off'
-INBOUND_JOB = 'perodua_supplier_execution.cron_perodua_inbound_job_orders'
 
 
 def fail(message):
@@ -102,14 +102,10 @@ def kind(user):
     return ('portal' if user.share else 'internal') + ('' if user.active else ', archived')
 
 
-def inbound_job():
-    """The 17:00 Job Order Inbound run, when the image has both switches of the install job."""
+def check_portal_mode_switch():
+    """Stops the install job when the image has no portal mode switch."""
     if PORTAL_MODE_MODEL not in env:  # noqa: F821
         fail(f'{PORTAL_MODE_MODEL} is missing: the image has no portal mode switch')
-    job = env.ref(INBOUND_JOB, raise_if_not_found=False)  # noqa: F821
-    if not job:
-        fail(f'{INBOUND_JOB} is missing, so its 17:00 run cannot be kept off')
-    return job
 
 
 def read_plan():
@@ -161,7 +157,6 @@ def apply_step():
         user.write({'password': passwords[user.id]})
     if MODE == 'install':
         env[PORTAL_MODE_MODEL].set_mode(PORTAL_MODE)  # noqa: F821
-        job.write({'active': False})
     env.flush_all()  # noqa: F821
 
     # ── checks: any failure rolls everything above back ─────────────────────
@@ -181,13 +176,11 @@ def apply_step():
         row = env.cr.fetchone()  # noqa: F821
         if not row or row[0] != PORTAL_MODE:
             fail(f'the portal mode is not {PORTAL_MODE}')
-        if job.active:
-            fail(f'{INBOUND_JOB} is still active')
 
     env.cr.commit()  # noqa: F821
     done = f'{len(accounts)} seeded accounts have a new random password'
     if MODE == 'install':
-        done += f'; portal mode {PORTAL_MODE}; {INBOUND_JOB} off'
+        done += f'; portal mode {PORTAL_MODE}'
     print(f'UAT demo: ready: {done}')
 
 
@@ -201,7 +194,8 @@ admins = Users.search([('login', 'in', UAT_LOGINS)])
 if sorted(admins.mapped('login')) != sorted(UAT_LOGINS):
     fail(f'the UAT administrators {", ".join(UAT_LOGINS)} are not all there: uat_admins.py runs first')
 kept = admins | env.ref('base.user_root') | env.ref('base.user_admin')  # noqa: F821
-job = inbound_job() if MODE == 'install' else None
+if MODE == 'install':
+    check_portal_mode_switch()
 if STEP == 'plan':
     plan_step()
 else:

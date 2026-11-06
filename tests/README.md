@@ -1065,6 +1065,14 @@ compose file, `app.env` and identity get no line settings.
   its syntax, the old App started again after a failure, unless it was not
   running) and its refusals before Docker; and that the deploy-app.sh has one
   plain `RELEASE=`, `REVISION=`, `DEMO_RELEASE=` and `DEMO_REVISION=` line.
+  `UatDemoScriptTests` runs `uat_demo.py` itself in a fake `odoo shell`
+  (`FAKE_ODOO_SHELL`): the install job (the plan, then the apply step with
+  the plan on file descriptor 3) gives the seeded accounts new passwords and
+  switches the portal mode off, but keeps the active flag of the 17:00 Job
+  Order Inbound run as the image installs it, on or off (owner decision of
+  2026-11-07); an image without `perodua.portal.mode` stops both steps before
+  any change; and the upgrade job gives a new password only to the accounts
+  that still have `perodua`.
 - `test_preflight_module_upgrade.py` runs `preflight.py` with
   `PERODUA_IMAGE_PROFILE=demo-uiux`: an `upgrade-check` from a fingerprint of
   the comma list, the refusal without it, each line refusing the database of

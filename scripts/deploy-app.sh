@@ -216,8 +216,9 @@ demo-uiux line, --init-db gives the new database the demo seed (sample data,
 mock screens and personas) and each seeded account a new random password,
 listed only in --dir/seeded-accounts.txt (root only; a run that stops before
 it lists them keeps them in --dir/seeded-accounts.pending, root only, and a
-rerun lists them); the portal mode is off and the 17:00 Job Order Inbound run
-stays off. Without SMTP_HOST or IMAGE_MAIL=on, mail is off.
+rerun lists them); the portal mode is off. The 17:00 Job Order Inbound run
+stays as the image installs it (on). Without SMTP_HOST or IMAGE_MAIL=on, mail
+is off.
 --replace DIR: this deployment takes the place of the one in DIR, which has
 another project and another database, such as the client-stable-uiux line on
 the same port. Right before this App starts, the App of DIR stops; nothing of
@@ -2632,7 +2633,7 @@ uat_demo() {
         uat_demo_apply "$mode" "$pending"
     fi
     if [[ $mode == install ]]; then
-        printf 'Giving each account of the demo seed a new random password, and switching the portal mode and the 17:00 Job Order Inbound run off...\n'
+        printf 'Giving each account of the demo seed a new random password, and switching the portal mode off...\n'
     else
         printf 'Giving each account that still has the seed password a new random password...\n'
     fi
@@ -3055,7 +3056,7 @@ if ((FRESH)); then
     if [[ $LINE == demo-uiux ]]; then
         printf 'The other %s accounts of the demo seed (roles, portal logins, personas) have random passwords: sudo cat %q\n' \
             "${SEEDED:-0}" "$DEPLOY_DIR/seeded-accounts.txt"
-        printf 'Portal mode: off (portal accounts sign in through the hub later). The 17:00 Job Order Inbound run: off.\n'
+        printf 'Portal mode: off (portal accounts sign in through the hub later). The 17:00 Job Order Inbound run: on.\n'
     fi
 fi
 printf 'HTTP only. Configure a trusted HTTPS entry point before exposing real credentials.\n'
