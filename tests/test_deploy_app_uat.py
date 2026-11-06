@@ -742,7 +742,7 @@ class UatOrchestrationTests(unittest.TestCase):
         self.assertIn('odoo shell log line', (self.deploy_dir / 'uat-demo.log').read_text())
         self.assertIn('UAT administrators (UAT only, fixed password): whadmin, admin1, admin2 / perodua', result.stdout)
         self.assertIn('Portal mode: off', result.stdout)
-        self.assertIn('The 17:00 Job Order Inbound run: on.', result.stdout)
+        self.assertIn('The 17:00 Job Order Inbound run: as the image installs it (not changed).', result.stdout)
         # The directory names its line.
         self.assertIn('line=demo-uiux\n', (self.deploy_dir / '.deployment-identity').read_text())
         self.assertTrue((self.deploy_dir / 'app.env').read_text().startswith('PERODUA_LINE=demo-uiux\n'))

@@ -3056,7 +3056,7 @@ if ((FRESH)); then
     if [[ $LINE == demo-uiux ]]; then
         printf 'The other %s accounts of the demo seed (roles, portal logins, personas) have random passwords: sudo cat %q\n' \
             "${SEEDED:-0}" "$DEPLOY_DIR/seeded-accounts.txt"
-        printf 'Portal mode: off (portal accounts sign in through the hub later). The 17:00 Job Order Inbound run: on.\n'
+        printf 'Portal mode: off (portal accounts sign in through the hub later). The 17:00 Job Order Inbound run: as the image installs it (not changed).\n'
     fi
 fi
 printf 'HTTP only. Configure a trusted HTTPS entry point before exposing real credentials.\n'

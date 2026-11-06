@@ -2037,7 +2037,9 @@ stopped in between, as on the client line.
   change: it stays on, as the image installs it (owner decision of
   2026-11-07, which reverses w4d on the demo-uiux line; w4d stays on the
   client-stable-uiux line). A module upgrade puts the cron flags back as
-  before it, so it stays on.
+  before it. So a database that `--init-db` of kit PR #40 to #43 set up, such
+  as grey, keeps the run off until you switch it on once (step 9 of the grey
+  upgrade in the README).
 - **The mock intake pulls** (PROMISE, PSS, PSOS and P-Circle) do not change:
   on a new demo-uiux database they are on and read the mock feeds, as on the
   demo line. A module upgrade gives each one the flag that it had before the
