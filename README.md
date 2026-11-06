@@ -430,7 +430,7 @@ the top of the script:
 | A new database (`--init-db`) | no business data | the demo seed: sample data, mock screens and personas |
 | Accounts of a new database | `whadmin`, `admin1`, `admin2` / `perodua`; the business roles also `perodua` | `whadmin`, `admin1`, `admin2` / `perodua`; each other account a new random password, in `seeded-accounts.txt` (root only) |
 | Portal accounts | refused | portal mode `off` until portal users sign in through the hub |
-| 17:00 Job Order Inbound run | off | off |
+| 17:00 Job Order Inbound run | off | on in a new database (owner decision of 2026-11-07; w4d stays on the client-stable-uiux line); a module upgrade keeps the flag that it had, so grey needs step 9 below once |
 | Mock intake pulls (PROMISE, PSS, PSOS, P-Circle) | off while in mock mode, after `--init-db` and after a module upgrade | on, as on the demo line; a module upgrade keeps the flag that each one had |
 | Outgoing email | off until `SMTP_HOST` is set | the same (`PERODUA_MAIL=off` without `SMTP_HOST`), or `IMAGE_MAIL=on`: the test Gmail settings inside the Odoo image (below) |
 | Default `PROJECT_NAME` and `DB_NAME` | `perodua-client-uiux`, `perodua` | `perodua-demo-uiux`, `perodua_demo` |
@@ -638,6 +638,8 @@ fingerprint, is refused before the App stops.
   those passwords keeps them in `seeded-accounts.pending` (root only); the
   next run lists them.
 - **The cron flags** go back as before the upgrade, the mock intake pulls too.
+  The 17:00 Job Order Inbound run of grey is off (`--init-db` of kit PR #40
+  switched it off), so it stays off until step 9 below.
 - **The lock table of the way back.** A demo database has more objects than a
   database of the client line: a local database of the demo-uiux image
   v0.52.0, with 162 modules, needs 12,778 locks with the margin, and a DB server with
@@ -707,6 +709,22 @@ On grey (v0.55.1, with `IMAGE_MAIL=on` and `MAIL_REDIRECT_TO=off`), in a
    It shows `perodua again: tmstest1 womtest1`. The two accounts have no
    email address, so Odoo sends them no "Security Update" email. Each later
    module upgrade gives them a new password again: do this step after each.
+9. Switch the 17:00 Job Order Inbound run on, one time (owner decision of
+   7 November 2026, which reverses w4d on the demo-uiux line). Run Odoo's
+   shell as in step 8:
+
+   ```bash
+   sudo docker compose --project-name perodua-demo-uiux --file /opt/perodua-app-demo/compose.yml run --rm --no-deps -T odoo \
+     bash -c 'PGPASSWORD="$DB_PASSWORD" exec odoo shell -c /etc/odoo/odoo.conf -d "$DB_NAME" --db_host="$DB_HOST" --db_port="$DB_PORT" --db_user="$DB_USER"' <<'EOF'
+   job = env.ref('perodua_supplier_execution.cron_perodua_inbound_job_orders')
+   job.write({'active': True})
+   env.cr.commit()
+   print('17:00 Job Order Inbound run active:', job.active)
+   EOF
+   ```
+
+   It shows `17:00 Job Order Inbound run active: True`. Each later module
+   upgrade keeps it on: this step is needed only once.
 
 ## Repository layout
 
