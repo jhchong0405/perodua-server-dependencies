@@ -1344,7 +1344,7 @@ class OracleViewRoleTest(unittest.TestCase):
                  "\\echo schema ovb_stage dropped, with its :ovb_stage_tables staging tables and their data",
                  "\\endif\nDROP OWNED BY oracle_view_rp;\n", "DROP ROLE oracle_view_rp;"]
         self.assertNotIn(-1, in_order(sql, steps), sql)
-        self.assertEqual(sql.count("DROP SCHEMA"), 1)
+        self.assertEqual(sql.count("\nDROP SCHEMA"), 1)
         # Materialized views hold data too: they count with the tables, as in the list of the script.
         self.assertIn("LEFT JOIN pg_class c ON c.relnamespace = n.oid AND c.relkind IN ('r', 'p', 'm')", sql)
         self.assertNotIn("== Staging tables", result.stdout)  # no role: no list
@@ -1562,7 +1562,8 @@ class RoleOnPostgresTest(PostgresCluster, unittest.TestCase):
     # Each statement is also logged by the sampling of statements and of transactions.
     SERVER_OPTIONS = "-c log_min_duration_sample=0 -c log_statement_sample_rate=1 -c log_transaction_sample_rate=1"
 
-    def test_role_rights_pg_hba_check_and_drop_on_a_real_server(self):  # the first test of the class (by name)
+    def test_role_rights_pg_hba_check_and_drop_on_a_real_server(self):
+        self.make_old_ro()  # an earlier test of the class (by name) can have dropped it
         self.assertEqual(self.sql("postgres", "SELECT count(*) FROM pg_roles WHERE rolname = 'oracle_view_ro'"), "1")
         self.addCleanup(self.reload)
         self.addCleanup(self.write_hba, self.hba_lines)
