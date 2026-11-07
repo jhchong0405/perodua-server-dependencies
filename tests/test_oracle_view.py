@@ -1505,6 +1505,8 @@ class OracleViewDocsTest(unittest.TestCase):
         steps = SECTION.split("\n### From the manual install\n", 1)[1].split("\n### ", 1)[0]
         order = ["uninstall-app.sh", "install --config /opt/oracle-view/.env", "sudo cp /opt/oracle-view/users",
                  "sudo rm -rf /opt/oracle-view\n", "Put the route back"]
+        for text in order:
+            self.assertIn(text, steps)
         at = [steps.index(text) for text in order]
         self.assertEqual(at, sorted(at))
         self.assertEqual(steps.count("/opt/oracle-view"), steps[:at[3]].count("/opt/oracle-view") + 1)
