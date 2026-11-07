@@ -3,10 +3,12 @@
 deploy.conf
 app.env
 iss-api.env
+oracle-view.env
 routes.conf
 filestore*.tar.gz
 *.dump
 *.zip
 *.sql
 *.password
+*.verifier
 __pycache__/

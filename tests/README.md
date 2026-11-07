@@ -618,6 +618,198 @@ creates a run folder there. It checks:
 - usage errors and a local step that fails (a file where a folder must go) exit 3,
   which monitoring reads as UNKNOWN, not WARNING or CRITICAL.
 
+`test_oracle_view.py` runs `oracle-view.sh` against fakes and, in the test image,
+its role SQL on a real throwaway PostgreSQL 16 cluster. Every password, key and
+verifier in it is made up. On the App side, a fake Docker CLI records every call,
+its standard input, its `DOCKER_CONFIG` and whether the script's lock was held,
+and fails on any command the script should not use; its `docker run` of
+`make_user.py` prints a users line made from the password it reads. Fake `ss` and
+`curl` answer from the same state, and `mv` and `tar` can be made to fail. It
+checks:
+- the pin: one `IMAGE=` line, `perodua-deploy.novutal.com/oracle-view` by
+  `sha256` digest, the release name from its tag; `install` pulls exactly it
+  (once), `compose.yml` names it with `pull_policy: never` and `up` never pulls;
+  the usage text and every `oracle-view:grey-v...` tag of the README name that
+  release; the pin is exactly `grey-v1.0.2@sha256:a5b48111...` and neither the
+  script nor the README names `grey-v1.0.1` or `8e82b47f` (`OracleViewDocsTest`,
+  which needs no root, also checks the README sentences of the tests below and
+  that only the lines `RP_DATABASE=perodua_oracle2` and
+  `OLD_RP_DATABASE=perodua_oracle` of the script name a database);
+- the Docker engine: an API older than 1.44 (Docker 25, for `start_interval`) or
+  an engine that does not answer stops `install` before the pull and before any
+  file is made; 1.44, 1.100 and 2.0 pass;
+- the registry login: without a terminal or with `--non-interactive` the message
+  names `docker login perodua-deploy.novutal.com` and nothing is made; on a
+  pseudo-terminal the username and the hidden password go to `docker login
+  --password-stdin` with a throwaway `DOCKER_CONFIG` that is gone afterwards, and
+  the password is in no argument and no output;
+- the container of `deploy/grey/compose.yml`: read-only root file system, tmpfs
+  `/tmp`, the state volume, the users file bound read-only without
+  `create_host_path`, `127.0.0.1:8797` only, no capabilities, `no-new-privileges`,
+  1 GB memory and swap, 256 processes, 1.5 CPUs, the `/healthz` health check and
+  `OVB_RP_SSLMODE=require`; `compose.yml` and `oracle-view.env` 0600 in a 0700
+  directory; the pull and `up` hold the lock;
+- the settings: each bad value (memory form and minimum, processes, CPUs,
+  `OVB_RP_SSLMODE` other than `require` or `prefer`, a time-out outside 5-3600
+  or not plain digits, shell syntax) and an unknown key stop before any Docker
+  call and make nothing; `--config` reads over the saved settings, and the
+  `.env` of the manual install (comments, Windows line ends) and
+  `oracle-view.env.example` are a valid `--config`;
+- the time-outs `OVB_LIVE_TIMEOUT` and `OVB_SQL_TIMEOUT`: without a value (also
+  when the environment of the command has them) neither `compose.yml` nor
+  `oracle-view.env` has them and `status` names the image default (300 s); 5 and
+  3600 go to the environment of the container as strings and stay saved; a key
+  with no value in `--config` removes a saved value;
+- the users: `perodua` (admin) and `pm` (editor) get random passwords through
+  `make_user.py` on standard input only (`--network none`, `--read-only`, no
+  capabilities, uid 10001); the users file is 0400 for 10001, the passwords are
+  only in `initial-login.txt` (root, 0600) and in no argument or output; a second
+  run makes no user, keeps the file and the container; a removed `pm` line gets a
+  new password; any change of the users file (also a last line without its line
+  end) makes the container again, with the new file;
+- the staged install: a failed `make_user.py` or a compose file that Compose
+  refuses publishes nothing, also no password; a move that fails puts back the
+  users file, the passwords file, the settings and `compose.yml`; a release that
+  does not become healthy is replaced by the last good one (its image and
+  settings) with the failed settings in `oracle-view.env.failed`, and the message
+  says when that one does not start either; a first start that fails keeps the
+  users for the retry, which makes the container again; a snapshot that cannot be
+  written keeps the previous one;
+- `/healthz` on the server, a port 8797 used by another program (before the pull),
+  the manual install's container (named with `uninstall-app.sh, without --purge`)
+  and a non-empty directory that is not its own each stop the install;
+- `status` shows the release, the users with their roles but no hash and no
+  password, the volume and the health;
+- `uninstall` needs `--confirm oracle-view` (or a terminal); without `--purge` it
+  keeps the state volume, the users file, the identity and the image, says so,
+  and a later install uses the same users; `--purge` removes the volume, every
+  local image of the repository and the users, lists what it removed, leaves the
+  administrator's files, and removes the directory when it is empty;
+- a volume or an image that `--purge` cannot remove: the message lists what was
+  removed and what was not, the identity stays, the exit status is 1, and the
+  next `--purge` removes the rest;
+- the route hint: the table of `https-routes.conf.example`, where the route of
+  the tool is a comment only, gets the "Next: publish it" step from `install`
+  and no "route stays" line from `uninstall`; an uncommented route line turns
+  both around;
+- a held lock stops `install` and `uninstall` before any change.
+
+On the DB side, fake `runuser`, `id` and `psql` record every `psql` call with its
+standard input and the user. It checks:
+- the verifier file: a password, an `md5` hash, a short key, a quote, two lines,
+  the `role.sql` of the bundle, an empty file and a missing file are refused
+  before any SQL, and the content is never printed; a Windows line end is
+  accepted;
+- the role SQL: it runs as `postgres` on the local socket with `ON_ERROR_STOP`
+  and the psql variables `ovb_db=perodua_oracle2` and `ovb_old_db=perodua_oracle`;
+  the verifier is only in the first stdin line (`\set ovb_verifier`), in no
+  argument and no output; `log_statement`, `log_min_duration_statement`,
+  `log_min_error_statement`, `log_min_duration_sample`,
+  `log_transaction_sample_rate`, `pg_stat_statements.track_utility`,
+  `VERBOSITY terse` and `SHOW_CONTEXT never` come before each statement with the
+  verifier, also after `\connect postgres`; the grants of the owner decision are
+  there, and no `TRUNCATE`, `SUPERUSER`, `CREATE`, `ALTER SYSTEM`, ownership or
+  reload; in the old database, after the end of the sessions of the role there,
+  one transaction holds `DROP OWNED BY oracle_view_rp` and `GRANT CONNECT,
+  TEMPORARY ON DATABASE :"ovb_db"`, and only when that database exists;
+  `oracle_view_ro` gets `DROP OWNED BY` in both databases before `DROP ROLE`;
+- a `FAIL` right, a right on another database (with the way to remove it) or a
+  short answer (11 lines, not 12) stops before the `pg_hba.conf` check;
+- the `pg_hba.conf` check sends the App address as a psql variable, prints the
+  line, the backup, the reload and the check commands, exits 3 (`NOT OK`), 4
+  (`CHECK BY HAND`, with `--app-ip` and `--pg-port` in the commands) or 0, and no
+  call reloads or writes a file; `role --check` needs the role and sends no role
+  SQL;
+- a `pg_hba.conf` with the block of `deploy-db.sh` for `perodua_oracle2`: the
+  line goes above its `# BEGIN perodua-db-deploy perodua_oracle2` line (with the
+  line number), and a `NOTE` says that each later `deploy-db.sh` run puts the
+  block above the line again, with the `role --check` to run after it; also
+  with `RESULT: OK`, and not for the block of another database (also
+  `perodua_oracle` and `perodua_oracle22`);
+- a `pg_hba.conf` that PostgreSQL does not load (an error line) gives exit 4 and
+  the steps to correct it;
+- `ssl = off` and `dblink` or `postgres_fdw` are reported, and nothing is revoked;
+- a stopped PostgreSQL or a missing `perodua_oracle2` stops `role` and
+  `drop-role` before any SQL; usage errors exit 2 with no call;
+- `drop-role` needs `--confirm oracle_view_rp` and sends the steps in order, for
+  each role (`NOLOGIN`, end the sessions, `DROP OWNED BY` in `perodua_oracle2`
+  and then in `perodua_oracle` when it exists, `DROP ROLE`);
+- a held lock stops `role` and `drop-role`.
+
+`RoleOnPostgresTest` (root and PostgreSQL 16, as in the test image) starts a
+cluster on port 55432 with `log_statement = all`, an Odoo-like owner, the RP
+database `perodua_oracle2` (a table and a view) and the old database
+`perodua_oracle` (a table), both without the rights of `PUBLIC` as `deploy-db.sh`
+makes them, and the role `oracle_view_ro` of an earlier bundle with rights in
+both. `role` sets exactly the verifier of the file, drops `oracle_view_ro`, and
+keeps the verifier out of the server log and the output. As the tool signs in (TCP, the made-up password), the
+role reads, is read-only by default, writes in a `READ WRITE` transaction (also
+in a table that the owner makes later), and cannot `TRUNCATE`, `ALTER` or
+`CREATE`. The server also logs by sampling (`log_min_duration_sample = 0`,
+`log_statement_sample_rate = 1`, `log_transaction_sample_rate = 1`), and the
+verifier stays out of that log too. Without `DELETE` on one table, `role --check`
+shows `FAIL` for INSERT, UPDATE and DELETE and exits 1: each right is checked
+alone. With only the default IPv6 and `127.0.0.1` lines the check is
+`NOT OK` (exit 3), not `CHECK BY HAND`; the printed line above them gives
+`RESULT: OK`; a `samehost` line above it gives exit 4; a second `role` run
+succeeds; `drop-role` drops the role and keeps the rows. The cases of the check,
+each on the real server:
+
+| Line (above the default lines) | `ssl` | Exit |
+| --- | --- | --- |
+| `hostnossl` for the App server | off | 0 |
+| `hostssl` for the App server (PostgreSQL loads it with a warning: it never matches) | off | 3 |
+| `hostssl` for the App server (a made-up certificate) | on | 0 |
+| `hostnossl` for the App server | on | 3 |
+| `md5` for the App server (`RESULT: OK` with the note; the tool signs in through an `md5` line) | off | 0 |
+| the address `all` | off | 0 |
+| `reject` above the line, `password` above the line | off | 3 |
+| `samenet`, a database `/^perodua`, a user `/^oracle_view` or the database `samegroup` above the line | off | 4 |
+| an error line (`10.0.0.0/33`) above the line | off | 4 |
+| a line with an unsure field and a field that cannot match, above the line: `host all +admins ::1/128`, `host replication +repl 10.0.0.0/8`, `host all +dba 10.1.2.3/32`, `+dba` or `samenet` on another database, a host name for another user, `hostgssenc` with `+dba`, `hostssl` with `samenet` | off | 0 |
+| `+dba`, a host name, `sameuser` or `hostnossl ... samehost` above the line, each other field matching | off | 4 |
+| `samenet` below the line | off | 0 |
+| a line for `oracle_view_rp` on `perodua_oracle` above the line (and a `NOTE`) | off | 0 |
+| `include` of a file whose line 10 is a `reject`, above line 4 of the line | off | 3 |
+
+The pg_hba.conf writer of `deploy-db.sh` (its Python program, taken from the
+script) then writes its block for `perodua_oracle2` at the top: the line below the
+block gives exit 3, with the line number of `# BEGIN perodua-db-deploy
+perodua_oracle2` and the `NOTE`; the line moved above the block gives exit 0; the
+next run of the writer puts the block above it again (exit 3).
+
+The old database, on the same cluster:
+- a role with the rights of the earlier releases in `perodua_oracle` only (a
+  grant on the database, the schema, a table, a sequence and a default
+  privilege) and a session there: `role` ends the session, leaves no right
+  there (the database ACL and `pg_shdepend`), the tool cannot connect there and
+  reads `perodua_oracle2`, and with the printed line the run ends with exit 0
+  and 12 `OK` lines; a later grant in another database (`postgres`) gives the
+  `FAIL` line with that name and exit 1 in `role --check`;
+- one transaction: a `psql` in front of the real one adds an error right after
+  `DROP OWNED BY oracle_view_rp` in the old database; `role` exits 1, and the
+  role keeps `CONNECT` on `perodua_oracle2` (the tool reads it) and its old
+  rights; the next run cleans them;
+- `perodua_oracle` renamed away: `role` skips the step (exit 0, 12 `OK` lines,
+  `oracle_view_ro` dropped) and `drop-role` succeeds;
+- `drop-role` with rights of `oracle_view_rp` and `oracle_view_ro` in both
+  databases drops both roles and keeps the rows.
+
+`StatementStatsOnPostgresTest` starts a second cluster (port 55433) with
+`pg_stat_statements` loaded and `track_utility` on: it records the utility
+statements of the setup, but no `CREATE ROLE` or `ALTER ROLE` of
+`oracle_view_rp` with its verifier, after one and after two `role` runs. The
+first cluster, without `pg_stat_statements`, shows that its `SET` does not fail.
+
+To run it in the test image (the image has PostgreSQL 16):
+
+```bash
+docker build -t perodua-deploy-db-test -f tests/Dockerfile tests
+docker run --rm --network none --entrypoint python3 \
+  --mount "type=bind,source=$PWD,target=/src,readonly" \
+  perodua-deploy-db-test -m unittest discover -s /src/tests -p test_oracle_view.py -v
+```
+
 `test_https.py` runs `https.sh` with real openssl against fake `nginx`, `systemctl`,
 `ss`, `curl`, `getent` and `date`. A throwaway root and intermediate sign the requests the script
 makes, the way the certificate issuer would; the fake `nginx` records its calls,

@@ -35,3 +35,5 @@ stgisstms.perodua.com.my        /dev/       -
 # api.example.perodua.com.my    /dev/api/   8000   strip,api
 # Behind a TLS front that connects to port 80, such as a WAF: add http to the line.
 # stgiss.perodua.com.my         /dev/       8110   http
+# The Oracle Field Browser (oracle-view.sh install) on the grey App server, behind the WAF:
+# stgiss.perodua.com.my         /dev/oracle-view/   8797   strip,http

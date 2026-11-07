@@ -9,6 +9,9 @@ Client Stable UIUX v1.2.2 on Ubuntu 24.04 amd64 servers with sudo and internet a
 - **RP adapter** (separate): the RP integration gateway's read-only command line
   for the Oracle EBS database (health check, survey, exports), also pulled from
   there. See [RP adapter](#rp-adapter).
+- **Oracle Field Browser** (separate): the web tool for the integration work (the
+  Oracle EBS objects, the RP database, the RP-to-Oracle mapping and a SQL
+  console), also pulled from there. See [Oracle Field Browser](#oracle-field-browser).
 
 Both can also run on one server: do steps 2 and 3 on that server. With two
 servers, allow **App → DB port 5432**. Browsers need **App port 8110**.
@@ -730,7 +733,7 @@ On grey (v0.55.1, with `IMAGE_MAIL=on` and `MAIL_REDIRECT_TO=off`), in a
 
 | Path | Contents |
 | --- | --- |
-| `scripts/` | `install-dependencies.sh`, `deploy-db.sh`, `deploy-app.sh`, `service.sh`, `uninstall.sh`, the helpers they use (`uat_guard.py`, `uat_admins.py`, `uat_demo.py`, `reset_database.py`), `iss-api.sh` (ISS-Oracle API), `rp-adapter.sh` (RP adapter), `https.sh` (HTTPS with nginx, the certificate from an issuer or Let's Encrypt), `client-check.ps1` (the check of each host name from a Windows PC) and the configuration templates. Your `deploy.conf`, backups and filestore archive also go here. |
+| `scripts/` | `install-dependencies.sh`, `deploy-db.sh`, `deploy-app.sh`, `service.sh`, `uninstall.sh`, the helpers they use (`uat_guard.py`, `uat_admins.py`, `uat_demo.py`, `reset_database.py`), `iss-api.sh` (ISS-Oracle API), `rp-adapter.sh` (RP adapter), `oracle-view.sh` (Oracle Field Browser), `https.sh` (HTTPS with nginx, the certificate from an issuer or Let's Encrypt), `client-check.ps1` (the check of each host name from a Windows PC) and the configuration templates. Your `deploy.conf`, backups and filestore archive also go here. |
 | `docs/` | [DEPLOYMENT.md](docs/DEPLOYMENT.md) (full reference), [RUNBOOK.md](docs/RUNBOOK.md) (self-check after deployment) and [WAF-REDIRECT-LOOP-2026-10-08.md](docs/WAF-REDIRECT-LOOP-2026-10-08.md) (record of a redirect loop behind a WAF) |
 | `tests/` | Automated checks, see [tests/README.md](tests/README.md) |
 
@@ -2055,6 +2058,423 @@ first puts the previous settings and secrets back.
 | `tcp ... not reachable` | No network path to the database port: firewall, VPN, or a wrong `DB_HOST` / `DB_PORT` |
 | An object `is not visible to this account` | The user lacks the synonym or the `SELECT` grant on it |
 | `Oracle call timed out` | A query ran longer than `CALL_TIMEOUT` seconds (`rp-adapter.env`); raise it for `--exact` on large views |
+
+## Oracle Field Browser
+
+The Oracle Field Browser is a web tool for the integration work. It shows the
+Oracle EBS objects, the RP database (`perodua_oracle2` on the DB server, the
+database of the grey App: owner decision of 2026-11-07) and the RP-to-Oracle
+mapping, and it has a SQL console. `oracle-view.sh` runs the pinned
+image `perodua-deploy.novutal.com/oracle-view:grey-v1.0.2` with Docker Compose on
+the App server, and on the DB server it makes the role that the tool signs in
+with. The tool is at `https://stgiss.perodua.com.my/dev/oracle-view/` through a
+route of [https.sh](#https). Every page and every API call needs a login.
+
+| Part | Where |
+| --- | --- |
+| Container `oracle-view` on `127.0.0.1:8797` only, run from `/opt/perodua-oracle-view` | App server |
+| Route `stgiss.perodua.com.my /dev/oracle-view/ 8797 strip,http` | App server, `/etc/perodua-https/routes.conf` |
+| Role `oracle_view_rp` on the database `perodua_oracle2`: read and write on the tables, read-only by default | DB server (PostgreSQL 16) |
+| Image `perodua-deploy.novutal.com/oracle-view:grey-v1.0.2`, pulled by digest | Private registry |
+
+The image holds the Oracle settings file and the password of the role
+`oracle_view_rp` (owner decision of 2026-11-06). This repository holds no secret of
+the tool. Read [Risks of the owner decisions](#risks-of-the-owner-decisions) before
+you give a password to anyone.
+
+Do the steps in this order.
+
+### 1. The RP role (DB server)
+
+1. Copy the verifier file of the image build to the DB server. The image build
+   (`deploy/build-image.sh` of the `oracle-view` repository) writes the
+   SCRAM-SHA-256 verifier of the role password to `secrets/rp_grey.verifier` in its
+   output folder. The verifier is what PostgreSQL stores for the password; it is
+   not the password. Copy only this file, never `rp_grey.password` next to it:
+
+   ```bash
+   scp OUTPUT_FOLDER/secrets/rp_grey.verifier YOU@DB_SERVER:
+   ```
+
+2. Create or update the role:
+
+   ```bash
+   sudo bash oracle-view.sh role --verifier-file ~/rp_grey.verifier
+   ```
+
+   The command takes only a file with one verifier line,
+   `SCRAM-SHA-256$<iterations>:<salt>$<StoredKey>:<ServerKey>`; it refuses a
+   password. It never asks for the password and stores nothing. The verifier goes
+   to `psql` on standard input only, and stays out of the PostgreSQL log and the
+   error text.
+
+   The role gets `LOGIN`, `CONNECTION LIMIT 10`, `CONNECT` and `TEMPORARY` on
+   `perodua_oracle2`, `USAGE` on the schema `public`, `SELECT, INSERT, UPDATE,
+   DELETE` on all tables and views, `SELECT, USAGE, UPDATE` on all sequences, the
+   same rights on new tables and sequences, `default_transaction_read_only = on`
+   (the pages stay read-only; a Write run of the SQL console turns it off for its
+   own transaction), `statement_timeout = 30s` and
+   `idle_in_transaction_session_timeout = 60s`. It does not get superuser, the
+   ownership of a table (Odoo owns the tables, so DDL on them fails), `TRUNCATE` or
+   `CREATE` in `public`. The command drops the role `oracle_view_ro` of an earlier
+   bundle, after it ends its sessions and removes its rights in `perodua_oracle2`
+   and `perodua_oracle`. To run it again is safe: it sets the same verifier and
+   grants.
+
+   **The old database `perodua_oracle`.** The earlier releases of this script and
+   of the manual bundle gave the role its rights on `perodua_oracle`. The image
+   does not read that database any more, so the command ends the sessions of the
+   role there and removes all its rights there (`DROP OWNED BY`). `DROP OWNED BY`
+   also removes the `CONNECT` and `TEMPORARY` rights of the role on every other
+   database (a database is a shared object), and `deploy-db.sh` revokes the rights
+   of `PUBLIC` on its database. So `perodua_oracle2` gets them again in the same
+   transaction: a stop between the two changes nothing, and the tool keeps its
+   way in. When the server has no `perodua_oracle`, the command skips this step.
+   After the grants, the line `no right on a database other than
+   perodua_oracle2` of the rights check lists each other database where the role
+   still has a right (a grant, a default privilege or an object there). Such a
+   database stops the command (exit status 1) before the `pg_hba.conf` check:
+   remove that right there (`REVOKE ... FROM oracle_view_rp`, or
+   `DROP OWNED BY oracle_view_rp` in that database), then run `role` again. It
+   grants `CONNECT` and `TEMPORARY` on `perodua_oracle2` again.
+
+3. Read the output:
+
+   | Part | Expected |
+   | --- | --- |
+   | `== Rights of oracle_view_rp` | Each line starts with `OK`, also `no right on a database other than perodua_oracle2`. A `FAIL` line stops the command. |
+   | `== TLS: SHOW ssl` | `ssl = on`. With `off`, see [TLS to the RP database](#tls-to-the-rp-database). |
+   | `== Extensions that can write in a Read run` | `none`. With `dblink` or `postgres_fdw` in `perodua_oracle2`, a Read run of the SQL console can write through them. The command changes no right: that is an owner decision. |
+   | `== pg_hba.conf check` | `RESULT: OK` (exit status 0). `RESULT: NOT OK` (exit status 3) or `RESULT: CHECK BY HAND` (exit status 4): do step 4. |
+
+4. The command never edits `pg_hba.conf`. With `RESULT: NOT OK` it prints the
+   line to add:
+
+   ```
+   host    perodua_oracle2    oracle_view_rp    192.168.23.13/32    scram-sha-256
+   ```
+
+   Back up the file, add the line above the first line of the printed list (or
+   above the first `host` line), reload PostgreSQL (no restart) and check again.
+   The command prints these commands with the `hba_file` of this server, for
+   example:
+
+   ```bash
+   sudo cp -p /etc/postgresql/16/main/pg_hba.conf /etc/postgresql/16/main/pg_hba.conf.before-oracle-view
+   sudo nano /etc/postgresql/16/main/pg_hba.conf
+   sudo -u postgres psql -X -p 5432 -d postgres -c 'SELECT pg_reload_conf()'
+   sudo bash oracle-view.sh role --check
+   ```
+
+   `role --check` does only the checks; it needs no verifier file. With
+   `RESULT: CHECK BY HAND`, a line above the first matching line has a field that
+   the check cannot read (`samehost`, `samenet`, a host name, `+group`, `@file`, a
+   regular expression `/...`, `sameuser`, `samerole`, `samegroup`), and each of
+   its other fields (type, database, user, address) can match: read those lines
+   in the `hba_file`, then add the line above them. A line with a field that
+   cannot match is not "check by hand", for example
+   `host all +admins ::1/128 scram-sha-256` (IPv6: it never matches the IPv4
+   address of the App server), `host replication +repl 10.0.0.0/8 scram-sha-256`
+   (the database `replication`) and `host all +dba 10.1.2.3/32 scram-sha-256`
+   (another address). A `pg_hba.conf` with an error line also gives
+   `RESULT: CHECK BY HAND`: PostgreSQL does not load such a file, so first correct
+   the lines of the list `pg_hba.conf lines with errors`. The check takes the rules in
+   the order of PostgreSQL (`rule_number`, also through `include` files). It knows
+   the transport: with `ssl = on` the tool connects with TLS, so a `hostssl` line
+   matches and a `hostnossl` line does not; with `ssl = off` it is the other way
+   round. A first matching line with `md5` is also `RESULT: OK`: the password of
+   the role is a SCRAM-SHA-256 verifier, so PostgreSQL uses SCRAM through that
+   line. `--app-ip ADDRESS` gives another address of the App server (default
+   `192.168.23.13`) and `--pg-port PORT` another PostgreSQL port (default `5432`),
+   to `role` and to `role --check`. The list `pg_hba.conf lines for oracle_view_rp
+   on perodua_oracle` is empty: a line there is from an earlier release, and the
+   check adds a `NOTE`. Change its database to `perodua_oracle2`, or delete it,
+   then reload and check again.
+
+   **A DB server set up with `deploy-db.sh`.** Each `deploy-db.sh` run writes its
+   block for the database at the top of `pg_hba.conf`, from
+   `# BEGIN perodua-db-deploy perodua_oracle2` to
+   `# END perodua-db-deploy perodua_oracle2`. The block lets in only the App role
+   and ends with `host "perodua_oracle2" all 0.0.0.0/0 reject`. A line for
+   `oracle_view_rp` below the block never matches, and the next `deploy-db.sh`
+   run deletes a line inside the block. When the file holds the block, the
+   command tells you to put the line above the `# BEGIN perodua-db-deploy
+   perodua_oracle2` line, and adds a `NOTE`. Each later `deploy-db.sh` run puts
+   its block above the line again: after every `deploy-db.sh` run, run
+   `sudo bash oracle-view.sh role --check` and move the line back above the
+   block.
+
+5. Delete the copy of the verifier file: `rm ~/rp_grey.verifier`.
+
+#### TLS to the RP database
+
+With `ssl = on` nothing is to do. With `ssl = off`, choose one:
+
+1. Turn TLS on (recommended: the rows of the SQL console hold password hashes and
+   keys). As root on the DB server, in the data folder
+   (`sudo -u postgres psql -X -At -c 'SHOW data_directory'`):
+
+   ```bash
+   cd DATA_DIRECTORY
+   sudo openssl req -new -x509 -days 825 -nodes -subj "/CN=192.168.23.12" -keyout server.key -out server.crt
+   sudo chown postgres:postgres server.key server.crt
+   sudo chmod 0600 server.key
+   sudo -u postgres psql -X -d postgres -c "ALTER SYSTEM SET ssl = on" -c "SELECT pg_reload_conf()"
+   sudo -u postgres psql -X -At -d postgres -c 'SHOW ssl'
+   ```
+
+   The last line prints `on`. `require` encrypts without a check of the
+   certificate. Way back: `ALTER SYSTEM SET ssl = off`, then the reload.
+2. Keep clear text between the servers (an owner decision): on the App server, set
+   `OVB_RP_SSLMODE=prefer` in `/opt/perodua-oracle-view/oracle-view.env`, then run
+   `sudo bash oracle-view.sh install`.
+
+### 2. The container (App server)
+
+Docker 25 or later (Engine API 1.44, for the `start_interval` of the health
+check) is installed: `sudo bash install-dependencies.sh --role app`, then
+`sudo systemctl enable --now docker`. With an older Docker engine, `install`
+stops before it changes anything.
+
+```bash
+sudo bash oracle-view.sh install
+```
+
+When asked, enter the registry username and password for
+`perodua-deploy.novutal.com`; the login is not kept on the server. The install:
+
+- pulls the pinned image by its digest;
+- makes the users `perodua` (admin) and `pm` (editor, the PM who edits the
+  mapping) when the users file does not hold them. Each gets a random password.
+  The passwords go once to `/opt/perodua-oracle-view/initial-login.txt` (root
+  only) and are never printed;
+- starts the container `oracle-view` on `127.0.0.1:8797` only, with a read-only
+  root file system, a tmpfs `/tmp`, the state volume
+  `oracle-view_oracle-view-state`, no capabilities, `no-new-privileges`, the
+  limits of the settings and a health check of `/healthz`, and waits until it is
+  healthy. When the users file changed since the last start, it makes the
+  container again: the tool reads the users file at its start only;
+- checks `http://127.0.0.1:8797/healthz` on the server.
+
+Wait for `Installed: oracle-view-grey-v1.0.2`. Then read the first passwords:
+
+```bash
+sudo cat /opt/perodua-oracle-view/initial-login.txt
+```
+
+Keep the `perodua` password in a password manager. Give the `pm` password to the
+PM in a safe way. Then delete the file (`uninstall` also removes it):
+
+```bash
+sudo rm /opt/perodua-oracle-view/initial-login.txt
+```
+
+The settings are in `/opt/perodua-oracle-view/oracle-view.env` (root, 0600). To
+change one, edit the file and run `install` again. For an unattended install,
+pass the keys of [oracle-view.env.example](scripts/oracle-view.env.example) with
+`--config` and add `--non-interactive` (the registry login must then exist:
+`sudo docker login perodua-deploy.novutal.com`).
+
+| Setting | Default | What |
+| --- | --- | --- |
+| `OVB_MEM_LIMIT` | `1g` | Memory of the container, also the memory with swap. The App runs on this server too. |
+| `OVB_PIDS_LIMIT` | `256` | Processes and threads of the container |
+| `OVB_CPUS` | `1.5` | CPUs of the container |
+| `OVB_RP_SSLMODE` | `require` | TLS to the RP database ([TLS to the RP database](#tls-to-the-rp-database)); `prefer` also allows clear text |
+| `OVB_LIVE_TIMEOUT` | none: the image default, `300` | Seconds (5-3600) for each round trip of a live Oracle call of the Oracle view (Rows, Filter, Count rows, Check values, Check definition, Look up, Refresh) |
+| `OVB_SQL_TIMEOUT` | none: the image default, `300` | Seconds (5-3600) for one statement of the SQL console |
+
+The two time-outs are optional. Without a value, `install` gives the container no
+such variable, and the default of the image applies. A key with no value
+(`OVB_LIVE_TIMEOUT=`) in `--config` removes a saved value. The start lines of
+`sudo docker logs oracle-view` show the values (`Live Oracle: ...` and
+`SQL console: ...`), and `status` shows them in its `Time-outs:` line.
+
+| Command | What it does |
+| --- | --- |
+| `sudo bash oracle-view.sh status` | The image, the settings, the users (names and roles only), the state volume and the answer of `/healthz` |
+| `sudo docker logs oracle-view` | The log of the tool: the start lines, each login (` login `) and each SQL run (` sql-run `, never the statement) |
+
+Checks: the `Health:` line of `status` says `http://127.0.0.1:8797/healthz answers
+ok`. The log shows `RP database view: grey (192.168.23.12:5432/perodua_oracle2)` and
+`Server mode: 2 users`.
+
+### 3. The route (App server)
+
+Add the route to the table of [https.sh](#https), then apply it. Keep a copy of the
+table first:
+
+```bash
+sudo bash https.sh status
+sudo cp -p /etc/perodua-https/routes.conf /etc/perodua-https/routes.conf.before-oracle-view
+sudo sed -i -e '$a\' /etc/perodua-https/routes.conf
+echo 'stgiss.perodua.com.my   /dev/oracle-view/   8797   strip,http' | sudo tee -a /etc/perodua-https/routes.conf
+sudo bash https.sh apply
+sudo bash https.sh status
+curl -sS -o /dev/null -w '%{http_code} %{redirect_url}\n' -H 'Host: stgiss.perodua.com.my' http://127.0.0.1/dev/oracle-view/
+```
+
+- `strip` removes `/dev/oracle-view/` before the request goes to port 8797. `http`
+  also serves the route on port 80 without the redirect to HTTPS, because the WAF
+  of the grey environment connects to port 80
+  ([Behind a TLS front on port 80](#behind-a-tls-front-on-port-80)).
+- The longer path `/dev/oracle-view/` wins over the `/dev/` route of the App.
+- The `curl` line prints `303` and a URL that ends with `/dev/oracle-view/login`.
+
+### 4. Port 80 for the WAF only (App server, owner step)
+
+The `http` option serves the login of the tool on port 80 without TLS. Any
+computer that reaches the App server could try passwords there, past the WAF, and
+read the cookie on the network. Let only the WAF nodes reach port 80. Port 80
+serves every route of this server (also the App), so first make sure that only
+the WAF uses it. Put the addresses of the WAF nodes in place of `WAF_1` and
+`WAF_2` (one `allow` line for each node). ufw limits nginx on the host port; the
+port of the container is on `127.0.0.1` only.
+
+ufw uses the first rule that matches: `prepend` puts the WAF lines and the deny
+line above an older rule that opens port 80. When ufw is off
+(`Status: inactive`), first set the default for incoming traffic to allow, so that
+`ufw enable` closes no other port of this server.
+
+```bash
+sudo ufw status verbose | sudo tee /root/ufw-status.before-oracle-view
+sudo ufw status numbered | sudo tee -a /root/ufw-status.before-oracle-view
+# Only when the status said "Status: inactive" (the next three lines):
+sudo ufw default allow incoming
+sudo ufw allow OpenSSH
+sudo ufw enable
+# Always: the deny line first, then the WAF lines above it.
+sudo ufw prepend deny 80/tcp
+sudo ufw prepend allow from WAF_2 to any port 80 proto tcp
+sudo ufw prepend allow from WAF_1 to any port 80 proto tcp
+sudo ufw status numbered
+```
+
+Lines 1 and 2 are the WAF lines, line 3 is `80/tcp DENY IN Anywhere`, and the
+first `(v6)` line is `80/tcp (v6) DENY IN Anywhere (v6)`. An older ufw without
+`prepend`: use `sudo ufw insert 1 ...` in the same order. From a computer that is
+not a WAF node, this must not answer:
+`curl -m 5 -sS -o /dev/null -w '%{http_code}\n' -H 'Host: stgiss.perodua.com.my' http://APP_SERVER/dev/oracle-view/login`.
+
+### Users and data
+
+The users file `/opt/perodua-oracle-view/users` has one line `name:role:<hash>`
+for each user (role `viewer`, `editor` or `admin`). To add a user, make the line
+with the image, add it to the file, and run `install` (it makes the container
+again):
+
+```bash
+IMAGE=$(sudo docker inspect --format '{{.Config.Image}}' oracle-view)
+sudo docker run --rm -it --network none --entrypoint python "$IMAGE" /opt/oracle-view/app/deploy/make_user.py NAME
+sudo nano /opt/perodua-oracle-view/users
+sudo bash oracle-view.sh install
+```
+
+`make_user.py` asks the role and the password two times (no echo) and prints the
+line. To give `perodua` or `pm` a new random password, delete its line in the
+users file and run `install`: the new password goes to `initial-login.txt`.
+Every user must log in again after the container is made again.
+
+The mapping edits of the PM and the audit of the SQL console are in the state
+volume (`/var/lib/oracle-view/mapping_edits.sqlite` in the container). A new image
+keeps them. Back them up with
+`sudo docker cp oracle-view:/var/lib/oracle-view/mapping_edits.sqlite .`
+
+### Upgrade
+
+A later version of this repository pins a later image. Run its `install`: the
+users, the settings and the state volume stay. If the new image does not become
+healthy, the last release that did runs again with its settings, and the settings
+that failed are kept in `oracle-view.env.failed`. Every user must log in again.
+
+### From the manual install
+
+If the App server runs the manual install of the `oracle-view` repository
+(`deploy/grey`, from `/opt/oracle-view`), `install` stops while its container
+exists. Change to this script in this order:
+
+1. Take the route out: delete its line in `/etc/perodua-https/routes.conf`, then
+   run `sudo bash https.sh apply`. `uninstall-app.sh` refuses while the line is
+   there.
+2. Remove the manual install without `--purge`, so that the state volume stays:
+   `sudo bash ~/grey-app/uninstall-app.sh`.
+3. Install with the settings of the manual install, which are a valid `--config`:
+
+   ```bash
+   sudo bash oracle-view.sh install --config /opt/oracle-view/.env
+   ```
+
+   It uses the same state volume (the same Compose project, `oracle-view`), so the
+   mapping edits and the SQL audit stay. It makes new users with new passwords. To
+   keep the old users and their passwords instead, copy the old users file over
+   the new one, delete the new `initial-login.txt` (its passwords do not work any
+   more) and run `install` again:
+
+   ```bash
+   sudo cp /opt/oracle-view/users /opt/perodua-oracle-view/users
+   sudo rm /opt/perodua-oracle-view/initial-login.txt
+   sudo bash oracle-view.sh install
+   ```
+
+4. Delete the folder of the manual install. It holds the old users file with the
+   password hashes, `.env` and `compose.yml`:
+
+   ```bash
+   sudo rm -rf /opt/oracle-view
+   ```
+
+   The state volume `oracle-view_oracle-view-state` (the mapping edits and the
+   SQL audit) is a Docker volume, not in that folder: it stays.
+
+5. Put the route back ([step 3](#3-the-route-app-server)).
+
+On the DB server, `role` updates the role of the manual install in place, and
+removes its rights on `perodua_oracle` when an earlier bundle gave them.
+
+### Uninstall
+
+Do the steps in this order.
+
+| Part | Commands |
+| --- | --- |
+| Port 80 rules (App server), if you added them | `sudo ufw delete allow from WAF_1 to any port 80 proto tcp`, the same for `WAF_2`, `sudo ufw delete deny 80/tcp`. When step 4 turned ufw on: `sudo ufw disable` and the default of before (`/root/ufw-status.before-oracle-view`) |
+| Route (App server) | `sudo cp -p /etc/perodua-https/routes.conf.before-oracle-view /etc/perodua-https/routes.conf`, then `sudo bash https.sh apply` |
+| Container (App server) | `sudo bash oracle-view.sh uninstall`, then type `oracle-view`. It removes the container, `initial-login.txt` and the files `install` made. The state volume, the users file and the image stay; `install` uses them again. `--purge` also removes the state volume (the mapping edits and the SQL audit), the users file and every local image of `perodua-deploy.novutal.com/oracle-view`. It lists what it removed. When a step fails, it also lists what it did not remove, keeps the deployment and exits 1: correct the cause, then run it again |
+| Role (DB server) | `sudo bash oracle-view.sh drop-role`, then type `oracle_view_rp`. It ends the sessions of the role, removes its rights in `perodua_oracle2` and in `perodua_oracle` (when it exists, so that an old grant cannot make the drop fail) and drops it (also `oracle_view_ro` of an earlier bundle). Rows that the SQL console changed stay changed |
+| `pg_hba.conf` line (DB server), if you added one | `sudo cp -p HBA_FILE.before-oracle-view HBA_FILE`, then `sudo -u postgres psql -X -d postgres -c 'SELECT pg_reload_conf()'` |
+| Registry | Delete the tag `oracle-view:grey-v1.0.2` and the tags of earlier releases when nobody needs them: each image holds the secrets |
+
+`uninstall` and `drop-role` without a terminal need `--confirm oracle-view` and
+`--confirm oracle_view_rp`.
+
+### Risks of the owner decisions
+
+The owner decided (2026-11-06) on the maximum rights for the SQL console and on
+the credentials in the image. `oracle-view.sh` changes none of these decisions.
+On the grey environment this means:
+
+- An editor (the `pm` user) can read every RP password hash
+  (`res_users.password`), API key (`res_users_apikeys`) and mail server password
+  (`ir_mail_server.smtp_pass`), and every system parameter
+  (`ir_config_parameter`) of `perodua_oracle2`, the live grey Odoo database. The
+  console masks no value.
+- An editor can change the password of any RP user, also the admin, and so take
+  over the grey App. A `DELETE` or an `UPDATE` can break the App.
+- The Oracle account of the image (ISSINTUSR) reaches 5 more databases through
+  its DB links (ENTGP2, ENTJP2, ENTRP2, ENTCP2, CRMDB). The console can write
+  where that account may write.
+- The Oracle credentials and the RP role password are in the image: every account
+  that can pull it, and every saved image file, holds them.
+- The tool shares `https://stgiss.perodua.com.my` with RP Odoo (`/dev/`) and the
+  ISS-Oracle API (`/api/`). A script of such an App (for example a stored XSS)
+  can use the session of a logged-in user of the tool and run the SQL console as
+  that user. A host name of its own for the tool (a route with its own host, the
+  WAF and a certificate) stops this.
+- The Read mode of the console stops a mistake, not a function that commits by
+  itself (an Oracle autonomous transaction, a call through a DB link, `dblink` of
+  PostgreSQL).
+- Port 80 serves the login of the tool in clear text to the WAF. Step 4 limits it
+  to the WAF nodes.
 
 ## HTTPS
 
