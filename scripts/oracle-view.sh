@@ -33,6 +33,9 @@ RP_DATABASE=perodua_oracle2
 # the rights of the role there.
 OLD_RP_DATABASE=perodua_oracle
 RP_ROLE=oracle_view_rp
+# The schema of the staging tables of Copy to RP (copy design, section 4.3) in RP_DATABASE:
+# the role owns it and nothing else. drop-role drops it with its tables and their data.
+STAGE_SCHEMA=ovb_stage
 APP_IP=192.168.23.13      # the App server, as the DB server sees it
 PG_PORT=5432
 SETTINGS=(OVB_MEM_LIMIT OVB_PIDS_LIMIT OVB_CPUS OVB_RP_SSLMODE)
@@ -41,7 +44,7 @@ OVB_MEM_LIMIT=1g OVB_PIDS_LIMIT=256 OVB_CPUS=1.5 OVB_RP_SSLMODE=require
 # default of the image applies (300 s). The image reads both (5-3600).
 OPTIONAL=(OVB_LIVE_TIMEOUT OVB_SQL_TIMEOUT)
 OVB_LIVE_TIMEOUT='' OVB_SQL_TIMEOUT=''
-COMMAND='' CONFIG='' NON_INTERACTIVE=0 CONFIRM='' PURGE=0 VERIFIER_FILE='' CHECK_ONLY=0
+COMMAND='' CONFIG='' NON_INTERACTIVE=0 CONFIRM='' PURGE=0 VERIFIER_FILE='' CHECK_ONLY=0 DROP_STAGING=0
 TEMP_DIR='' STAGE='' STAGED=0 AUTH_DIR='' VERIFIER=''
 GIVEN=()                  # the options on the command line, checked against the command
 NEW_USERS=()              # "name (role)" of the users this install made
@@ -62,7 +65,7 @@ Usage, on the App server:
 Usage, on the DB server:
        sudo bash oracle-view.sh role --verifier-file FILE [--app-ip ADDRESS] [--pg-port PORT]
        sudo bash oracle-view.sh role --check [--app-ip ADDRESS] [--pg-port PORT]
-       sudo bash oracle-view.sh drop-role [--confirm oracle_view_rp] [--pg-port PORT]
+       sudo bash oracle-view.sh drop-role [--confirm oracle_view_rp] [--drop-staging] [--pg-port PORT]
 
 install    Pulls the pinned image ($RELEASE) from the private registry
            and runs it from --dir (default /opt/perodua-oracle-view, a new or empty
@@ -84,18 +87,24 @@ uninstall  Removes the container and the files install made in --dir. The state
 role       Creates or updates the role oracle_view_rp on the database $RP_DATABASE
            with the SCRAM-SHA-256 verifier in --verifier-file (the image build
            wrote it; never the password), and its grants: read and write on the
-           tables, read-only by default, no DDL on the Odoo tables. It ends the
+           tables, read-only by default, no DDL on the Odoo tables, and the schema
+           $STAGE_SCHEMA for the staging tables of Copy to RP (the role owns it
+           and has USAGE and CREATE there; no CREATE in public). It ends the
            sessions of the role in $OLD_RP_DATABASE (the database of the earlier
            releases) and removes its rights there. Then it checks the rights (also
-           that the role has no right on another database), shows SHOW ssl and
-           whether dblink or postgres_fdw is installed, and checks pg_hba.conf for
+           that the role has no right on another database and owns nothing
+           outside $STAGE_SCHEMA), lists the tables in $STAGE_SCHEMA with their
+           sizes, shows SHOW ssl and whether dblink or postgres_fdw is
+           installed, and checks pg_hba.conf for
            the App server (--app-ip, default 192.168.23.13). It never edits
            pg_hba.conf: it prints the line to add.
            --check: the checks only, after a pg_hba.conf change.
 drop-role  Ends the sessions of oracle_view_rp and drops the role and its grants
-           in $RP_DATABASE and $OLD_RP_DATABASE. Rows that the SQL console
-           changed stay changed. Type the role name to confirm, or pass it with
-           --confirm.
+           in $RP_DATABASE and $OLD_RP_DATABASE. It also drops the schema
+           $STAGE_SCHEMA with its staging tables and their data: when
+           $STAGE_SCHEMA holds tables, it lists them and stops unless
+           --drop-staging is given. Rows that the SQL console changed stay
+           changed. Type the role name to confirm, or pass it with --confirm.
 Exit codes: 0 done; 1 error; 2 usage; role: 3 pg_hba.conf needs the printed line,
 4 pg_hba.conf needs a check by hand (a line the check cannot read, or an error).
 HELP
@@ -733,8 +742,9 @@ CREATE ROLE oracle_view_rp LOGIN PASSWORD :'ovb_verifier' CONNECTION LIMIT 10;
 \set VERBOSITY default
 \set SHOW_CONTEXT errors
 -- Owner decision of 2026-11-06: the SQL console has the maximum rights on this test
--- database, read-only by default. No superuser, no ownership of a table (Odoo owns
--- them, so DDL on them fails), no TRUNCATE, no CREATE in public.
+-- database, read-only by default. No superuser, no ownership of a table of public (Odoo
+-- owns them, so DDL on them fails), no TRUNCATE, no CREATE in public. The role owns only
+-- the schema ovb_stage and what it makes there (the staging tables of Copy to RP).
 ALTER ROLE oracle_view_rp NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
 ALTER ROLE oracle_view_rp SET default_transaction_read_only = on;
 ALTER ROLE oracle_view_rp SET statement_timeout = '30s';
@@ -760,6 +770,21 @@ SELECT format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA public GRANT SELEC
         UNION
         SELECT pg_get_userbyid(d.datdba) FROM pg_database d WHERE d.datname = current_database()) owners
  WHERE owner <> 'oracle_view_rp' \gexec
+-- Copy to RP (copy design, section 4.3): the staging tables go to a schema of their own,
+-- owned by the role, so that the role needs no CREATE in public and owns no Odoo table.
+-- PUBLIC has no right there. A schema ovb_stage of another owner stays as it is (no grant
+-- there), and check 13 of the rights fails. client_min_messages: no NOTICE on later runs.
+SET client_min_messages = warning;
+CREATE SCHEMA IF NOT EXISTS ovb_stage AUTHORIZATION oracle_view_rp;
+RESET client_min_messages;
+SELECT nspowner = (SELECT oid FROM pg_roles WHERE rolname = 'oracle_view_rp') AS ovb_stage_own
+  FROM pg_namespace WHERE nspname = 'ovb_stage' \gset
+\if :ovb_stage_own
+REVOKE ALL ON SCHEMA ovb_stage FROM PUBLIC;
+GRANT USAGE, CREATE ON SCHEMA ovb_stage TO oracle_view_rp;
+\else
+\echo The schema ovb_stage of :ovb_db belongs to another role: it stays as it is, without a grant to oracle_view_rp
+\endif
 SQL
 }
 
@@ -807,8 +832,18 @@ SELECT CASE WHEN ok THEN 'OK' ELSE 'FAIL' END || '|' || what FROM (
   UNION ALL
   SELECT 10, NOT has_schema_privilege('oracle_view_rp', 'public', 'CREATE'), 'no CREATE in public'
   UNION ALL
-  SELECT 11, count(*) = 0, 'owns no table, view or sequence (DDL on the Odoo tables fails)'
-    FROM pg_class WHERE relowner = (SELECT oid FROM pg_roles WHERE rolname = 'oracle_view_rp')
+  -- Every object the role owns in this database (pg_shdepend: also functions, types and
+  -- schemas), but the schema ovb_stage and what is in it. An index or a TOAST table has
+  -- no entry: it belongs to its table.
+  SELECT 11, count(*) = 0, 'owns nothing outside the schema ovb_stage (DDL on the Odoo tables fails)'
+         || coalesce(' (it owns: ' || array_to_string((array_agg(o.identity ORDER BY o.identity))[1:5], ', ')
+                     || CASE WHEN count(*) > 5 THEN ', ' || count(*) - 5 || ' more' ELSE '' END || ')', '')
+    FROM pg_shdepend s CROSS JOIN LATERAL pg_identify_object(s.classid, s.objid, s.objsubid) o
+   WHERE s.dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+     AND s.deptype = 'o' AND s.refclassid = 'pg_authid'::regclass
+     AND s.refobjid = (SELECT oid FROM pg_roles WHERE rolname = 'oracle_view_rp')
+     AND o.schema IS DISTINCT FROM 'ovb_stage'
+     AND NOT (s.classid = 'pg_namespace'::regclass AND o.identity = 'ovb_stage')
   UNION ALL
   -- A right in another database (a grant, a default privilege or an object there) or on it.
   SELECT 12, count(*) = 0, 'no right on a database other than ' || current_database()
@@ -820,20 +855,49 @@ SELECT CASE WHEN ok THEN 'OK' ELSE 'FAIL' END || '|' || what FROM (
                      AND s.refobjid = (SELECT oid FROM pg_roles WHERE rolname = 'oracle_view_rp'))
           OR EXISTS (SELECT 1 FROM aclexplode(d.datacl) a
                       WHERE a.grantee = (SELECT oid FROM pg_roles WHERE rolname = 'oracle_view_rp')))
+  UNION ALL
+  -- The schema of the staging tables of Copy to RP: the role owns it and no other schema.
+  SELECT 13, coalesce(array_agg(n.nspname::text ORDER BY n.nspname) = ARRAY['ovb_stage'], false),
+         'owns one schema, ovb_stage'
+         || CASE WHEN coalesce(array_agg(n.nspname::text ORDER BY n.nspname) = ARRAY['ovb_stage'], false) THEN ''
+                 ELSE ' (it owns: ' || coalesce(string_agg(n.nspname, ', ' ORDER BY n.nspname), 'no schema')
+                      || coalesce((SELECT '; the owner of ovb_stage is ' || pg_get_userbyid(nspowner)
+                                     FROM pg_namespace WHERE nspname = 'ovb_stage'
+                                      AND nspowner <> (SELECT oid FROM pg_roles WHERE rolname = 'oracle_view_rp')), '')
+                      || ')' END
+    FROM pg_namespace n WHERE n.nspowner = (SELECT oid FROM pg_roles WHERE rolname = 'oracle_view_rp')
+  UNION ALL
+  SELECT 14, coalesce((SELECT has_schema_privilege('oracle_view_rp', oid, 'USAGE')
+                              AND has_schema_privilege('oracle_view_rp', oid, 'CREATE')
+                         FROM pg_namespace WHERE nspname = 'ovb_stage'), false),
+         'USAGE and CREATE on the schema ovb_stage'
+  UNION ALL
+  SELECT 15, coalesce((SELECT NOT EXISTS (SELECT 1 FROM aclexplode(nspacl) a WHERE a.grantee = 0)
+                         FROM pg_namespace WHERE nspname = 'ovb_stage'), false),
+         'no right of PUBLIC on the schema ovb_stage'
 ) checks ORDER BY n
 SQL
 )
 
+ROLE_CHECKS=15   # the lines of ROLE_CHECK_SQL
 role_checks() {   # prints each right; a missing or an extra right stops the command
-    local out result what failed=0 elsewhere=0
+    local out result what failed=0 elsewhere=0 stage=0
     out=$(pg_value "$RP_DATABASE" "$ROLE_CHECK_SQL") || die 'The check of the rights failed (above)'
-    [[ $(grep -c . <<< "$out") == 12 ]] || die "The check of the rights gave an unexpected answer: $out"
+    [[ $(grep -c . <<< "$out") == "$ROLE_CHECKS" ]] || die "The check of the rights gave an unexpected answer: $out"
     while IFS='|' read -r result what; do
         printf '%-4s %s\n' "$result" "$what"
         [[ $result == OK ]] && continue
         failed=1
         [[ $what != 'no right on a database other than '* ]] || elsewhere=1
+        case $what in "owns one schema, $STAGE_SCHEMA"*|*" on the schema $STAGE_SCHEMA") stage=1 ;; esac
     done <<< "$out"
+    if ((stage)); then
+        printf '\nThe schema %s of %s holds the staging tables of Copy to RP: %s must own it, with USAGE and CREATE there,\n' \
+            "$STAGE_SCHEMA" "$RP_DATABASE" "$RP_ROLE" >&2
+        printf 'and PUBLIC must have no right there. role --verifier-file FILE makes it so, except for a schema %s\n' \
+            "$STAGE_SCHEMA" >&2
+        printf 'of another owner: find out who made it before you change its owner or drop it, then run role again.\n' >&2
+    fi
     if ((elsewhere)); then
         printf '\nIn each database of the FAIL line, remove the rights of %s. Run this in that database:\n' "$RP_ROLE" >&2
         printf '    BEGIN; DROP OWNED BY %s; GRANT CONNECT, TEMPORARY ON DATABASE %s TO %s; COMMIT;\n' \
@@ -843,6 +907,83 @@ role_checks() {   # prints each right; a missing or an extra right stops the com
         printf 'Then run role again.\n' >&2
     fi
     ((failed == 0)) || die "The role $RP_ROLE does not have the rights above. Nothing in pg_hba.conf was checked."
+}
+
+# The staging tables in STAGE_SCHEMA of RP_DATABASE, the tables that drop-role drops (as
+# drop_sql counts them): every table and materialized view there when the role owns the
+# schema, else those of the role there. "count|total size", then one line for each table.
+STAGE_FROM="FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_roles r ON r.rolname = '$RP_ROLE'
+ WHERE n.nspname = '$STAGE_SCHEMA' AND c.relkind IN ('r', 'p', 'm') AND (n.nspowner = r.oid OR c.relowner = r.oid)"
+# The objects outside STAGE_SCHEMA that depend on an object in it (a view or a foreign key
+# in public on a staging table, for example), when the role owns the schema: DROP SCHEMA
+# ... CASCADE of drop-role would drop them too, so drop-role stops while there are any.
+# An object of a kind that this list does not place counts as outside.
+STAGE_OUTSIDE_WITH="WITH s AS (SELECT n.oid FROM pg_namespace n JOIN pg_roles r ON r.oid = n.nspowner
+                WHERE n.nspname = '$STAGE_SCHEMA' AND r.rolname = '$RP_ROLE'),
+     inside (classid, objid) AS (
+         SELECT 'pg_namespace'::regclass::oid, s.oid FROM s
+         UNION ALL SELECT 'pg_class'::regclass::oid, c.oid FROM pg_class c JOIN s ON c.relnamespace = s.oid
+         UNION ALL SELECT 'pg_type'::regclass::oid, t.oid FROM pg_type t JOIN s ON t.typnamespace = s.oid
+         UNION ALL SELECT 'pg_proc'::regclass::oid, p.oid FROM pg_proc p JOIN s ON p.pronamespace = s.oid),
+     dependent AS (
+         SELECT CASE d.classid
+                  WHEN 'pg_class'::regclass THEN (SELECT relnamespace FROM pg_class WHERE oid = d.objid)
+                  WHEN 'pg_type'::regclass THEN (SELECT typnamespace FROM pg_type WHERE oid = d.objid)
+                  WHEN 'pg_proc'::regclass THEN (SELECT pronamespace FROM pg_proc WHERE oid = d.objid)
+                  WHEN 'pg_operator'::regclass THEN (SELECT oprnamespace FROM pg_operator WHERE oid = d.objid)
+                  WHEN 'pg_constraint'::regclass THEN (SELECT connamespace FROM pg_constraint WHERE oid = d.objid)
+                  WHEN 'pg_statistic_ext'::regclass THEN (SELECT stxnamespace FROM pg_statistic_ext WHERE oid = d.objid)
+                  WHEN 'pg_default_acl'::regclass THEN (SELECT defaclnamespace FROM pg_default_acl WHERE oid = d.objid)
+                  WHEN 'pg_rewrite'::regclass THEN (SELECT c.relnamespace FROM pg_rewrite w JOIN pg_class c
+                                                      ON c.oid = w.ev_class WHERE w.oid = d.objid)
+                  WHEN 'pg_trigger'::regclass THEN (SELECT c.relnamespace FROM pg_trigger g JOIN pg_class c
+                                                      ON c.oid = g.tgrelid WHERE g.oid = d.objid)
+                  WHEN 'pg_attrdef'::regclass THEN (SELECT c.relnamespace FROM pg_attrdef a JOIN pg_class c
+                                                      ON c.oid = a.adrelid WHERE a.oid = d.objid)
+                  WHEN 'pg_policy'::regclass THEN (SELECT c.relnamespace FROM pg_policy p JOIN pg_class c
+                                                     ON c.oid = p.polrelid WHERE p.oid = d.objid)
+                END AS nsp,
+                CASE WHEN d.classid = 'pg_rewrite'::regclass THEN 'pg_class'::regclass::oid ELSE d.classid END AS oclass,
+                CASE WHEN d.classid = 'pg_rewrite'::regclass   -- the rule of a view: name the view
+                     THEN (SELECT ev_class FROM pg_rewrite WHERE oid = d.objid) ELSE d.objid END AS oobj
+           FROM pg_depend d JOIN inside i ON i.classid = d.refclassid AND i.objid = d.refobjid
+          WHERE d.deptype <> 'i'),
+     outside AS (SELECT DISTINCT o.type || ' ' || o.identity AS obj
+                   FROM dependent, pg_identify_object(oclass, oobj, 0) o
+                  WHERE nsp IS DISTINCT FROM (SELECT oid FROM s))"
+STAGE_TOTAL_SQL="SELECT count(*) || '|' || pg_size_pretty(coalesce(sum(pg_total_relation_size(c.oid)), 0))
+  $STAGE_FROM"
+STAGE_LIST_SQL="SELECT format('    %-40s %12s  %s', c.relname, pg_size_pretty(pg_total_relation_size(c.oid)),
+              pg_get_userbyid(c.relowner))
+  $STAGE_FROM
+ ORDER BY pg_total_relation_size(c.oid) DESC, c.relname"
+STAGE_TABLES=0 STAGE_SIZE=''
+stage_tables() {   # lists the staging tables with their sizes; sets STAGE_TABLES and STAGE_SIZE
+    local total
+    total=$(pg_value "$RP_DATABASE" "$STAGE_TOTAL_SQL") || die "The list of the tables in $STAGE_SCHEMA failed (above)"
+    [[ $total =~ ^[0-9]+\|.+$ ]] || die "The list of the tables in $STAGE_SCHEMA gave an unexpected answer: $total"
+    STAGE_TABLES=${total%%|*} STAGE_SIZE=${total#*|}
+    printf '\n== Staging tables of Copy to RP: the schema %s of %s\n' "$STAGE_SCHEMA" "$RP_DATABASE"
+    if ((STAGE_TABLES == 0)); then
+        printf 'none: %s holds no table\n' "$STAGE_SCHEMA"
+        return 0
+    fi
+    printf '%s tables, %s on disk:\n' "$STAGE_TABLES" "$STAGE_SIZE"
+    printf '    %-40s %12s  %s\n' table size owner
+    pg_value "$RP_DATABASE" "$STAGE_LIST_SQL" || die "The list of the tables in $STAGE_SCHEMA failed (above)"
+}
+
+stage_outside() {   # stops when objects outside STAGE_SCHEMA depend on it (DROP SCHEMA ... CASCADE drops them)
+    local found
+    found=$(pg_value "$RP_DATABASE" "$STAGE_OUTSIDE_WITH SELECT obj FROM outside ORDER BY obj") \
+        || die "The check of the objects that depend on $STAGE_SCHEMA failed (above)"
+    [[ -n $found ]] || return 0
+    printf '\nThese objects outside the schema %s depend on an object in it. drop-role drops the schema with CASCADE,\n' \
+        "$STAGE_SCHEMA" >&2
+    printf 'so it would drop them too, with their data:\n' >&2
+    printf '    %s\n' "${found//$'\n'/$'\n    '}" >&2
+    printf 'Remove each dependency first (for example DROP VIEW, or ALTER TABLE ... DROP CONSTRAINT), or copy the object.\n' >&2
+    die "Objects outside the schema $STAGE_SCHEMA depend on it (above). Nothing was changed."
 }
 
 tls_note() {
@@ -1044,8 +1185,13 @@ drop_sql() {
 -- their sessions, removes their grants and default privileges in ovb_db and in
 -- ovb_old_db, the database of the earlier releases, when it exists and accepts
 -- connections (DROP OWNED BY: a grant there cannot make DROP ROLE fail), and drops the
--- roles. The rows that the SQL console changed stay changed.
+-- roles. The rows that the SQL console changed stay changed. In ovb_db it first drops the
+-- schema ovb_stage of Copy to RP with its staging tables and their data; with tables there
+-- and ovb_drop_staging off (a table made after the check of the script), it stops, gives
+-- the role its LOGIN back and drops nothing. It does the same when an object outside
+-- ovb_stage depends on an object in it (DROP SCHEMA ... CASCADE would drop that object).
 SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'oracle_view_rp') AS ovb_rp,
+       coalesce((SELECT rolcanlogin FROM pg_roles WHERE rolname = 'oracle_view_rp'), false) AS ovb_rp_login,
        EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'oracle_view_ro') AS ovb_ro,
        :'ovb_old_db' <> :'ovb_db'
          AND EXISTS (SELECT 1 FROM pg_database WHERE datname = :'ovb_old_db'
@@ -1054,6 +1200,45 @@ SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'oracle_view_rp') AS ovb_r
 ALTER ROLE oracle_view_rp NOLOGIN;
 SELECT count(pg_terminate_backend(pid)) AS ended_sessions FROM pg_stat_activity WHERE usename = 'oracle_view_rp' \gset
 \connect :ovb_db
+-- The tables that go: every table of ovb_stage when the role owns the schema, else the
+-- tables of the role there (DROP OWNED BY). A schema ovb_stage of another owner stays.
+SELECT count(c.oid) AS ovb_stage_tables,
+       pg_size_pretty(coalesce(sum(pg_total_relation_size(c.oid)), 0)) AS ovb_stage_size,
+       count(c.oid) > 0 AND NOT :'ovb_drop_staging'::boolean AS ovb_stage_kept,
+       coalesce(bool_or(n.nspowner = r.oid), false) AS ovb_stage,
+       coalesce(bool_or(n.nspowner <> r.oid), false) AS ovb_stage_other
+  FROM pg_namespace n JOIN pg_roles r ON r.rolname = 'oracle_view_rp'
+  LEFT JOIN pg_class c ON c.relnamespace = n.oid AND c.relkind IN ('r', 'p', 'm')
+                      AND (n.nspowner = r.oid OR c.relowner = r.oid)
+ WHERE n.nspname = 'ovb_stage' \gset
+\if :ovb_stage_kept
+\connect postgres
+\if :ovb_rp_login
+ALTER ROLE oracle_view_rp LOGIN;
+\endif
+\echo ovb_stage holds :ovb_stage_tables staging tables now. Nothing was dropped.
+DO $$ BEGIN RAISE EXCEPTION 'ovb_stage holds staging tables: run drop-role again, with --drop-staging to drop them'; END $$;
+\endif
+\if :ovb_stage
+SQL
+    # $1: the WITH clause of the objects outside ovb_stage that depend on it (STAGE_OUTSIDE_WITH).
+    printf '%s\n' "$1 SELECT count(*) > 0 AS ovb_stage_outside, count(*) AS ovb_stage_outside_count," \
+        "       coalesce(string_agg(obj, '; ' ORDER BY obj), '') AS ovb_stage_outside_list FROM outside \\gset"
+    cat <<'SQL'
+\if :ovb_stage_outside
+\connect postgres
+\if :ovb_rp_login
+ALTER ROLE oracle_view_rp LOGIN;
+\endif
+\echo :ovb_stage_outside_count objects outside ovb_stage depend on it: :ovb_stage_outside_list
+\echo Nothing was dropped.
+DO $$ BEGIN RAISE EXCEPTION 'objects outside ovb_stage depend on it: DROP SCHEMA ovb_stage CASCADE would drop them'; END $$;
+\endif
+DROP SCHEMA ovb_stage CASCADE;
+\echo schema ovb_stage dropped, with its :ovb_stage_tables staging tables and their data (:ovb_stage_size)
+\elif :ovb_stage_other
+\echo schema ovb_stage of another owner stays: :ovb_stage_tables staging tables of oracle_view_rp in it dropped (:ovb_stage_size)
+\endif
 DROP OWNED BY oracle_view_rp;
 \if :ovb_old
 \connect :ovb_old_db
@@ -1100,6 +1285,8 @@ cmd_role() {
     fi
     printf '\n== Rights of %s\n' "$RP_ROLE"
     role_checks
+    stage_tables
+    ((STAGE_TABLES == 0)) || printf 'To free the disk, drop the staging tables that nobody needs (README.md, Oracle Field Browser).\n'
     tls_note
     extensions_note
     printf '\n== pg_hba.conf check\n'
@@ -1111,15 +1298,29 @@ cmd_role() {
 }
 
 cmd_drop_role() {
-    local hba
+    local hba staging=off
     db_lock
     find_psql
     db_ready
     printf 'This ends the sessions of %s, removes its rights in %s and %s and drops it (also oracle_view_ro of an earlier bundle).\n' \
         "$RP_ROLE" "$RP_DATABASE" "$OLD_RP_DATABASE"
+    printf 'It also drops the schema %s of %s: the staging tables of Copy to RP and their data are dropped.\n' \
+        "$STAGE_SCHEMA" "$RP_DATABASE"
     printf 'Rows that the SQL console changed stay changed.\n'
+    if [[ $(pg_value postgres "SELECT count(*) FROM pg_roles WHERE rolname = '$RP_ROLE'") == 1 ]]; then
+        stage_tables
+        stage_outside
+        if ((STAGE_TABLES > 0 && DROP_STAGING == 0)); then
+            printf '\ndrop-role drops these %s tables and their data (%s). To keep a table, copy it first, for example:\n' \
+                "$STAGE_TABLES" "$STAGE_SIZE" >&2
+            printf "    sudo -u postgres pg_dump -p %s -d %s -n %s -Fc -f /var/tmp/ovb_stage.dump\n" \
+                "$PG_PORT" "$RP_DATABASE" "$STAGE_SCHEMA" >&2
+            die "The schema $STAGE_SCHEMA holds $STAGE_TABLES staging tables (above). To drop them with the role, run drop-role again with --drop-staging. Nothing was changed."
+        fi
+    fi
     confirm "$RP_ROLE"
-    drop_sql | pg_sql || die "Dropping the role $RP_ROLE failed (above)"
+    ((DROP_STAGING == 0)) || staging=on
+    drop_sql "$STAGE_OUTSIDE_WITH" | pg_sql -v "ovb_drop_staging=$staging" || die "Dropping the role $RP_ROLE failed (above)"
     hba=$(pg_value postgres 'SHOW hba_file')
     printf 'A pg_hba.conf line that you added for %s stays in %s: remove it by hand (or put back %s.before-oracle-view),\n' \
         "$RP_ROLE" "$hba" "$hba"
@@ -1148,6 +1349,7 @@ while (($#)); do
         --non-interactive) NON_INTERACTIVE=1; GIVEN+=("$1"); shift ;;
         --purge) PURGE=1; GIVEN+=("$1"); shift ;;
         --check) CHECK_ONLY=1; GIVEN+=("$1"); shift ;;
+        --drop-staging) DROP_STAGING=1; GIVEN+=("$1"); shift ;;
         *) usage_error "Unknown argument: $1" ;;
     esac
 done
@@ -1165,7 +1367,7 @@ case $COMMAND in
         allowed --verifier-file --check --app-ip --pg-port
         [[ -n $VERIFIER_FILE || $CHECK_ONLY == 1 ]] || usage_error 'role needs --verifier-file FILE (or --check)'
         [[ -z $VERIFIER_FILE || $CHECK_ONLY == 0 ]] || usage_error '--verifier-file and --check do not go together' ;;
-    drop-role) allowed --confirm --pg-port ;;
+    drop-role) allowed --confirm --drop-staging --pg-port ;;
     *) usage >&2; exit 2 ;;
 esac
 octet='(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])'
