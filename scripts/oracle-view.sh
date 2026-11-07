@@ -666,7 +666,8 @@ SET pg_stat_statements.track_utility = off;
 SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'oracle_view_ro') AS ovb_ro,
        EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'oracle_view_rp') AS ovb_rp,
        :'ovb_old_db' <> :'ovb_db'
-         AND EXISTS (SELECT 1 FROM pg_database WHERE datname = :'ovb_old_db') AS ovb_old \gset
+         AND EXISTS (SELECT 1 FROM pg_database WHERE datname = :'ovb_old_db'
+                       AND datallowconn AND datconnlimit <> -2) AS ovb_old \gset
 \if :ovb_ro
 \echo The read-only role oracle_view_ro of an earlier bundle: its sessions end and it is dropped
 ALTER ROLE oracle_view_ro NOLOGIN;
@@ -677,7 +678,11 @@ SELECT count(pg_terminate_backend(pid)) AS ended_sessions FROM pg_stat_activity 
 -- removes its rights there. DROP OWNED BY also revokes the rights of the role on every
 -- database (CONNECT, TEMPORARY: a database is a shared object), and deploy-db.sh revokes
 -- CONNECT from PUBLIC. So ovb_db gets them again in the same transaction: a stop between
--- the two changes nothing, and the tool keeps its way in. No old database: nothing to do.
+-- the two changes nothing, and the tool keeps its way in. The sessions there end again
+-- after the COMMIT: a session that opened before it keeps its way in, and after it no new
+-- session can start (PUBLIC has no CONNECT there). No old database, or one that does not
+-- accept connections (ALLOW_CONNECTIONS false, or a database half dropped): nothing to do
+-- here, and check 12 still lists a right that stays there.
 \if :ovb_old
 \if :ovb_rp
 \echo The rights of oracle_view_rp in :ovb_old_db, the database of the earlier releases: its sessions there end and the rights are removed
@@ -700,6 +705,10 @@ DROP OWNED BY oracle_view_rp;
 GRANT CONNECT, TEMPORARY ON DATABASE :"ovb_db" TO oracle_view_rp;
 \endif
 COMMIT;
+\if :ovb_rp
+SELECT count(pg_terminate_backend(pid)) AS ended_sessions FROM pg_stat_activity
+ WHERE usename = 'oracle_view_rp' AND datname = :'ovb_old_db' \gset
+\endif
 \endif
 \if :ovb_ro
 \connect :ovb_db
@@ -826,9 +835,12 @@ role_checks() {   # prints each right; a missing or an extra right stops the com
         [[ $what != 'no right on a database other than '* ]] || elsewhere=1
     done <<< "$out"
     if ((elsewhere)); then
-        printf '\nIn each database of the FAIL line, remove the rights of %s (REVOKE ... FROM %s, or DROP OWNED BY %s there),\n' \
-            "$RP_ROLE" "$RP_ROLE" "$RP_ROLE" >&2
-        printf 'then run role again: it grants CONNECT and TEMPORARY on %s again.\n' "$RP_DATABASE" >&2
+        printf '\nIn each database of the FAIL line, remove the rights of %s. Run this in that database:\n' "$RP_ROLE" >&2
+        printf '    BEGIN; DROP OWNED BY %s; GRANT CONNECT, TEMPORARY ON DATABASE %s TO %s; COMMIT;\n' \
+            "$RP_ROLE" "$RP_DATABASE" "$RP_ROLE" >&2
+        printf 'DROP OWNED BY alone also removes CONNECT on %s (a database is a shared object): then the tool cannot connect.\n' \
+            "$RP_DATABASE" >&2
+        printf 'Then run role again.\n' >&2
     fi
     ((failed == 0)) || die "The role $RP_ROLE does not have the rights above. Nothing in pg_hba.conf was checked."
 }
@@ -1030,13 +1042,14 @@ drop_sql() {
 -- oracle-view.sh: drop-role
 -- Stops new logins of oracle_view_rp (and of oracle_view_ro of an earlier bundle), ends
 -- their sessions, removes their grants and default privileges in ovb_db and in
--- ovb_old_db, the database of the earlier releases, when it exists (DROP OWNED BY: a
--- grant there cannot make DROP ROLE fail), and drops the roles. The rows that the SQL
--- console changed stay changed.
+-- ovb_old_db, the database of the earlier releases, when it exists and accepts
+-- connections (DROP OWNED BY: a grant there cannot make DROP ROLE fail), and drops the
+-- roles. The rows that the SQL console changed stay changed.
 SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'oracle_view_rp') AS ovb_rp,
        EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'oracle_view_ro') AS ovb_ro,
        :'ovb_old_db' <> :'ovb_db'
-         AND EXISTS (SELECT 1 FROM pg_database WHERE datname = :'ovb_old_db') AS ovb_old \gset
+         AND EXISTS (SELECT 1 FROM pg_database WHERE datname = :'ovb_old_db'
+                       AND datallowconn AND datconnlimit <> -2) AS ovb_old \gset
 \if :ovb_rp
 ALTER ROLE oracle_view_rp NOLOGIN;
 SELECT count(pg_terminate_backend(pid)) AS ended_sessions FROM pg_stat_activity WHERE usename = 'oracle_view_rp' \gset

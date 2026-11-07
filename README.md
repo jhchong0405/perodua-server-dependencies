@@ -2129,14 +2129,24 @@ Do the steps in this order.
    database (a database is a shared object), and `deploy-db.sh` revokes the rights
    of `PUBLIC` on its database. So `perodua_oracle2` gets them again in the same
    transaction: a stop between the two changes nothing, and the tool keeps its
-   way in. When the server has no `perodua_oracle`, the command skips this step.
+   way in. After the `COMMIT`, the command ends the sessions of the role there
+   again: a container of an earlier release can open a session before the
+   `COMMIT`, and after it no new session can start, because `PUBLIC` has no
+   `CONNECT` there. When the server has no `perodua_oracle`, or when
+   `perodua_oracle` does not accept connections (`ALLOW_CONNECTIONS false`, or a
+   database half dropped), the command skips this step.
    After the grants, the line `no right on a database other than
    perodua_oracle2` of the rights check lists each other database where the role
-   still has a right (a grant, a default privilege or an object there). Such a
-   database stops the command (exit status 1) before the `pg_hba.conf` check:
-   remove that right there (`REVOKE ... FROM oracle_view_rp`, or
-   `DROP OWNED BY oracle_view_rp` in that database), then run `role` again. It
-   grants `CONNECT` and `TEMPORARY` on `perodua_oracle2` again.
+   still has a right (a grant on that database, or a grant, a default privilege
+   or an object in it). Such a database stops the command (exit status 1) before
+   the `pg_hba.conf` check. Run this in that database, then run `role` again:
+
+   ```sql
+   BEGIN; DROP OWNED BY oracle_view_rp; GRANT CONNECT, TEMPORARY ON DATABASE perodua_oracle2 TO oracle_view_rp; COMMIT;
+   ```
+
+   `DROP OWNED BY` alone also removes `CONNECT` on `perodua_oracle2` (a database
+   is a shared object): then the tool cannot connect until the next `role` run.
 
 3. Read the output:
 
@@ -2387,6 +2397,23 @@ users, the settings and the state volume stay. If the new image does not become
 healthy, the last release that did runs again with its settings, and the settings
 that failed are kept in `oracle-view.env.failed`. Every user must log in again.
 
+A release that changes the database of the image (as `grey-v1.0.2` did, to
+`perodua_oracle2`) needs two steps before its `install`:
+
+1. On the DB server, run `sudo bash oracle-view.sh role --verifier-file
+   ~/rp_grey.verifier` of the new release
+   ([The RP role](#1-the-rp-role-db-server)). It gives the role its rights on the
+   new database and removes them on the old one.
+2. Add the new `pg_hba.conf` line that `role` prints, then reload
+   ([step 4](#1-the-rp-role-db-server)).
+
+Without them the new image cannot connect and does not become healthy: then the
+last release runs again. After step 1 that release cannot connect, because
+`role` removed the rights of the role on its old database. To go back to a
+release before grey-v1.0.2, give the role its old rights on its old database
+`perodua_oracle` again: on the DB server, run the `role` command of the script
+of that release. Its `pg_hba.conf` line for `perodua_oracle` must also be there.
+
 ### From the manual install
 
 If the App server runs the manual install of the `oracle-view` repository
@@ -2440,7 +2467,7 @@ Do the steps in this order.
 | Port 80 rules (App server), if you added them | `sudo ufw delete allow from WAF_1 to any port 80 proto tcp`, the same for `WAF_2`, `sudo ufw delete deny 80/tcp`. When step 4 turned ufw on: `sudo ufw disable` and the default of before (`/root/ufw-status.before-oracle-view`) |
 | Route (App server) | `sudo cp -p /etc/perodua-https/routes.conf.before-oracle-view /etc/perodua-https/routes.conf`, then `sudo bash https.sh apply` |
 | Container (App server) | `sudo bash oracle-view.sh uninstall`, then type `oracle-view`. It removes the container, `initial-login.txt` and the files `install` made. The state volume, the users file and the image stay; `install` uses them again. `--purge` also removes the state volume (the mapping edits and the SQL audit), the users file and every local image of `perodua-deploy.novutal.com/oracle-view`. It lists what it removed. When a step fails, it also lists what it did not remove, keeps the deployment and exits 1: correct the cause, then run it again |
-| Role (DB server) | `sudo bash oracle-view.sh drop-role`, then type `oracle_view_rp`. It ends the sessions of the role, removes its rights in `perodua_oracle2` and in `perodua_oracle` (when it exists, so that an old grant cannot make the drop fail) and drops it (also `oracle_view_ro` of an earlier bundle). Rows that the SQL console changed stay changed |
+| Role (DB server) | `sudo bash oracle-view.sh drop-role`, then type `oracle_view_rp`. It ends the sessions of the role, removes its rights in `perodua_oracle2` and in `perodua_oracle` (when it exists, so that an old grant cannot make the drop fail) and drops it (also `oracle_view_ro` of an earlier bundle). It skips a `perodua_oracle` that does not accept connections. Rows that the SQL console changed stay changed |
 | `pg_hba.conf` line (DB server), if you added one | `sudo cp -p HBA_FILE.before-oracle-view HBA_FILE`, then `sudo -u postgres psql -X -d postgres -c 'SELECT pg_reload_conf()'` |
 | Registry | Delete the tag `oracle-view:grey-v1.0.2` and the tags of earlier releases when nobody needs them: each image holds the secrets |
 
