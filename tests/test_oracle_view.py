@@ -1486,6 +1486,15 @@ def words(text):  # the text with each run of white space as one space, as Markd
 class OracleViewDocsTest(unittest.TestCase):
     """The README and the usage text name the pinned release and the steps that the script expects."""
 
+    def test_the_pin_is_the_release_of_2026_11_07(self):
+        # grey-v1.0.2: linux/amd64, label org.opencontainers.image.version=grey-v1.0.2, revision 9cd7a93.
+        self.assertEqual(IMAGE, REPOSITORY + ":grey-v1.0.2@sha256:"
+                         "a5b481112ae1cdba38b3573ac12c7c1d777687d146269ab07a378518bd046716")
+        self.assertEqual(RELEASE, "oracle-view-grey-v1.0.2")
+        for old in ("grey-v1.0.1", "8e82b47f"):
+            self.assertNotIn(old, TEXT)
+            self.assertNotIn(old, README)
+
     def test_the_readme_and_the_usage_name_the_pinned_release(self):
         tag = IMAGE.split("@")[0]
         self.assertEqual(set(re.findall(r"oracle-view:(grey-v[0-9][0-9.]*[0-9])", README)), {tag.split(":")[1]})
