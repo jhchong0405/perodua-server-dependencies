@@ -172,6 +172,14 @@ check_settings() {
 }
 
 # ---------------------------------------------------------------- image
+check_engine() {   # the health check of compose.yml uses start_interval: Docker Engine API 1.44 (Docker 25) or later
+    local api
+    api=$(docker version --format '{{.Server.APIVersion}}' 2> /dev/null) || api=''
+    [[ $api =~ ^([0-9]+)\.([0-9]+)$ ]] || die "The Docker engine does not answer (docker version): start it with sudo systemctl enable --now docker. Nothing was changed."
+    if ((10#${BASH_REMATCH[1]} < 1 || (10#${BASH_REMATCH[1]} == 1 && 10#${BASH_REMATCH[2]} < 44))); then
+        die "The Docker engine has API $api; the health check of the tool (start_interval) needs API 1.44 (Docker 25) or later. Update Docker first (sudo apt-get install --only-upgrade docker-ce docker-ce-cli containerd.io docker-compose-plugin; the containers of this server restart). Nothing was changed."
+    fi
+}
 auth_error() { grep -Eiq 'unauthorized|authentication required|denied|forbidden|403|401|no basic auth' "$1"; }
 pull_image() {   # asks for the registry account only when the registry wants one
     local username token attempts=0 endpoint name='^[A-Za-z0-9][A-Za-z0-9._@-]{0,127}$'
@@ -414,7 +422,7 @@ healthz() {   # /healthz through the published port, from this server
     [[ $(curl -fsS --max-time 5 --noproxy '*' "http://127.0.0.1:$PORT/healthz" 2> /dev/null || true) == ok ]]
 }
 
-route_listed() { grep -qsF '/dev/oracle-view/' "$ROUTES_FILE"; }
+route_listed() { grep -qsE '^[^#]*/dev/oracle-view/' "$ROUTES_FILE"; }   # a commented example is not a route
 
 # ---------------------------------------------------------------- App commands
 cmd_install() {
@@ -426,6 +434,7 @@ cmd_install() {
     if is_ours && [[ -f $DEPLOY_DIR/oracle-view.env ]]; then read_settings "$DEPLOY_DIR/oracle-view.env"; fi
     [[ -z $CONFIG ]] || read_settings "$CONFIG"
     check_settings
+    check_engine
     claim_project
     install -d -m 0700 "$DEPLOY_DIR"
     is_ours || printf 'DIR=%s\n' "$DEPLOY_DIR" > "$DEPLOY_DIR/$IDENTITY"
@@ -498,8 +507,11 @@ cmd_status() {
     compose ps --all
 }
 
+join_list() { local list; list=$(printf '%s, ' "$@"); printf '%s' "${list%, }"; }
+
 cmd_uninstall() {
-    local id
+    local id images
+    local -a removed=() kept=()
     lock
     is_ours || die "$DEPLOY_DIR is not a deployment of this script (no $IDENTITY). Nothing was changed."
     if ((PURGE)); then
@@ -525,18 +537,37 @@ cmd_uninstall() {
     rm -f -- "$DEPLOY_DIR/compose.yml" "$DEPLOY_DIR/oracle-view.env" "$DEPLOY_DIR/oracle-view.env.failed" \
         "$DEPLOY_DIR/$SNAPSHOT" "$DEPLOY_DIR/$SNAPSHOT.new" "$DEPLOY_DIR/${STAMP:?}"
     if ((PURGE)); then
+        removed=("the $PROJECT container" "the files of install")
         if docker volume inspect "$VOLUME" > /dev/null 2>&1; then
-            docker volume rm "$VOLUME" > /dev/null || printf 'WARNING: the volume %s could not be removed (see above)\n' "$VOLUME" >&2
+            if docker volume rm "$VOLUME" > /dev/null; then
+                removed+=("the state volume $VOLUME")
+            else
+                kept+=("the state volume $VOLUME")
+            fi
         fi
-        for id in $(docker image ls --quiet "$REPOSITORY" | sort -u); do
-            docker image rm --force "$id" > /dev/null || printf 'WARNING: the image %s could not be removed\n' "$id" >&2
+        images=$(docker image ls --quiet "$REPOSITORY" | sort -u) || { kept+=("the images of $REPOSITORY (docker image ls failed)"); images=''; }
+        for id in $images; do
+            if docker image rm --force "$id" > /dev/null; then
+                removed+=("the image $id")
+            else
+                kept+=("the image $id")
+            fi
         done
-        rm -f -- "$DEPLOY_DIR/users" "$DEPLOY_DIR/${IDENTITY:?}"
+        if [[ -e $DEPLOY_DIR/users || -L $DEPLOY_DIR/users ]]; then
+            if rm -f -- "$DEPLOY_DIR/users"; then removed+=("the users file"); else kept+=("$DEPLOY_DIR/users"); fi
+        fi
+        if ((${#kept[@]})); then
+            # The identity stays, so that uninstall --purge can be run again.
+            printf 'Removed: %s.\n' "$(join_list "${removed[@]}")"
+            printf 'NOT removed: %s (see above).\n' "$(join_list "${kept[@]}")" >&2
+            die "uninstall --purge did not finish. Fix the cause, then run again: sudo bash oracle-view.sh uninstall --purge --confirm $PROJECT --dir $DEPLOY_DIR"
+        fi
+        rm -f -- "$DEPLOY_DIR/${IDENTITY:?}"
         if rmdir -- "$DEPLOY_DIR" 2> /dev/null; then
-            printf 'Removed %s, its state volume, its users, its images and %s.\n' "$PROJECT" "$DEPLOY_DIR"
+            removed+=("$DEPLOY_DIR")
+            printf 'Removed: %s.\n' "$(join_list "${removed[@]}")"
         else
-            printf 'Removed %s, its state volume, its users and its images. %s stays: it holds files install did not create.\n' \
-                "$PROJECT" "$DEPLOY_DIR"
+            printf 'Removed: %s.\n%s stays: it holds files install did not create.\n' "$(join_list "${removed[@]}")" "$DEPLOY_DIR"
         fi
     else
         printf 'Removed the %s container and the files of install in %s.\n' "$PROJECT" "$DEPLOY_DIR"

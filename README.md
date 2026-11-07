@@ -2200,8 +2200,10 @@ With `ssl = on` nothing is to do. With `ssl = off`, choose one:
 
 ### 2. The container (App server)
 
-Docker is installed: `sudo bash install-dependencies.sh --role app`, then
-`sudo systemctl enable --now docker`.
+Docker 25 or later (Engine API 1.44, for the `start_interval` of the health
+check) is installed: `sudo bash install-dependencies.sh --role app`, then
+`sudo systemctl enable --now docker`. With an older Docker engine, `install`
+stops before it changes anything.
 
 ```bash
 sudo bash oracle-view.sh install
@@ -2387,7 +2389,7 @@ Do the steps in this order.
 | --- | --- |
 | Port 80 rules (App server), if you added them | `sudo ufw delete allow from WAF_1 to any port 80 proto tcp`, the same for `WAF_2`, `sudo ufw delete deny 80/tcp`. When step 4 turned ufw on: `sudo ufw disable` and the default of before (`/root/ufw-status.before-oracle-view`) |
 | Route (App server) | `sudo cp -p /etc/perodua-https/routes.conf.before-oracle-view /etc/perodua-https/routes.conf`, then `sudo bash https.sh apply` |
-| Container (App server) | `sudo bash oracle-view.sh uninstall`, then type `oracle-view`. It removes the container, `initial-login.txt` and the files `install` made. The state volume, the users file and the image stay; `install` uses them again. `--purge` also removes the state volume (the mapping edits and the SQL audit), the users file and every local image of `perodua-deploy.novutal.com/oracle-view` |
+| Container (App server) | `sudo bash oracle-view.sh uninstall`, then type `oracle-view`. It removes the container, `initial-login.txt` and the files `install` made. The state volume, the users file and the image stay; `install` uses them again. `--purge` also removes the state volume (the mapping edits and the SQL audit), the users file and every local image of `perodua-deploy.novutal.com/oracle-view`. It lists what it removed. When a step fails, it also lists what it did not remove, keeps the deployment and exits 1: correct the cause, then run it again |
 | Role (DB server) | `sudo bash oracle-view.sh drop-role`, then type `oracle_view_rp`. It ends the sessions of the role and drops it with its grants (also `oracle_view_ro` of an earlier bundle). Rows that the SQL console changed stay changed |
 | `pg_hba.conf` line (DB server), if you added one | `sudo cp -p HBA_FILE.before-oracle-view HBA_FILE`, then `sudo -u postgres psql -X -d postgres -c 'SELECT pg_reload_conf()'` |
 | Registry | Delete the tag `oracle-view:grey-v1.0.1` and the tags of earlier releases when nobody needs them: each image holds the secrets |
