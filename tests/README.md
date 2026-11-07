@@ -785,11 +785,31 @@ The old database, on the same cluster:
   there (the database ACL and `pg_shdepend`), the tool cannot connect there and
   reads `perodua_oracle2`, and with the printed line the run ends with exit 0
   and 12 `OK` lines; a later grant in another database (`postgres`) gives the
-  `FAIL` line with that name and exit 1 in `role --check`;
-- one transaction: a `psql` in front of the real one adds an error right after
-  `DROP OWNED BY oracle_view_rp` in the old database; `role` exits 1, and the
-  role keeps `CONNECT` on `perodua_oracle2` (the tool reads it) and its old
-  rights; the next run cleans them;
+  `FAIL` line with that name and exit 1 in `role --check`, and the hint prints
+  the safe form `BEGIN; DROP OWNED BY oracle_view_rp; GRANT CONNECT, TEMPORARY
+  ON DATABASE perodua_oracle2 TO oracle_view_rp; COMMIT;`;
+- one transaction, with two stops: a `psql` in front of the real one adds an
+  error. The first stop is right after `DROP OWNED BY oracle_view_rp` in the old
+  database: `role` exits 1, and the role keeps `CONNECT` on `perodua_oracle2`
+  (the tool reads it) and its old rights. The second stop is right after
+  `COMMIT;`: `role` exits 1, the old rights are gone, and the role keeps
+  `CONNECT` on `perodua_oracle2` (the tool reads it). The next run without a
+  stop ends as usual;
+- a session that opens before the `COMMIT`: the `psql` in front adds a `\!`
+  right after `BEGIN;`, which opens a session of `oracle_view_rp` in
+  `perodua_oracle` and waits until it runs; after `role` the session has ended
+  (`terminating connection due to administrator command`), and the tool cannot
+  connect there;
+- `perodua_oracle` without connections (`ALLOW_CONNECTIONS false`, and
+  `datconnlimit = -2`, a database half dropped): with rights of the role in it,
+  `role` skips the step and check 12 gives the `FAIL` line with
+  `perodua_oracle` (exit 1); without rights there, `role` gives 12 `OK` lines
+  and `drop-role` succeeds;
+- a grant on a third database (`GRANT CONNECT ON DATABASE made_up_third`, only
+  in the ACL of that database): `role --check` gives the `FAIL` line of check
+  12 with `made_up_third` and exit 1; the printed safe form, run in that
+  database, removes the grant, the tool still reads `perodua_oracle2`, and the
+  next `role --check` exits 0;
 - `perodua_oracle` renamed away: `role` skips the step (exit 0, 12 `OK` lines,
   `oracle_view_ro` dropped) and `drop-role` succeeds;
 - `drop-role` with rights of `oracle_view_rp` and `oracle_view_ro` in both

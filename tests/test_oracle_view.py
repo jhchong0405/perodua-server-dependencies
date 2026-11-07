@@ -934,6 +934,16 @@ RIGHTS_OK = ["OK|the password is a SCRAM-SHA-256 verifier", "OK|LOGIN, CONNECTIO
              "OK|no right on a database other than perodua_oracle2"]
 RP_DB = "perodua_oracle2"  # the database of the grey App (owner decision of 2026-11-07) and of the image
 OLD_DB = "perodua_oracle"  # the database of the releases before grey-v1.0.2: role and drop-role clean it
+# role and drop-role clean the old database only when it accepts connections (not ALLOW_CONNECTIONS false,
+# not half dropped): else each run stops at its \connect there.
+OLD_DATABASE_CHECK = (":'ovb_old_db' <> :'ovb_db'\n         AND EXISTS (SELECT 1 FROM pg_database WHERE datname = :'ovb_old_db'\n"
+                      "                       AND datallowconn AND datconnlimit <> -2) AS ovb_old \\gset\n")
+# The hint for a right in another database: DROP OWNED BY there also revokes CONNECT on perodua_oracle2.
+SAFE_FORM = ("BEGIN; DROP OWNED BY oracle_view_rp; GRANT CONNECT, TEMPORARY ON DATABASE perodua_oracle2 TO oracle_view_rp;"
+             " COMMIT;")
+SAFE_FORM_HINT = ("remove the rights of oracle_view_rp. Run this in that database:\n    " + SAFE_FORM + "\n"
+                  "DROP OWNED BY alone also removes CONNECT on perodua_oracle2 (a database is a shared object): "
+                  "then the tool cannot connect.\nThen run role again.\n")
 
 
 def in_order(text, steps):
@@ -1074,12 +1084,14 @@ class OracleViewRoleTest(unittest.TestCase):
         steps = ["\\if :ovb_rp\n", "WHERE usename = 'oracle_view_rp' AND datname = :'ovb_old_db'", "\\endif\n",
                  "\\connect :ovb_old_db\n", "BEGIN;\n", "DROP OWNED BY oracle_view_ro;\n", "\\if :ovb_rp\n",
                  "DROP OWNED BY oracle_view_rp;\n", 'GRANT CONNECT, TEMPORARY ON DATABASE :"ovb_db" TO oracle_view_rp;\n',
-                 "\\endif\n", "COMMIT;\n", "\\endif\n"]
+                 "\\endif\n", "COMMIT;\n",
+                 # After the COMMIT, the sessions that opened before it end too.
+                 "\\if :ovb_rp\n", "WHERE usename = 'oracle_view_rp' AND datname = :'ovb_old_db'", "\\endif\n",
+                 "\\endif\n"]
         self.assertNotIn(-1, in_order(old, steps), old)
         transaction = old[old.index("BEGIN;\n"):old.index("COMMIT;\n")]
         self.assertNotIn("\\connect", transaction)
-        self.assertIn(":'ovb_old_db' <> :'ovb_db'\n         AND EXISTS (SELECT 1 FROM pg_database WHERE datname = :'ovb_old_db') "
-                      "AS ovb_old \\gset\n", sql)  # no old database (or the same one): nothing to clean
+        self.assertIn(OLD_DATABASE_CHECK, sql)  # no old database, the same one, or one without connections: nothing to clean
         # oracle_view_ro of an earlier bundle: cleaned in both databases, then dropped.
         self.assertNotIn(-1, in_order(sql, ["ALTER ROLE oracle_view_ro NOLOGIN;", "usename = 'oracle_view_ro'",
                                             "\\connect :ovb_old_db\n", "DROP OWNED BY oracle_view_ro;\n",
@@ -1092,8 +1104,7 @@ class OracleViewRoleTest(unittest.TestCase):
     def test_a_missing_right_stops_before_the_pg_hba_check(self):
         elsewhere = "FAIL|no right on a database other than perodua_oracle2 (it has rights on: perodua_oracle)"
         for rights, message in ((RIGHTS_OK[:8] + ["FAIL|no TRUNCATE"] + RIGHTS_OK[9:], "does not have the rights above"),
-                                (RIGHTS_OK[:11] + [elsewhere], "or DROP OWNED BY oracle_view_rp there),\nthen run role "
-                                 "again: it grants CONNECT and TEMPORARY on perodua_oracle2 again."),
+                                (RIGHTS_OK[:11] + [elsewhere], SAFE_FORM_HINT),
                                 (RIGHTS_OK[:11], "unexpected answer"), (RIGHTS_OK[4:], "unexpected answer")):
             with self.subTest(message=message):
                 self.set_state(rights=rights)
@@ -1253,6 +1264,7 @@ class OracleViewRoleTest(unittest.TestCase):
                      f"DROP OWNED BY {role};\n", "\\if :ovb_old\n\\connect :ovb_old_db\n", f"DROP OWNED BY {role};\n",
                      "\\endif\n\\connect postgres\n", f"DROP ROLE {role};"]
             self.assertNotIn(-1, in_order(sql, steps), role)
+        self.assertIn(OLD_DATABASE_CHECK, sql)
         self.assertIn("removes its rights in perodua_oracle2 and perodua_oracle and drops it", result.stdout)
         self.assertIn("pg_terminate_backend", sql)
         self.assertIn(f"stays in {HBA_FILE}: remove it by hand", result.stdout)
@@ -1546,20 +1558,24 @@ class RoleOnPostgresTest(PostgresCluster, unittest.TestCase):
         result = self.run_script("role", "--check", "--app-ip", self.APP)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("FAIL no right on a database other than perodua_oracle2 (it has rights on: postgres)\n", result.stdout)
-        self.assertIn("or DROP OWNED BY oracle_view_rp there)", result.stderr)
+        self.assertIn(SAFE_FORM_HINT, result.stderr)
         self.assertNotIn("RESULT:", result.stdout)
         self.sql("postgres", "DROP TABLE made_up_elsewhere")
         self.assertEqual(self.run_script("role", "--check", "--app-ip", self.APP).returncode, 0)
 
     def stop_after(self, text):
         """A psql in front of the real one: it adds an error right after the first text in a SQL script."""
-        wrapper = self.tmp / ("stop-" + hashlib.sha256(text.encode()).hexdigest()[:8])
+        return self.add_after(text, "SELECT 1/0;\n")
+
+    def add_after(self, text, added):
+        """A psql in front of the real one: it adds the lines right after the first text in a SQL script."""
+        wrapper = self.tmp / ("add-" + hashlib.sha256((text + added).encode()).hexdigest()[:8])
         wrapper.mkdir(exist_ok=True)
         (wrapper / "psql").write_text(f"""#!/usr/bin/env python3
 import os, subprocess, sys
 real = {str(PG_BIN / "psql")!r}
 if "-f" in sys.argv:
-    script = sys.stdin.read().replace({text!r}, {text + "SELECT 1/0;" + chr(10)!r}, 1)
+    script = sys.stdin.read().replace({text!r}, {text + added!r}, 1)
     sys.exit(subprocess.run([real, *sys.argv[1:]], input=script, text=True).returncode)
 os.execv(real, [real, *sys.argv[1:]])
 """)
@@ -1593,6 +1609,108 @@ os.execv(real, [real, *sys.argv[1:]])
         self.assertEqual(self.make_role().returncode, 3)
         self.assertEqual(self.rights_in(OLD_DB), (0, 0))
         self.assertEqual(self.tool("SELECT count(*) FROM res_partner").stdout.strip(), "1")
+
+    def test_the_old_database_session_that_opens_before_the_commit_ends(self):
+        # A container of an earlier release can open a session in the old database while the transaction
+        # runs. The sessions there end again after the COMMIT, and after it no new one can start.
+        self.drop_old_ro()
+        self.assertEqual(self.make_role().returncode, 3)
+        self.addCleanup(self.run_script, "drop-role", "--confirm", "oracle_view_rp")
+        self.old_release_rights()
+        started, log, starter = self.tmp / "session-started", self.tmp / "session.log", self.tmp / "start-session.sh"
+        psql = PG_BIN / "psql"
+        starter.write_text(f"""#!/bin/sh
+PGPASSWORD='{TEST_PASSWORD}' {psql} -X -At -c 'SELECT pg_sleep(120)' \\
+    'host=127.0.0.1 port={self.PORT} dbname={OLD_DB} user=oracle_view_rp' < /dev/null > {log} 2>&1 9>&- &
+i=0
+until [ "$({psql} -X -At -h /var/run/postgresql -p {self.PORT} -d postgres -c "SELECT count(*) FROM pg_stat_activity
+           WHERE usename = 'oracle_view_rp' AND datname = '{OLD_DB}'")" = 1 ]; do
+    i=$((i + 1)); [ $i -lt 300 ] || exit 1; sleep 0.1
+done
+touch {started}
+""")
+        starter.chmod(0o755)
+        self.addCleanup(self.sql, "postgres", "SELECT count(pg_terminate_backend(pid)) FROM pg_stat_activity"
+                                              " WHERE usename = 'oracle_view_rp'")
+        result = self.make_role(path=self.add_after("BEGIN;\n", f"\\! {starter}\n"))
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertTrue(started.exists(), "the session in perodua_oracle did not start before the COMMIT")
+        deadline = time.monotonic() + 10
+        while "terminating connection" not in log.read_text() and time.monotonic() < deadline:
+            time.sleep(0.1)
+        self.assertEqual(self.sql("postgres", "SELECT count(*) FROM pg_stat_activity WHERE usename = 'oracle_view_rp'"
+                                              f" AND datname = '{OLD_DB}'"), "0",
+                         "a session of oracle_view_rp that opened before the COMMIT still runs in perodua_oracle")
+        self.assertIn("terminating connection due to administrator command", log.read_text())
+        self.assertEqual(self.rights_in(OLD_DB), (0, 0))
+        denied = self.tool("SELECT 1", OLD_DB)
+        self.assertNotEqual(denied.returncode, 0)
+        self.assertIn("permission denied for database", denied.stderr)
+        self.assertEqual(self.tool("SELECT count(*) FROM res_partner").stdout.strip(), "1")
+
+    def test_the_old_database_without_connections_is_skipped(self):
+        # A database that refuses connections must not stop role and drop-role at their \connect there on
+        # each run. Check 12 still finds the rights that stay in it (pg_shdepend).
+        self.drop_old_ro()
+        for refuse, accept in (("ALTER DATABASE perodua_oracle ALLOW_CONNECTIONS false",
+                                "ALTER DATABASE perodua_oracle ALLOW_CONNECTIONS true"),
+                               # PostgreSQL 16 marks a database that DROP DATABASE did not finish with -2.
+                               ("UPDATE pg_database SET datconnlimit = -2 WHERE datname = 'perodua_oracle'",
+                                "UPDATE pg_database SET datconnlimit = -1 WHERE datname = 'perodua_oracle'")):
+            with self.subTest(refuse=refuse):
+                try:
+                    self.assertEqual(self.make_role().returncode, 3)
+                    self.old_release_rights()
+                    self.sql("postgres", "REVOKE CONNECT, TEMPORARY ON DATABASE perodua_oracle FROM oracle_view_rp")
+                    self.assertEqual(self.rights_in(OLD_DB), (0, 4))  # in it only: no grant on the database
+                    self.sql("postgres", refuse)
+                    result = self.make_role()
+                    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                    self.assertNotIn("The rights of oracle_view_rp in perodua_oracle", result.stdout)
+                    self.assertIn("FAIL no right on a database other than perodua_oracle2 (it has rights on: "
+                                  "perodua_oracle)\n", result.stdout)
+                    self.assertNotIn("RESULT:", result.stdout)
+                    self.assertEqual(self.tool("SELECT count(*) FROM res_partner").stdout.strip(), "1")
+                    # Without rights there, role and drop-role skip it and succeed.
+                    self.sql("postgres", accept)
+                    self.assertEqual(self.make_role().returncode, 3)
+                    self.assertEqual(self.rights_in(OLD_DB), (0, 0))
+                    self.sql("postgres", refuse)
+                    result = self.make_role()
+                    self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+                    self.assertEqual(len(re.findall(r"^OK   ", result.stdout, re.M)), 12, result.stdout)
+                    result = self.run_script("drop-role", "--confirm", "oracle_view_rp")
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn("role oracle_view_rp dropped", result.stdout)
+                finally:
+                    self.sql("postgres", accept)
+                    self.run_script("drop-role", "--confirm", "oracle_view_rp")
+
+    def test_the_rights_check_finds_a_grant_on_another_database(self):
+        # A grant ON a database is only in the ACL of that database (aclexplode): pg_shdepend records it
+        # for the shared object, not as a dependency in that database.
+        self.drop_old_ro()
+        self.with_the_line()
+        self.assertEqual(self.make_role().returncode, 0)
+        self.addCleanup(self.run_script, "drop-role", "--confirm", "oracle_view_rp")
+        self.sql("postgres", "CREATE DATABASE made_up_third OWNER odoo")
+        self.addCleanup(self.sql, "postgres", "DROP DATABASE IF EXISTS made_up_third")
+        self.sql("postgres", "REVOKE ALL ON DATABASE made_up_third FROM PUBLIC")
+        self.sql("postgres", "GRANT CONNECT ON DATABASE made_up_third TO oracle_view_rp")
+        self.assertEqual(self.rights_in("made_up_third"), (1, 0))
+        result = self.run_script("role", "--check", "--app-ip", self.APP)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("FAIL no right on a database other than perodua_oracle2 (it has rights on: made_up_third)\n",
+                      result.stdout)
+        self.assertNotIn("RESULT:", result.stdout)
+        # The printed statement, run in that database, removes the grant and keeps CONNECT on perodua_oracle2.
+        self.assertIn(SAFE_FORM_HINT, result.stderr)
+        self.sql("made_up_third", SAFE_FORM)
+        self.assertEqual(self.rights_in("made_up_third"), (0, 0))
+        self.assertEqual(self.tool("SELECT count(*) FROM res_partner").stdout.strip(), "1")
+        result = self.run_script("role", "--check", "--app-ip", self.APP)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("OK   no right on a database other than perodua_oracle2\n", result.stdout)
 
     def test_the_old_database_may_be_missing(self):
         self.drop_old_ro()
@@ -1811,7 +1929,14 @@ class OracleViewDocsTest(unittest.TestCase):
         for sentence in ("the command ends the sessions of the role there and removes all its rights there (`DROP OWNED BY`).",
                          "So `perodua_oracle2` gets them again in the same transaction: a stop between the two changes "
                          "nothing, and the tool keeps its way in.",
-                         "When the server has no `perodua_oracle`, the command skips this step.",
+                         "After the `COMMIT`, the command ends the sessions of the role there again: a container of an "
+                         "earlier release can open a session before the `COMMIT`, and after it no new session can start, "
+                         "because `PUBLIC` has no `CONNECT` there.",
+                         "When the server has no `perodua_oracle`, or when `perodua_oracle` does not accept connections "
+                         "(`ALLOW_CONNECTIONS false`, or a database half dropped), the command skips this step.",
+                         SAFE_FORM,
+                         "`DROP OWNED BY` alone also removes `CONNECT` on `perodua_oracle2` (a database is a shared "
+                         "object): then the tool cannot connect until the next `role` run.",
                          "Such a database stops the command (exit status 1) before the `pg_hba.conf` check",
                          "removes its rights in `perodua_oracle2` and in `perodua_oracle` (when it exists, so that an old "
                          "grant cannot make the drop fail)"):
@@ -1820,6 +1945,18 @@ class OracleViewDocsTest(unittest.TestCase):
         self.assertIn("in perodua_oracle2 and perodua_oracle.", words(usage))
         self.assertIn("It ends the sessions of the role in perodua_oracle (the database of the earlier releases) and "
                       "removes its rights there.", words(usage))
+
+    def test_the_readme_upgrade_names_the_change_of_the_database(self):
+        upgrade = words(SECTION.split("\n### Upgrade\n", 1)[1].split("\n### ", 1)[0])
+        for sentence in ("A release that changes the database of the image (as `grey-v1.0.2` did, to `perodua_oracle2`) "
+                         "needs two steps before its `install`:",
+                         "1. On the DB server, run `sudo bash oracle-view.sh role --verifier-file ~/rp_grey.verifier` "
+                         "of the new release",
+                         "2. Add the new `pg_hba.conf` line that `role` prints, then reload",
+                         "To go back to a release before grey-v1.0.2, give the role its old rights on its old database "
+                         "`perodua_oracle` again"):
+            self.assertIn(sentence, upgrade)
+        self.assertLess(upgrade.index("role --verifier-file"), upgrade.index("`pg_hba.conf` line"))
 
     def test_the_readme_names_lines_that_are_not_a_check_by_hand(self):
         text = words(SECTION)
