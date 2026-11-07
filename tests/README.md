@@ -745,14 +745,20 @@ standard input and the user. It checks:
   and then in `perodua_oracle` when it exists, `DROP ROLE`); for
   `oracle_view_rp`, between the end of the sessions and `DROP OWNED BY`, the
   count of the staging tables, the stop that gives the `LOGIN` back when they
-  hold data without the choice (`-v ovb_drop_staging=off`), and `DROP SCHEMA
-  ovb_stage CASCADE`; the output says that the staging tables and their data are
-  dropped;
+  hold data without the choice (`-v ovb_drop_staging=off`), the count of the
+  objects outside `ovb_stage` that depend on it and the stop that gives the
+  `LOGIN` back when there are any, and `DROP SCHEMA ovb_stage CASCADE`; tables,
+  partitioned tables and materialized views count as staging tables; the output
+  says that the staging tables and their data are dropped;
 - `drop-role` with staging tables lists them and stops (exit 1, no SQL script)
   before the confirmation, with the `pg_dump` hint and `--drop-staging`;
   `--drop-staging` alone does not confirm; with both, the script sends
   `-v ovb_drop_staging=on`; without tables, `off` and no stop; `--drop-staging`
   belongs only to `drop-role` (usage error 2 elsewhere);
+- `drop-role` with objects outside `ovb_stage` that depend on it names them and
+  stops (exit 1, no SQL script) before the confirmation, also with
+  `--drop-staging`; the query looks only at a schema `ovb_stage` of the role and
+  leaves out internal dependencies;
 - a held lock stops `role` and `drop-role`.
 
 `RoleOnPostgresTest` (root and PostgreSQL 16, as in the test image) starts a
@@ -852,6 +858,13 @@ The staging schema `ovb_stage` of Copy to RP, on the same cluster:
 - `drop-role` without `--drop-staging` lists the table, stops (exit 1) and
   changes nothing; with it, the schema, its table and the role go, and the rows
   of the Odoo table stay;
+- a materialized view of the role in `ovb_stage` is listed and stops
+  `drop-role` without `--drop-staging`; a view and a foreign key in `public` on
+  a staging table stop `drop-role` before the confirmation, with and without
+  `--drop-staging`, and name both; a view made right after the `\connect` of
+  `drop-role` stops the SQL, which names it, gives the `LOGIN` back and drops
+  nothing; without the dependency, `--drop-staging` drops the schema with the
+  table and the materialized view, and the table in `public` keeps its row;
 - a schema `ovb_stage` of the Odoo role, with a table, made before the role:
   `role` gives no right there and exits 1 with the `FAIL` lines `owns one
   schema, ovb_stage` (with the owner `odoo`) and `USAGE and CREATE`, 13 `OK`

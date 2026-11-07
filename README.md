@@ -2156,7 +2156,7 @@ Do the steps in this order.
    | Part | Expected |
    | --- | --- |
    | `== Rights of oracle_view_rp` | Each line starts with `OK`, also `no right on a database other than perodua_oracle2` and the three lines of the schema `ovb_stage`. A `FAIL` line stops the command. |
-   | `== Staging tables of Copy to RP` | The tables in `ovb_stage`, each with its size on disk, and the total. `none` on a new role. The list changes nothing. |
+   | `== Staging tables of Copy to RP` | The tables and materialized views in `ovb_stage`, each with its size on disk, and the total. `none` on a new role. The list changes nothing. |
    | `== TLS: SHOW ssl` | `ssl = on`. With `off`, see [TLS to the RP database](#tls-to-the-rp-database). |
    | `== Extensions that can write in a Read run` | `none`. With `dblink` or `postgres_fdw` in `perodua_oracle2`, a Read run of the SQL console can write through them. The command changes no right: that is an owner decision. |
    | `== pg_hba.conf check` | `RESULT: OK` (exit status 0). `RESULT: NOT OK` (exit status 3) or `RESULT: CHECK BY HAND` (exit status 4): do step 4. |
@@ -2279,10 +2279,18 @@ dropped table cannot come back: to keep one, copy it first, for example
 `sudo -u postgres pg_dump -p 5432 -d perodua_oracle2 -n ovb_stage -Fc -f /var/tmp/ovb_stage.dump`.
 
 `drop-role` drops the schema `ovb_stage` with its staging tables and their data.
-When `ovb_stage` holds tables, it lists them and stops before any change (exit
-status 1): run it again with `--drop-staging` when the tables can go. Without
-tables it drops the empty schema. A schema `ovb_stage` of another owner stays;
-`drop-role` drops only the tables of the role in it.
+When `ovb_stage` holds tables (a materialized view counts as a table), it lists
+them and stops before any change (exit status 1): run it again with
+`--drop-staging` when the tables can go. Without tables it drops the empty
+schema. A schema `ovb_stage` of another owner stays; `drop-role` drops only the
+tables of the role in it.
+
+`drop-role` drops the schema with `CASCADE`, so it would also drop an object
+outside `ovb_stage` that depends on an object in it, for example a view or a
+foreign key in `public` on a staging table. When there is such an object,
+`drop-role` names it and stops before any change (exit status 1), also with
+`--drop-staging`. Remove the dependency first (for example `DROP VIEW`, or
+`ALTER TABLE ... DROP CONSTRAINT`), then run `drop-role` again.
 
 #### TLS to the RP database
 
@@ -2539,7 +2547,7 @@ Do the steps in this order.
 | Port 80 rules (App server), if you added them | `sudo ufw delete allow from WAF_1 to any port 80 proto tcp`, the same for `WAF_2`, `sudo ufw delete deny 80/tcp`. When step 4 turned ufw on: `sudo ufw disable` and the default of before (`/root/ufw-status.before-oracle-view`) |
 | Route (App server) | `sudo cp -p /etc/perodua-https/routes.conf.before-oracle-view /etc/perodua-https/routes.conf`, then `sudo bash https.sh apply` |
 | Container (App server) | `sudo bash oracle-view.sh uninstall`, then type `oracle-view`. It removes the container, `initial-login.txt` and the files `install` made. The state volume, the users file and the image stay; `install` uses them again. `--purge` also removes the state volume (the mapping edits and the SQL audit), the users file and every local image of `perodua-deploy.novutal.com/oracle-view`. It lists what it removed. When a step fails, it also lists what it did not remove, keeps the deployment and exits 1: correct the cause, then run it again |
-| Role (DB server) | `sudo bash oracle-view.sh drop-role`, then type `oracle_view_rp`. It ends the sessions of the role, removes its rights in `perodua_oracle2` and in `perodua_oracle` (when it exists, so that an old grant cannot make the drop fail) and drops it (also `oracle_view_ro` of an earlier bundle). It skips a `perodua_oracle` that does not accept connections. It also drops the schema `ovb_stage` with the staging tables of Copy to RP and their data: when `ovb_stage` holds tables, it lists them and stops before any change; run it again with `--drop-staging` when they can go ([The staging schema ovb_stage](#the-staging-schema-ovb_stage)). Rows that the SQL console changed stay changed |
+| Role (DB server) | `sudo bash oracle-view.sh drop-role`, then type `oracle_view_rp`. It ends the sessions of the role, removes its rights in `perodua_oracle2` and in `perodua_oracle` (when it exists, so that an old grant cannot make the drop fail) and drops it (also `oracle_view_ro` of an earlier bundle). It skips a `perodua_oracle` that does not accept connections. It also drops the schema `ovb_stage` with the staging tables of Copy to RP and their data: when `ovb_stage` holds tables, it lists them and stops before any change; run it again with `--drop-staging` when they can go. It also stops when an object outside `ovb_stage` depends on an object in it ([The staging schema ovb_stage](#the-staging-schema-ovb_stage)). Rows that the SQL console changed stay changed |
 | `pg_hba.conf` line (DB server), if you added one | `sudo cp -p HBA_FILE.before-oracle-view HBA_FILE`, then `sudo -u postgres psql -X -d postgres -c 'SELECT pg_reload_conf()'` |
 | Registry | Delete the tag `oracle-view:grey-v1.0.2` and the tags of earlier releases when nobody needs them: each image holds the secrets |
 

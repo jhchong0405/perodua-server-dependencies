@@ -916,6 +916,8 @@ elif command.startswith("SELECT count(*) || '|' || pg_size_pretty") and "n.nspna
     out = state["stage_total"] + "\n"
 elif command.startswith("SELECT format('    %-40s %12s  %s'") and "n.nspname = 'ovb_stage'" in command:
     out = "".join(line + "\n" for line in state["stage_list"])
+elif command.startswith("WITH s AS (") and command.endswith("SELECT obj FROM outside ORDER BY obj"):
+    out = "".join(line + "\n" for line in state["stage_outside"])
 elif "the password is a SCRAM-SHA-256 verifier" in command:
     out = "".join(line + "\n" for line in state["rights"])
 else:
@@ -993,7 +995,7 @@ class OracleViewRoleTest(unittest.TestCase):
                         FAKE_PG_LOG=str(self.log))
         self.set_state(running=True, database=True, role_exists=False, role_status=0, ssl="on", extensions="",
                        rights=RIGHTS_OK, hba_output="RESULT: OK - the first matching line uses scram-sha-256.\n",
-                       hba_file=HBA_FILE, stage_total="0|0 bytes", stage_list=[])
+                       hba_file=HBA_FILE, stage_total="0|0 bytes", stage_list=[], stage_outside=[])
         self.verifier = self.tmp / "rp_grey.verifier"
         self.verifier.write_text(VERIFIER + "\n")
 
@@ -1333,11 +1335,18 @@ class OracleViewRoleTest(unittest.TestCase):
                  "ALTER ROLE oracle_view_rp NOLOGIN;", "WHERE usename = 'oracle_view_rp'", "\\connect :ovb_db\n",
                  "count(c.oid) > 0 AND NOT :'ovb_drop_staging'::boolean AS ovb_stage_kept",
                  "\\if :ovb_stage_kept\n\\connect postgres\n\\if :ovb_rp_login\nALTER ROLE oracle_view_rp LOGIN;\n\\endif\n",
-                 "RAISE EXCEPTION", "\\endif\n\\if :ovb_stage\nDROP SCHEMA ovb_stage CASCADE;\n",
+                 "RAISE EXCEPTION 'ovb_stage holds staging tables", "\\endif\n\\if :ovb_stage\nWITH s AS (",
+                 "WHERE nsp IS DISTINCT FROM (SELECT oid FROM s)) SELECT count(*) > 0 AS ovb_stage_outside,",
+                 "AS ovb_stage_outside_list FROM outside \\gset\n",
+                 "\\if :ovb_stage_outside\n\\connect postgres\n\\if :ovb_rp_login\nALTER ROLE oracle_view_rp LOGIN;\n"
+                 "\\endif\n", "RAISE EXCEPTION 'objects outside ovb_stage depend on it",
+                 "\\endif\nDROP SCHEMA ovb_stage CASCADE;\n",
                  "\\echo schema ovb_stage dropped, with its :ovb_stage_tables staging tables and their data",
                  "\\endif\nDROP OWNED BY oracle_view_rp;\n", "DROP ROLE oracle_view_rp;"]
         self.assertNotIn(-1, in_order(sql, steps), sql)
         self.assertEqual(sql.count("DROP SCHEMA"), 1)
+        # Materialized views hold data too: they count with the tables, as in the list of the script.
+        self.assertIn("LEFT JOIN pg_class c ON c.relnamespace = n.oid AND c.relkind IN ('r', 'p', 'm')", sql)
         self.assertNotIn("== Staging tables", result.stdout)  # no role: no list
 
     def test_drop_role_stops_when_the_staging_tables_hold_data(self):
@@ -1374,6 +1383,29 @@ class OracleViewRoleTest(unittest.TestCase):
         self.assertIn("none: ovb_stage holds no table\n", result.stdout)
         (call,) = self.scripts("drop-role")
         self.assertIn("-v ovb_drop_staging=off", " ".join(call["args"]))
+
+    def test_drop_role_stops_when_objects_outside_depend_on_the_staging_schema(self):
+        outside = ["table constraint copy_fk on public.t_ref", "view public.v_copy"]
+        self.set_state(role_exists=True, stage_total="2|1168 kB", stage_list=STAGE_LIST, stage_outside=outside)
+        for args in (["--confirm", "oracle_view_rp", "--drop-staging"], ["--confirm", "oracle_view_rp"], []):
+            with self.subTest(args=args):
+                result = self.run_script("drop-role", *args)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn("These objects outside the schema ovb_stage depend on an object in it. drop-role drops "
+                              "the schema with CASCADE,\nso it would drop them too, with their data:\n"
+                              "    table constraint copy_fk on public.t_ref\n    view public.v_copy\n", result.stderr)
+                self.assertIn("Objects outside the schema ovb_stage depend on it (above). Nothing was changed.",
+                              result.stderr)
+                self.assertNotIn("Type oracle_view_rp", result.stdout + result.stderr)
+                self.assertEqual(self.scripts(), [])
+        (query,) = [call["args"][call["args"].index("-c") + 1] for call in self.calls()
+                    if "-c" in call["args"] and call["args"][call["args"].index("-c") + 1].startswith("WITH s AS (")]
+        self.assertIn("WHERE n.nspname = 'ovb_stage' AND r.rolname = 'oracle_view_rp'", query)
+        self.assertIn("WHERE d.deptype <> 'i'", query)
+        self.set_state(stage_outside=[])
+        result = self.run_script("drop-role", "--confirm", "oracle_view_rp", "--drop-staging")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(self.scripts("drop-role")), 1)
 
     def test_a_held_lock_stops_role_and_drop_role(self):
         fd = os.open(lock_path("role"), os.O_RDWR | os.O_CREAT, 0o600)
@@ -1929,6 +1961,63 @@ touch {started}
         self.assertEqual(self.sql(RP_DB, "SELECT count(*) FROM pg_namespace WHERE nspname = 'ovb_stage'"), "0")
         self.assertEqual(self.sql("postgres", "SELECT count(*) FROM pg_roles WHERE rolname = 'oracle_view_rp'"), "0")
         self.assertEqual(self.sql(RP_DB, "SELECT count(*) FROM res_partner"), "1")
+
+    def test_drop_role_keeps_what_depends_on_the_staging_schema(self):
+        # A materialized view of the role in ovb_stage holds data: it counts as a staging table. An object
+        # outside ovb_stage that depends on a staging object stops drop-role, also with --drop-staging, because
+        # DROP SCHEMA ovb_stage CASCADE would drop it too.
+        self.drop_old_ro()
+        self.with_the_line()
+        self.assertEqual(self.make_role().returncode, 0)
+        self.addCleanup(self.run_script, "drop-role", "--confirm", "oracle_view_rp", "--drop-staging")
+        made = self.tool("BEGIN READ WRITE; CREATE MATERIALIZED VIEW ovb_stage.parts_snap AS SELECT g AS id"
+                         " FROM generate_series(1, 500) g; COMMIT")
+        self.assertEqual(made.returncode, 0, made.stderr)
+        result = self.run_script("role", "--check", "--app-ip", self.APP)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertRegex(result.stdout, r"\n1 tables, [0-9]+ kB on disk:\n    table +size  owner\n"
+                                        r"    parts_snap +[0-9]+ kB  oracle_view_rp\n")
+        result = self.run_script("drop-role", "--confirm", "oracle_view_rp")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("The schema ovb_stage holds 1 staging tables (above).", result.stderr)
+        self.assertEqual(self.tool("SELECT count(*) FROM ovb_stage.parts_snap").stdout.strip(), "500")
+        # A view and a foreign key in public on a staging table: drop-role stops before the confirmation.
+        made = self.tool("BEGIN READ WRITE; CREATE TABLE ovb_stage.copy_keys (id int PRIMARY KEY);"
+                         " INSERT INTO ovb_stage.copy_keys SELECT generate_series(1, 3); COMMIT")
+        self.assertEqual(made.returncode, 0, made.stderr)
+        self.sql(RP_DB, "CREATE VIEW public.v_copy AS SELECT id FROM ovb_stage.copy_keys;"
+                        " CREATE TABLE public.t_ref (id int CONSTRAINT copy_fk REFERENCES ovb_stage.copy_keys (id));"
+                        " INSERT INTO public.t_ref VALUES (1)")
+        self.addCleanup(self.sql, RP_DB, "DROP VIEW IF EXISTS public.v_copy; DROP TABLE IF EXISTS public.t_ref")
+        for args in (["--drop-staging"], []):
+            with self.subTest(args=args):
+                result = self.run_script("drop-role", "--confirm", "oracle_view_rp", *args)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("so it would drop them too, with their data:\n"
+                              "    table constraint copy_fk on public.t_ref\n    view public.v_copy\n", result.stderr)
+                self.assertIn("Objects outside the schema ovb_stage depend on it (above). Nothing was changed.",
+                              result.stderr)
+        self.assertEqual(self.sql("postgres", "SELECT rolcanlogin FROM pg_roles WHERE rolname = 'oracle_view_rp'"), "t")
+        # A dependency made after the check of the script: the SQL stops, gives LOGIN back and drops nothing.
+        self.sql(RP_DB, "DROP VIEW public.v_copy")
+        self.sql(RP_DB, "ALTER TABLE public.t_ref DROP CONSTRAINT copy_fk")
+        late = self.add_after("\\connect :ovb_db\n", "CREATE VIEW public.v_late AS SELECT id FROM ovb_stage.copy_keys;\n")
+        self.addCleanup(self.sql, RP_DB, "DROP VIEW IF EXISTS public.v_late")
+        result = self.run_script("drop-role", "--confirm", "oracle_view_rp", "--drop-staging", path=late)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("1 objects outside ovb_stage depend on it: view public.v_late\nNothing was dropped.\n", result.stdout)
+        self.assertIn("DROP SCHEMA ovb_stage CASCADE would drop them", result.stderr)
+        self.assertEqual(self.sql("postgres", "SELECT rolcanlogin FROM pg_roles WHERE rolname = 'oracle_view_rp'"), "t")
+        self.assertEqual(self.sql(RP_DB, "SELECT count(*) FROM public.v_late"), "3")
+        self.assertEqual(self.stage_tables(), "copy_keys")
+        self.assertEqual(self.tool("SELECT count(*) FROM ovb_stage.parts_snap").stdout.strip(), "500")
+        # Without the dependency, --drop-staging drops the schema with the table and the materialized view.
+        self.sql(RP_DB, "DROP VIEW public.v_late")
+        result = self.run_script("drop-role", "--confirm", "oracle_view_rp", "--drop-staging")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertRegex(result.stdout, r"schema ovb_stage dropped, with its 2 staging tables and their data \([0-9]+ kB\)\n")
+        self.assertEqual(self.sql(RP_DB, "SELECT count(*) FROM pg_namespace WHERE nspname = 'ovb_stage'"), "0")
+        self.assertEqual(self.sql(RP_DB, "SELECT count(*) FROM public.t_ref"), "1")
 
     def test_a_staging_schema_of_another_owner_stays(self):
         self.drop_old_ro()

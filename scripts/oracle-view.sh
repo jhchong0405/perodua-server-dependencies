@@ -910,10 +910,47 @@ role_checks() {   # prints each right; a missing or an extra right stops the com
 }
 
 # The staging tables in STAGE_SCHEMA of RP_DATABASE, the tables that drop-role drops (as
-# drop_sql counts them): every table there when the role owns the schema, else the tables
-# of the role there. "count|total size", then one line for each table.
+# drop_sql counts them): every table and materialized view there when the role owns the
+# schema, else those of the role there. "count|total size", then one line for each table.
 STAGE_FROM="FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_roles r ON r.rolname = '$RP_ROLE'
- WHERE n.nspname = '$STAGE_SCHEMA' AND c.relkind IN ('r', 'p') AND (n.nspowner = r.oid OR c.relowner = r.oid)"
+ WHERE n.nspname = '$STAGE_SCHEMA' AND c.relkind IN ('r', 'p', 'm') AND (n.nspowner = r.oid OR c.relowner = r.oid)"
+# The objects outside STAGE_SCHEMA that depend on an object in it (a view or a foreign key
+# in public on a staging table, for example), when the role owns the schema: DROP SCHEMA
+# ... CASCADE of drop-role would drop them too, so drop-role stops while there are any.
+# An object of a kind that this list does not place counts as outside.
+STAGE_OUTSIDE_WITH="WITH s AS (SELECT n.oid FROM pg_namespace n JOIN pg_roles r ON r.oid = n.nspowner
+                WHERE n.nspname = '$STAGE_SCHEMA' AND r.rolname = '$RP_ROLE'),
+     inside (classid, objid) AS (
+         SELECT 'pg_namespace'::regclass::oid, s.oid FROM s
+         UNION ALL SELECT 'pg_class'::regclass::oid, c.oid FROM pg_class c JOIN s ON c.relnamespace = s.oid
+         UNION ALL SELECT 'pg_type'::regclass::oid, t.oid FROM pg_type t JOIN s ON t.typnamespace = s.oid
+         UNION ALL SELECT 'pg_proc'::regclass::oid, p.oid FROM pg_proc p JOIN s ON p.pronamespace = s.oid),
+     dependent AS (
+         SELECT CASE d.classid
+                  WHEN 'pg_class'::regclass THEN (SELECT relnamespace FROM pg_class WHERE oid = d.objid)
+                  WHEN 'pg_type'::regclass THEN (SELECT typnamespace FROM pg_type WHERE oid = d.objid)
+                  WHEN 'pg_proc'::regclass THEN (SELECT pronamespace FROM pg_proc WHERE oid = d.objid)
+                  WHEN 'pg_operator'::regclass THEN (SELECT oprnamespace FROM pg_operator WHERE oid = d.objid)
+                  WHEN 'pg_constraint'::regclass THEN (SELECT connamespace FROM pg_constraint WHERE oid = d.objid)
+                  WHEN 'pg_statistic_ext'::regclass THEN (SELECT stxnamespace FROM pg_statistic_ext WHERE oid = d.objid)
+                  WHEN 'pg_default_acl'::regclass THEN (SELECT defaclnamespace FROM pg_default_acl WHERE oid = d.objid)
+                  WHEN 'pg_rewrite'::regclass THEN (SELECT c.relnamespace FROM pg_rewrite w JOIN pg_class c
+                                                      ON c.oid = w.ev_class WHERE w.oid = d.objid)
+                  WHEN 'pg_trigger'::regclass THEN (SELECT c.relnamespace FROM pg_trigger g JOIN pg_class c
+                                                      ON c.oid = g.tgrelid WHERE g.oid = d.objid)
+                  WHEN 'pg_attrdef'::regclass THEN (SELECT c.relnamespace FROM pg_attrdef a JOIN pg_class c
+                                                      ON c.oid = a.adrelid WHERE a.oid = d.objid)
+                  WHEN 'pg_policy'::regclass THEN (SELECT c.relnamespace FROM pg_policy p JOIN pg_class c
+                                                     ON c.oid = p.polrelid WHERE p.oid = d.objid)
+                END AS nsp,
+                CASE WHEN d.classid = 'pg_rewrite'::regclass THEN 'pg_class'::regclass::oid ELSE d.classid END AS oclass,
+                CASE WHEN d.classid = 'pg_rewrite'::regclass   -- the rule of a view: name the view
+                     THEN (SELECT ev_class FROM pg_rewrite WHERE oid = d.objid) ELSE d.objid END AS oobj
+           FROM pg_depend d JOIN inside i ON i.classid = d.refclassid AND i.objid = d.refobjid
+          WHERE d.deptype <> 'i'),
+     outside AS (SELECT DISTINCT o.type || ' ' || o.identity AS obj
+                   FROM dependent, pg_identify_object(oclass, oobj, 0) o
+                  WHERE nsp IS DISTINCT FROM (SELECT oid FROM s))"
 STAGE_TOTAL_SQL="SELECT count(*) || '|' || pg_size_pretty(coalesce(sum(pg_total_relation_size(c.oid)), 0))
   $STAGE_FROM"
 STAGE_LIST_SQL="SELECT format('    %-40s %12s  %s', c.relname, pg_size_pretty(pg_total_relation_size(c.oid)),
@@ -934,6 +971,19 @@ stage_tables() {   # lists the staging tables with their sizes; sets STAGE_TABLE
     printf '%s tables, %s on disk:\n' "$STAGE_TABLES" "$STAGE_SIZE"
     printf '    %-40s %12s  %s\n' table size owner
     pg_value "$RP_DATABASE" "$STAGE_LIST_SQL" || die "The list of the tables in $STAGE_SCHEMA failed (above)"
+}
+
+stage_outside() {   # stops when objects outside STAGE_SCHEMA depend on it (DROP SCHEMA ... CASCADE drops them)
+    local found
+    found=$(pg_value "$RP_DATABASE" "$STAGE_OUTSIDE_WITH SELECT obj FROM outside ORDER BY obj") \
+        || die "The check of the objects that depend on $STAGE_SCHEMA failed (above)"
+    [[ -n $found ]] || return 0
+    printf '\nThese objects outside the schema %s depend on an object in it. drop-role drops the schema with CASCADE,\n' \
+        "$STAGE_SCHEMA" >&2
+    printf 'so it would drop them too, with their data:\n' >&2
+    printf '    %s\n' "${found//$'\n'/$'\n    '}" >&2
+    printf 'Remove each dependency first (for example DROP VIEW, or ALTER TABLE ... DROP CONSTRAINT), or copy the object.\n' >&2
+    die "Objects outside the schema $STAGE_SCHEMA depend on it (above). Nothing was changed."
 }
 
 tls_note() {
@@ -1138,7 +1188,8 @@ drop_sql() {
 -- roles. The rows that the SQL console changed stay changed. In ovb_db it first drops the
 -- schema ovb_stage of Copy to RP with its staging tables and their data; with tables there
 -- and ovb_drop_staging off (a table made after the check of the script), it stops, gives
--- the role its LOGIN back and drops nothing.
+-- the role its LOGIN back and drops nothing. It does the same when an object outside
+-- ovb_stage depends on an object in it (DROP SCHEMA ... CASCADE would drop that object).
 SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'oracle_view_rp') AS ovb_rp,
        coalesce((SELECT rolcanlogin FROM pg_roles WHERE rolname = 'oracle_view_rp'), false) AS ovb_rp_login,
        EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'oracle_view_ro') AS ovb_ro,
@@ -1157,7 +1208,7 @@ SELECT count(c.oid) AS ovb_stage_tables,
        coalesce(bool_or(n.nspowner = r.oid), false) AS ovb_stage,
        coalesce(bool_or(n.nspowner <> r.oid), false) AS ovb_stage_other
   FROM pg_namespace n JOIN pg_roles r ON r.rolname = 'oracle_view_rp'
-  LEFT JOIN pg_class c ON c.relnamespace = n.oid AND c.relkind IN ('r', 'p')
+  LEFT JOIN pg_class c ON c.relnamespace = n.oid AND c.relkind IN ('r', 'p', 'm')
                       AND (n.nspowner = r.oid OR c.relowner = r.oid)
  WHERE n.nspname = 'ovb_stage' \gset
 \if :ovb_stage_kept
@@ -1169,6 +1220,20 @@ ALTER ROLE oracle_view_rp LOGIN;
 DO $$ BEGIN RAISE EXCEPTION 'ovb_stage holds staging tables: run drop-role again, with --drop-staging to drop them'; END $$;
 \endif
 \if :ovb_stage
+SQL
+    # $1: the WITH clause of the objects outside ovb_stage that depend on it (STAGE_OUTSIDE_WITH).
+    printf '%s\n' "$1 SELECT count(*) > 0 AS ovb_stage_outside, count(*) AS ovb_stage_outside_count," \
+        "       coalesce(string_agg(obj, '; ' ORDER BY obj), '') AS ovb_stage_outside_list FROM outside \\gset"
+    cat <<'SQL'
+\if :ovb_stage_outside
+\connect postgres
+\if :ovb_rp_login
+ALTER ROLE oracle_view_rp LOGIN;
+\endif
+\echo :ovb_stage_outside_count objects outside ovb_stage depend on it: :ovb_stage_outside_list
+\echo Nothing was dropped.
+DO $$ BEGIN RAISE EXCEPTION 'objects outside ovb_stage depend on it: DROP SCHEMA ovb_stage CASCADE would drop them'; END $$;
+\endif
 DROP SCHEMA ovb_stage CASCADE;
 \echo schema ovb_stage dropped, with its :ovb_stage_tables staging tables and their data (:ovb_stage_size)
 \elif :ovb_stage_other
@@ -1244,6 +1309,7 @@ cmd_drop_role() {
     printf 'Rows that the SQL console changed stay changed.\n'
     if [[ $(pg_value postgres "SELECT count(*) FROM pg_roles WHERE rolname = '$RP_ROLE'") == 1 ]]; then
         stage_tables
+        stage_outside
         if ((STAGE_TABLES > 0 && DROP_STAGING == 0)); then
             printf '\ndrop-role drops these %s tables and their data (%s). To keep a table, copy it first, for example:\n' \
                 "$STAGE_TABLES" "$STAGE_SIZE" >&2
@@ -1254,7 +1320,7 @@ cmd_drop_role() {
     fi
     confirm "$RP_ROLE"
     ((DROP_STAGING == 0)) || staging=on
-    drop_sql | pg_sql -v "ovb_drop_staging=$staging" || die "Dropping the role $RP_ROLE failed (above)"
+    drop_sql "$STAGE_OUTSIDE_WITH" | pg_sql -v "ovb_drop_staging=$staging" || die "Dropping the role $RP_ROLE failed (above)"
     hba=$(pg_value postgres 'SHOW hba_file')
     printf 'A pg_hba.conf line that you added for %s stays in %s: remove it by hand (or put back %s.before-oracle-view),\n' \
         "$RP_ROLE" "$hba" "$hba"
