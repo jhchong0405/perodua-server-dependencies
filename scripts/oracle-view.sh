@@ -25,8 +25,10 @@ ROUTE='stgiss.perodua.com.my   /dev/oracle-view/   8797   strip,http'
 ROUTES_FILE=/etc/perodua-https/routes.conf
 DEPLOY_DIR=/opt/perodua-oracle-view
 FIRST_USERS=(perodua:admin pm:editor)
-# The RP side is fixed by rp_targets.json in the image: host, database and role.
-RP_DATABASE=perodua_oracle
+# The RP side is fixed by rp_targets.json in the image: host, database and role. The
+# database is the one of the grey App (owner decision of 2026-11-07). The SQL of role,
+# role --check and drop-role reads it as the psql variable ovb_db.
+RP_DATABASE=perodua_oracle2
 RP_ROLE=oracle_view_rp
 APP_IP=192.168.23.13      # the App server, as the DB server sees it
 PG_PORT=5432
@@ -72,7 +74,7 @@ uninstall  Removes the container and the files install made in --dir. The state
            volume (mapping edits, SQL audit), the users file and the image stay;
            --purge removes them too. Type the project name to confirm, or pass it
            with --confirm.
-role       Creates or updates the role oracle_view_rp on the database perodua_oracle
+role       Creates or updates the role oracle_view_rp on the database $RP_DATABASE
            with the SCRAM-SHA-256 verifier in --verifier-file (the image build
            wrote it; never the password), and its grants: read and write on the
            tables, read-only by default, no DDL on the Odoo tables. Then it checks
@@ -80,7 +82,8 @@ role       Creates or updates the role oracle_view_rp on the database perodua_or
            installed, and checks pg_hba.conf for the App server (--app-ip, default
            192.168.23.13). It never edits pg_hba.conf: it prints the line to add.
            --check: the checks only, after a pg_hba.conf change.
-drop-role  Ends the sessions of oracle_view_rp and drops the role and its grants.
+drop-role  Ends the sessions of oracle_view_rp and drops the role and its grants
+           in $RP_DATABASE.
            Rows that the SQL console changed stay changed. Type the role name to
            confirm, or pass it with --confirm.
 Exit codes: 0 done; 1 error; 2 usage; role: 3 pg_hba.conf needs the printed line,
@@ -599,6 +602,9 @@ pg() {   # $1 database, then psql options: as postgres over the local socket, st
     runuser -u postgres -- "$PSQL" -X -w -h /var/run/postgresql -p "$PG_PORT" -d "$database" -v ON_ERROR_STOP=1 "$@"
 }
 pg_value() { pg "$1" -At -c "$2"; }
+pg_sql() {   # a SQL script on stdin, with the database names as psql variables, then more options
+    pg postgres -q -v "ovb_db=$RP_DATABASE" "$@" -f -
+}
 db_ready() {
     local answer
     answer=$(pg_value postgres 'SELECT 1' 2>&1) || true
@@ -636,12 +642,12 @@ SET log_min_error_statement = panic;
 SET log_min_duration_sample = -1;
 SET log_transaction_sample_rate = 0;
 SET pg_stat_statements.track_utility = off;
-SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'oracle_view_ro') AS ovb_old \gset
-\if :ovb_old
+SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'oracle_view_ro') AS ovb_ro \gset
+\if :ovb_ro
 \echo The read-only role oracle_view_ro of an earlier bundle: its sessions end and it is dropped
 ALTER ROLE oracle_view_ro NOLOGIN;
 SELECT count(pg_terminate_backend(pid)) AS ended_sessions FROM pg_stat_activity WHERE usename = 'oracle_view_ro' \gset
-\connect perodua_oracle
+\connect :ovb_db
 DROP OWNED BY oracle_view_ro;
 \connect postgres
 SET log_statement = 'none';
@@ -668,8 +674,8 @@ ALTER ROLE oracle_view_rp NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBY
 ALTER ROLE oracle_view_rp SET default_transaction_read_only = on;
 ALTER ROLE oracle_view_rp SET statement_timeout = '30s';
 ALTER ROLE oracle_view_rp SET idle_in_transaction_session_timeout = '60s';
-GRANT CONNECT, TEMPORARY ON DATABASE perodua_oracle TO oracle_view_rp;
-\connect perodua_oracle
+GRANT CONNECT, TEMPORARY ON DATABASE :"ovb_db" TO oracle_view_rp;
+\connect :ovb_db
 GRANT USAGE ON SCHEMA public TO oracle_view_rp;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO oracle_view_rp;
 GRANT SELECT, USAGE, UPDATE ON ALL SEQUENCES IN SCHEMA public TO oracle_view_rp;
@@ -692,7 +698,7 @@ SELECT format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA public GRANT SELEC
 SQL
 }
 
-# One line per right, "OK|what" or "FAIL|what", in the database perodua_oracle.
+# One line per right, "OK|what" or "FAIL|what", in the database RP_DATABASE.
 # has_table_privilege with a list is true when ANY of the rights is held: each right is checked alone.
 ROLE_CHECK_SQL=$(cat <<'SQL'
 SELECT CASE WHEN ok THEN 'OK' ELSE 'FAIL' END || '|' || what FROM (
@@ -710,7 +716,7 @@ SELECT CASE WHEN ok THEN 'OK' ELSE 'FAIL' END || '|' || what FROM (
          'read-only by default (default_transaction_read_only=on)'
     FROM pg_roles WHERE rolname = 'oracle_view_rp'
   UNION ALL
-  SELECT 5, has_database_privilege('oracle_view_rp', current_database(), 'CONNECT'), 'CONNECT on perodua_oracle'
+  SELECT 5, has_database_privilege('oracle_view_rp', current_database(), 'CONNECT'), 'CONNECT on ' || current_database()
   UNION ALL
   SELECT 6, count(*) = 0, 'SELECT on every table and view of public (' || count(*) || ' without)'
     FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -806,7 +812,7 @@ CREATE TEMPORARY VIEW ovb_hba_rules AS
          (type = 'host' OR type = 'hostnogssenc'
           OR (type = 'hostssl' AND current_setting('ssl') = 'on')
           OR (type = 'hostnossl' AND current_setting('ssl') <> 'on'))
-         AND ('all' = ANY (database) OR 'perodua_oracle' = ANY (database))
+         AND ('all' = ANY (database) OR :'ovb_db' = ANY (database))
          AND ('all' = ANY (user_name) OR 'oracle_view_rp' = ANY (user_name))
          -- CASE: the casts run only on IPv4 lines (an IPv6 mask with an IPv4 address is an error).
          AND (address = 'all'
@@ -820,7 +826,7 @@ CREATE TEMPORARY VIEW ovb_hba_rules AS
                           WHERE d ~ '^[@/]' OR d IN ('sameuser', 'samerole', 'samegroup'))) AS unsure
     FROM pg_hba_file_rules
    WHERE error IS NULL AND type <> 'local';
-\echo == The lines that can match the App server, database perodua_oracle, user oracle_view_rp
+\echo == The lines that can match the App server :ovb_app, database :ovb_db, user oracle_view_rp
 SELECT rule_number, line_number, type, database, user_name, address, netmask, auth_method,
        CASE WHEN matches THEN 'matches' ELSE 'check by hand' END AS result, file_name
   FROM ovb_hba_rules WHERE matches OR unsure ORDER BY rule_number;
@@ -856,7 +862,7 @@ SQL
 hba_check() {   # returns 0 when the App server gets in, 3 when the line is missing, 4 for a check by hand
     local out hba again reload block status=0 where='above the first line of the list above, or above the first host line'
     local line="host    $RP_DATABASE    $RP_ROLE    $APP_IP/32    scram-sha-256" marker="# BEGIN perodua-db-deploy $RP_DATABASE"
-    out=$(hba_sql | pg postgres -q -v "ovb_app=$APP_IP" -f -) || die 'The pg_hba.conf check failed (above)'
+    out=$(hba_sql | pg_sql -v "ovb_app=$APP_IP") || die 'The pg_hba.conf check failed (above)'
     printf '%s\n' "$out"
     hba=$(pg_value postgres 'SHOW hba_file')
     again='sudo bash oracle-view.sh role --check'
@@ -922,14 +928,14 @@ drop_sql() {
     cat <<'SQL'
 -- oracle-view.sh: drop-role
 -- Stops new logins of oracle_view_rp (and of oracle_view_ro of an earlier bundle), ends
--- their sessions, removes their grants and default privileges in perodua_oracle
--- (DROP OWNED BY) and drops the roles. The rows that the SQL console changed stay changed.
+-- their sessions, removes their grants and default privileges in ovb_db (DROP OWNED BY)
+-- and drops the roles. The rows that the SQL console changed stay changed.
 SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'oracle_view_rp') AS ovb_rp,
        EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'oracle_view_ro') AS ovb_ro \gset
 \if :ovb_rp
 ALTER ROLE oracle_view_rp NOLOGIN;
 SELECT count(pg_terminate_backend(pid)) AS ended_sessions FROM pg_stat_activity WHERE usename = 'oracle_view_rp' \gset
-\connect perodua_oracle
+\connect :ovb_db
 DROP OWNED BY oracle_view_rp;
 \connect postgres
 DROP ROLE oracle_view_rp;
@@ -940,7 +946,7 @@ DROP ROLE oracle_view_rp;
 \if :ovb_ro
 ALTER ROLE oracle_view_ro NOLOGIN;
 SELECT count(pg_terminate_backend(pid)) AS ended_sessions FROM pg_stat_activity WHERE usename = 'oracle_view_ro' \gset
-\connect perodua_oracle
+\connect :ovb_db
 DROP OWNED BY oracle_view_ro;
 \connect postgres
 DROP ROLE oracle_view_ro;
@@ -961,7 +967,7 @@ cmd_role() {
         read_verifier "$VERIFIER_FILE"
         printf '== The role %s on %s\n' "$RP_ROLE" "$RP_DATABASE"
         # The verifier goes to psql on stdin only, never on a command line.
-        { printf "\\set ovb_verifier '%s'\n" "$VERIFIER"; role_sql; } | pg postgres -q -f - \
+        { printf "\\set ovb_verifier '%s'\n" "$VERIFIER"; role_sql; } | pg_sql \
             || die "Creating or updating the role $RP_ROLE failed (above)"
         VERIFIER=''
         printf 'The role %s has the verifier of the file and its grants\n' "$RP_ROLE"
@@ -987,7 +993,7 @@ cmd_drop_role() {
         "$RP_ROLE" "$RP_DATABASE"
     printf 'Rows that the SQL console changed stay changed.\n'
     confirm "$RP_ROLE"
-    drop_sql | pg postgres -q -f - || die "Dropping the role $RP_ROLE failed (above)"
+    drop_sql | pg_sql || die "Dropping the role $RP_ROLE failed (above)"
     hba=$(pg_value postgres 'SHOW hba_file')
     printf 'A pg_hba.conf line that you added for %s stays in %s: remove it by hand (or put back %s.before-oracle-view),\n' \
         "$RP_ROLE" "$hba" "$hba"

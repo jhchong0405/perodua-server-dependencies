@@ -2062,8 +2062,9 @@ first puts the previous settings and secrets back.
 ## Oracle Field Browser
 
 The Oracle Field Browser is a web tool for the integration work. It shows the
-Oracle EBS objects, the RP database (`perodua_oracle` on the DB server) and the
-RP-to-Oracle mapping, and it has a SQL console. `oracle-view.sh` runs the pinned
+Oracle EBS objects, the RP database (`perodua_oracle2` on the DB server, the
+database of the grey App: owner decision of 2026-11-07) and the RP-to-Oracle
+mapping, and it has a SQL console. `oracle-view.sh` runs the pinned
 image `perodua-deploy.novutal.com/oracle-view:grey-v1.0.2` with Docker Compose on
 the App server, and on the DB server it makes the role that the tool signs in
 with. The tool is at `https://stgiss.perodua.com.my/dev/oracle-view/` through a
@@ -2073,7 +2074,7 @@ route of [https.sh](#https). Every page and every API call needs a login.
 | --- | --- |
 | Container `oracle-view` on `127.0.0.1:8797` only, run from `/opt/perodua-oracle-view` | App server |
 | Route `stgiss.perodua.com.my /dev/oracle-view/ 8797 strip,http` | App server, `/etc/perodua-https/routes.conf` |
-| Role `oracle_view_rp` on the database `perodua_oracle`: read and write on the tables, read-only by default | DB server (PostgreSQL 16) |
+| Role `oracle_view_rp` on the database `perodua_oracle2`: read and write on the tables, read-only by default | DB server (PostgreSQL 16) |
 | Image `perodua-deploy.novutal.com/oracle-view:grey-v1.0.2`, pulled by digest | Private registry |
 
 The image holds the Oracle settings file and the password of the role
@@ -2108,7 +2109,7 @@ Do the steps in this order.
    error text.
 
    The role gets `LOGIN`, `CONNECTION LIMIT 10`, `CONNECT` and `TEMPORARY` on
-   `perodua_oracle`, `USAGE` on the schema `public`, `SELECT, INSERT, UPDATE,
+   `perodua_oracle2`, `USAGE` on the schema `public`, `SELECT, INSERT, UPDATE,
    DELETE` on all tables and views, `SELECT, USAGE, UPDATE` on all sequences, the
    same rights on new tables and sequences, `default_transaction_read_only = on`
    (the pages stay read-only; a Write run of the SQL console turns it off for its
@@ -2125,14 +2126,14 @@ Do the steps in this order.
    | --- | --- |
    | `== Rights of oracle_view_rp` | Each line starts with `OK`. A `FAIL` line stops the command. |
    | `== TLS: SHOW ssl` | `ssl = on`. With `off`, see [TLS to the RP database](#tls-to-the-rp-database). |
-   | `== Extensions that can write in a Read run` | `none`. With `dblink` or `postgres_fdw` in `perodua_oracle`, a Read run of the SQL console can write through them. The command changes no right: that is an owner decision. |
+   | `== Extensions that can write in a Read run` | `none`. With `dblink` or `postgres_fdw` in `perodua_oracle2`, a Read run of the SQL console can write through them. The command changes no right: that is an owner decision. |
    | `== pg_hba.conf check` | `RESULT: OK` (exit status 0). `RESULT: NOT OK` (exit status 3) or `RESULT: CHECK BY HAND` (exit status 4): do step 4. |
 
 4. The command never edits `pg_hba.conf`. With `RESULT: NOT OK` it prints the
    line to add:
 
    ```
-   host    perodua_oracle    oracle_view_rp    192.168.23.13/32    scram-sha-256
+   host    perodua_oracle2    oracle_view_rp    192.168.23.13/32    scram-sha-256
    ```
 
    Back up the file, add the line above the first line of the printed list (or
@@ -2165,13 +2166,13 @@ Do the steps in this order.
 
    **A DB server set up with `deploy-db.sh`.** Each `deploy-db.sh` run writes its
    block for the database at the top of `pg_hba.conf`, from
-   `# BEGIN perodua-db-deploy perodua_oracle` to
-   `# END perodua-db-deploy perodua_oracle`. The block lets in only the App role
-   and ends with `host "perodua_oracle" all 0.0.0.0/0 reject`. A line for
+   `# BEGIN perodua-db-deploy perodua_oracle2` to
+   `# END perodua-db-deploy perodua_oracle2`. The block lets in only the App role
+   and ends with `host "perodua_oracle2" all 0.0.0.0/0 reject`. A line for
    `oracle_view_rp` below the block never matches, and the next `deploy-db.sh`
    run deletes a line inside the block. When the file holds the block, the
    command tells you to put the line above the `# BEGIN perodua-db-deploy
-   perodua_oracle` line, and adds a `NOTE`. Each later `deploy-db.sh` run puts
+   perodua_oracle2` line, and adds a `NOTE`. Each later `deploy-db.sh` run puts
    its block above the line again: after every `deploy-db.sh` run, run
    `sudo bash oracle-view.sh role --check` and move the line back above the
    block.
@@ -2260,7 +2261,7 @@ pass the keys of [oracle-view.env.example](scripts/oracle-view.env.example) with
 | `sudo docker logs oracle-view` | The log of the tool: the start lines, each login (` login `) and each SQL run (` sql-run `, never the statement) |
 
 Checks: the `Health:` line of `status` says `http://127.0.0.1:8797/healthz answers
-ok`. The log shows `RP database view: grey (192.168.23.12:5432/perodua_oracle)` and
+ok`. The log shows `RP database view: grey (192.168.23.12:5432/perodua_oracle2)` and
 `Server mode: 2 users`.
 
 ### 3. The route (App server)
@@ -2419,7 +2420,7 @@ On the grey environment this means:
 - An editor (the `pm` user) can read every RP password hash
   (`res_users.password`), API key (`res_users_apikeys`) and mail server password
   (`ir_mail_server.smtp_pass`), and every system parameter
-  (`ir_config_parameter`) of `perodua_oracle`, the live grey Odoo database. The
+  (`ir_config_parameter`) of `perodua_oracle2`, the live grey Odoo database. The
   console masks no value.
 - An editor can change the password of any RP user, also the admin, and so take
   over the grey App. A `DELETE` or an `UPDATE` can break the App.
