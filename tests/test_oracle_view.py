@@ -1517,9 +1517,12 @@ class RoleOnPostgresTest(PostgresCluster, unittest.TestCase):
         self.assertIn("OK   no right on a database other than perodua_oracle2\n", result.stdout)
         self.assertEqual(len(re.findall(r"^OK   ", result.stdout, re.M)), 12, result.stdout)
         # The session there ended; no grant, default privilege or object of the role is left there.
-        _, error = session.communicate(timeout=30)
+        deadline = time.monotonic() + 10
+        while session.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.1)
+        self.assertIsNotNone(session.poll(), "the session of oracle_view_rp in perodua_oracle still runs")
         self.assertNotEqual(session.returncode, 0)
-        self.assertIn("terminating connection due to administrator command", error)
+        self.assertIn("terminating connection due to administrator command", session.stderr.read())
         self.assertEqual(self.rights_in(OLD_DB), (0, 0))
         self.assertEqual(self.sql(OLD_DB, "SELECT has_table_privilege('oracle_view_rp', 'old_partner', 'SELECT')"), "f")
         denied = self.tool("SELECT 1", OLD_DB)
