@@ -594,13 +594,17 @@ role_sql() {   # after a \set ovb_verifier line: create or update the role and i
     cat <<'SQL'
 -- oracle-view.sh: role
 \set QUIET on
--- The statements that hold the verifier stay out of the server log, also when one
--- fails, and out of the error text of psql.
+-- The statements that hold the verifier stay out of the server log (also the sampled
+-- statements and transactions, and when one fails), out of pg_stat_statements and out
+-- of the error text of psql. Without pg_stat_statements, its SET only makes a placeholder.
 \set VERBOSITY terse
 \set SHOW_CONTEXT never
 SET log_statement = 'none';
 SET log_min_duration_statement = -1;
 SET log_min_error_statement = panic;
+SET log_min_duration_sample = -1;
+SET log_transaction_sample_rate = 0;
+SET pg_stat_statements.track_utility = off;
 SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'oracle_view_ro') AS ovb_old \gset
 \if :ovb_old
 \echo The read-only role oracle_view_ro of an earlier bundle: its sessions end and it is dropped
@@ -612,6 +616,9 @@ DROP OWNED BY oracle_view_ro;
 SET log_statement = 'none';
 SET log_min_duration_statement = -1;
 SET log_min_error_statement = panic;
+SET log_min_duration_sample = -1;
+SET log_transaction_sample_rate = 0;
+SET pg_stat_statements.track_utility = off;
 DROP ROLE oracle_view_ro;
 \endif
 SELECT NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'oracle_view_rp') AS ovb_new \gset
