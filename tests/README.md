@@ -629,6 +629,11 @@ checks:
 - the pin: one `IMAGE=` line, `perodua-deploy.novutal.com/oracle-view` by
   `sha256` digest, the release name from its tag; `install` pulls exactly it
   (once), `compose.yml` names it with `pull_policy: never` and `up` never pulls;
+  the usage text and every `oracle-view:grey-v...` tag of the README name that
+  release (`OracleViewDocsTest`, which needs no root);
+- the Docker engine: an API older than 1.44 (Docker 25, for `start_interval`) or
+  an engine that does not answer stops `install` before the pull and before any
+  file is made; 1.44, 1.100 and 2.0 pass;
 - the registry login: without a terminal or with `--non-interactive` the message
   names `docker login perodua-deploy.novutal.com` and nothing is made; on a
   pseudo-terminal the username and the hidden password go to `docker login
@@ -668,8 +673,15 @@ checks:
 - `uninstall` needs `--confirm oracle-view` (or a terminal); without `--purge` it
   keeps the state volume, the users file, the identity and the image, says so,
   and a later install uses the same users; `--purge` removes the volume, every
-  local image of the repository and the users, leaves the administrator's files,
-  and removes the directory when it is empty;
+  local image of the repository and the users, lists what it removed, leaves the
+  administrator's files, and removes the directory when it is empty;
+- a volume or an image that `--purge` cannot remove: the message lists what was
+  removed and what was not, the identity stays, the exit status is 1, and the
+  next `--purge` removes the rest;
+- the route hint: the table of `https-routes.conf.example`, where the route of
+  the tool is a comment only, gets the "Next: publish it" step from `install`
+  and no "route stays" line from `uninstall`; an uncommented route line turns
+  both around;
 - a held lock stops `install` and `uninstall` before any change.
 
 On the DB side, fake `runuser`, `id` and `psql` record every `psql` call with its
@@ -681,16 +693,25 @@ standard input and the user. It checks:
 - the role SQL: it runs as `postgres` on the local socket with `ON_ERROR_STOP`;
   the verifier is only in the first stdin line (`\set ovb_verifier`), in no
   argument and no output; `log_statement`, `log_min_duration_statement`,
-  `log_min_error_statement`, `VERBOSITY terse` and `SHOW_CONTEXT never` come before
-  each statement with the verifier, also after `\connect`; the grants of the
-  owner decision are there, and no `TRUNCATE`, `SUPERUSER`, `CREATE`,
-  `ALTER SYSTEM`, ownership or reload;
+  `log_min_error_statement`, `log_min_duration_sample`,
+  `log_transaction_sample_rate`, `pg_stat_statements.track_utility`,
+  `VERBOSITY terse` and `SHOW_CONTEXT never` come before each statement with the
+  verifier, also after `\connect postgres`; the grants of the owner decision are
+  there, and no `TRUNCATE`, `SUPERUSER`, `CREATE`, `ALTER SYSTEM`, ownership or
+  reload;
 - a `FAIL` right or a short answer stops before the `pg_hba.conf` check;
 - the `pg_hba.conf` check sends the App address as a psql variable, prints the
   line, the backup, the reload and the check commands, exits 3 (`NOT OK`), 4
   (`CHECK BY HAND`, with `--app-ip` and `--pg-port` in the commands) or 0, and no
   call reloads or writes a file; `role --check` needs the role and sends no role
   SQL;
+- a `pg_hba.conf` with the block of `deploy-db.sh` for `perodua_oracle`: the
+  line goes above its `# BEGIN perodua-db-deploy perodua_oracle` line (with the
+  line number), and a `NOTE` says that each later `deploy-db.sh` run puts the
+  block above the line again, with the `role --check` to run after it; also
+  with `RESULT: OK`, and not for the block of another database;
+- a `pg_hba.conf` that PostgreSQL does not load (an error line) gives exit 4 and
+  the steps to correct it;
 - `ssl = off` and `dblink` or `postgres_fdw` are reported, and nothing is revoked;
 - a stopped PostgreSQL or a missing `perodua_oracle` stops `role` and `drop-role`
   before any SQL; usage errors exit 2 with no call;
@@ -705,10 +726,40 @@ verifier of the file, drops `oracle_view_ro`, and keeps the verifier out of the
 server log and the output. As the tool signs in (TCP, the made-up password), the
 role reads, is read-only by default, writes in a `READ WRITE` transaction (also
 in a table that the owner makes later), and cannot `TRUNCATE`, `ALTER` or
-`CREATE`. With only the default IPv6 and `127.0.0.1` lines the check is
+`CREATE`. The server also logs by sampling (`log_min_duration_sample = 0`,
+`log_statement_sample_rate = 1`, `log_transaction_sample_rate = 1`), and the
+verifier stays out of that log too. Without `DELETE` on one table, `role --check`
+shows `FAIL` for INSERT, UPDATE and DELETE and exits 1: each right is checked
+alone. With only the default IPv6 and `127.0.0.1` lines the check is
 `NOT OK` (exit 3), not `CHECK BY HAND`; the printed line above them gives
 `RESULT: OK`; a `samehost` line above it gives exit 4; a second `role` run
-succeeds; `drop-role` drops the role and keeps the rows.
+succeeds; `drop-role` drops the role and keeps the rows. The cases of the check,
+each on the real server:
+
+| Line (above the default lines) | `ssl` | Exit |
+| --- | --- | --- |
+| `hostnossl` for the App server | off | 0 |
+| `hostssl` for the App server (PostgreSQL loads it with a warning: it never matches) | off | 3 |
+| `hostssl` for the App server (a made-up certificate) | on | 0 |
+| `hostnossl` for the App server | on | 3 |
+| `md5` for the App server (`RESULT: OK` with the note; the tool signs in through an `md5` line) | off | 0 |
+| the address `all` | off | 0 |
+| `reject` above the line, `password` above the line | off | 3 |
+| `samenet`, a database `/^perodua`, a user `/^oracle_view` or the database `samegroup` above the line | off | 4 |
+| an error line (`10.0.0.0/33`) above the line | off | 4 |
+| `include` of a file whose line 10 is a `reject`, above line 4 of the line | off | 3 |
+
+The pg_hba.conf writer of `deploy-db.sh` (its Python program, taken from the
+script) then writes its block for `perodua_oracle` at the top: the line below the
+block gives exit 3, with the line number of `# BEGIN perodua-db-deploy
+perodua_oracle` and the `NOTE`; the line moved above the block gives exit 0; the
+next run of the writer puts the block above it again (exit 3).
+
+`StatementStatsOnPostgresTest` starts a second cluster (port 55433) with
+`pg_stat_statements` loaded and `track_utility` on: it records the utility
+statements of the setup, but no `CREATE ROLE` or `ALTER ROLE` of
+`oracle_view_rp` with its verifier, after one and after two `role` runs. The
+first cluster, without `pg_stat_statements`, shows that its `SET` does not fail.
 
 To run it in the test image (the image has PostgreSQL 16):
 

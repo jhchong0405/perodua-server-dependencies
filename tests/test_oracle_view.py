@@ -47,6 +47,9 @@ UP = ["up", "--detach", "--wait", "--wait-timeout", "180", "--remove-orphans", "
 OWNER = ["ps", "--all", "--filter", f"label=com.docker.compose.project={PROJECT}",
          "--format", '{{.Label "com.docker.compose.project.working_dir"}}']
 MAKE_USER = "/opt/oracle-view/app/deploy/make_user.py"
+ENGINE_API = ("version", "--format", "{{.Server.APIVersion}}")
+ROUTES = Path("/etc/perodua-https/routes.conf")
+ROUTE = "stgiss.perodua.com.my   /dev/oracle-view/   8797   strip,http"
 PUBLISHED = ["users", "initial-login.txt", "oracle-view.env", "compose.yml"]
 GENERATION = ["compose.yml", "oracle-view.env"]
 REGISTRY_ACCOUNT = ["deploy-user", "made-up-registry-pass"]
@@ -108,6 +111,11 @@ compose = len(args) > 5 and args[:3] == ["compose", "--project-name", "oracle-vi
 action = args[5:] if compose else None
 if args == ["compose", "version"]:
     out = "Docker Compose version v2.40.0\n"
+elif args == ["version", "--format", "{{.Server.APIVersion}}"]:
+    if state["api_version"]:
+        out = state["api_version"] + "\n"
+    else:
+        err, status = "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?\n", 1
 elif args == OWNER:
     out = state["owner"] + "\n" if state["owner"] else ""
 elif args[:4] == ["ps", "--all", "--quiet", "--filter"]:
@@ -162,11 +170,17 @@ elif compose and action in (UP, UP + ["--force-recreate"]):
 elif args == ["volume", "inspect", VOLUME]:
     status = 0 if state["volume"] else 1
 elif args == ["volume", "rm", VOLUME]:
-    state["volume"] = False
+    if state["volume_rm_error"]:
+        err, status = state["volume_rm_error"] + "\n", 1
+    else:
+        state["volume"] = False
 elif args == ["image", "ls", "--quiet", REPOSITORY]:
     out = "".join(image_id(ref) + "\n" for ref in state["images"])
 elif args[:3] == ["image", "rm", "--force"] and len(args) == 4:
-    state["images"] = [ref for ref in state["images"] if image_id(ref) != args[3]]
+    if state["image_rm_error"]:
+        err, status = state["image_rm_error"] + "\n", 1
+    else:
+        state["images"] = [ref for ref in state["images"] if image_id(ref) != args[3]]
 else:
     sys.exit(f"fake docker: unsupported command {args}")
 with open(os.environ["FAKE_DOCKER_LOG"], "a") as log:
@@ -253,7 +267,8 @@ class OracleViewAppTest(unittest.TestCase):
     def set_state(self, **changes):
         state = json.loads(self.state.read_text()) if self.state.exists() else {
             "images": [], "registry_account": None, "logged_in": None, "pull_error": "", "listening": False,
-            "foreign_listener": False, "owner": "", "make_user_status": 0, "healthz": "ok", "volume": False}
+            "foreign_listener": False, "owner": "", "make_user_status": 0, "healthz": "ok", "volume": False,
+            "api_version": "1.51", "volume_rm_error": "", "image_rm_error": ""}
         state.update({"up_status": [], "config_status": 0})
         state.update(changes)
         self.state.write_text(json.dumps(state))
@@ -285,8 +300,9 @@ class OracleViewAppTest(unittest.TestCase):
     def make_user_runs(self):
         return [call for call in self.calls() if call["args"][:2] == ["run", "--rm"]]
 
-    def assertNothingChanged(self):  # Docker was asked, at most, who owns the project
-        self.assertLessEqual({tuple(call["args"]) for call in self.calls()}, {("compose", "version"), tuple(OWNER)})
+    def assertNothingChanged(self):  # Docker was asked, at most, its versions and who owns the project
+        self.assertLessEqual({tuple(call["args"]) for call in self.calls()},
+                             {("compose", "version"), ENGINE_API, tuple(OWNER)})
 
     def published(self):
         return {name: (self.dir / name).read_bytes() for name in PUBLISHED if (self.dir / name).exists()}
@@ -663,6 +679,57 @@ class OracleViewAppTest(unittest.TestCase):
         for password in self.passwords().values():
             self.assertNotIn(password, result.stdout)
 
+    def test_an_old_docker_engine_stops_the_install_before_any_change(self):
+        for api, message in (("1.43", "The Docker engine has API 1.43; the health check of the tool (start_interval) "
+                                      "needs API 1.44 (Docker 25) or later. Update Docker first"),
+                             ("1.9", "The Docker engine has API 1.9;"),
+                             ("", "The Docker engine does not answer (docker version)")):
+            with self.subTest(api=api):
+                self.set_state(api_version=api)
+                result = self.install()
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(message, result.stderr)
+                self.assertIn("Nothing was changed.", result.stderr)
+                self.assertNothingChanged()
+                self.assertFalse(self.dir.exists())
+        for api in ("1.44", "1.100", "2.0"):
+            with self.subTest(api=api):
+                self.set_state(api_version=api)
+                self.installed()
+                args = [call["args"] for call in self.calls()]
+                self.assertEqual(args.count(list(ENGINE_API)), 1)
+                if ["pull", IMAGE] in args:  # the first install: the check comes before the pull
+                    self.assertLess(args.index(list(ENGINE_API)), args.index(["pull", IMAGE]))
+
+    def test_a_commented_route_is_not_a_route(self):
+        saved = ROUTES.read_bytes() if ROUTES.exists() else None
+        made = not ROUTES.parent.exists()
+
+        def restore():
+            if saved is None:
+                ROUTES.unlink(missing_ok=True)
+            else:
+                ROUTES.write_bytes(saved)
+            if made:
+                ROUTES.parent.rmdir()
+        self.addCleanup(restore)
+        ROUTES.parent.mkdir(exist_ok=True)
+        # The table of the kit, where the route of the tool is a comment only.
+        example = (SCRIPT.parent / "https-routes.conf.example").read_text()
+        self.assertIn("# stgiss.perodua.com.my         /dev/oracle-view/   8797   strip,http\n", example)
+        ROUTES.write_text(example)
+        result = self.installed()
+        self.assertIn(f"Next: publish it with https.sh (README.md, Oracle Field Browser). Add this line to {ROUTES}:\n"
+                      f"  {ROUTE}\n", result.stdout)
+        result = self.run_script("uninstall", "--confirm", PROJECT)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("The route /dev/oracle-view/ stays", result.stdout)
+        ROUTES.write_text(example + ROUTE + "\n")
+        result = self.installed()
+        self.assertNotIn("Next: publish it", result.stdout)
+        result = self.run_script("uninstall", "--confirm", PROJECT)
+        self.assertIn(f"The route /dev/oracle-view/ stays in {ROUTES} and now has no service", result.stdout)
+
     # ------------------------------------------------------------------ uninstall
     def test_uninstall_keeps_the_state_the_users_and_the_image_unless_purged(self):
         self.installed()
@@ -699,11 +766,45 @@ class OracleViewAppTest(unittest.TestCase):
         self.assertTrue(any(a[:3] == ["image", "rm", "--force"] for a in args))
         state = json.loads(self.state.read_text())
         self.assertEqual((state["volume"], state["images"]), (False, []))
-        self.assertIn("stays: it holds files install did not create", result.stdout)
+        self.assertIn(f"Removed: the oracle-view container, the files of install, the state volume {VOLUME}, the image ",
+                      result.stdout)
+        self.assertIn(f", the users file.\n{self.dir} stays: it holds files install did not create", result.stdout)
         (self.dir / "notes.txt").unlink()
         self.installed()
         self.assertEqual(self.run_script("uninstall", "--purge", "--confirm", PROJECT).returncode, 0)
         self.assertFalse(self.dir.exists())
+
+    def test_a_purge_that_fails_says_what_it_removed_and_what_stays(self):
+        self.installed()
+        self.set_state(volume_rm_error="Error response from daemon: remove oracle-view_oracle-view-state: volume is in use")
+        result = self.run_script("uninstall", "--purge", "--confirm", PROJECT)
+        self.assertEqual(result.returncode, 1)
+        self.assertRegex(result.stdout, r"\nRemoved: the oracle-view container, the files of install, the image id[0-9a-f]+, "
+                                        r"the users file\.\n")
+        self.assertIn(f"NOT removed: the state volume {VOLUME} (see above).\n", result.stderr)
+        self.assertIn("uninstall --purge did not finish. Fix the cause, then run again: sudo bash oracle-view.sh "
+                      f"uninstall --purge --confirm {PROJECT} --dir {self.dir}", result.stderr)
+        self.assertNotIn("Removed: the oracle-view container, the files of install, the state volume", result.stdout)
+        self.assertEqual(sorted(p.name for p in self.dir.iterdir()), [".oracle-view"])  # kept for the next run
+        state = json.loads(self.state.read_text())
+        self.assertEqual((state["volume"], state["images"]), (True, []))
+        # An image that cannot be removed is named too; the next run removes what is left.
+        self.set_state(volume_rm_error="")
+        self.installed()
+        self.set_state(image_rm_error="Error response from daemon: conflict: unable to remove repository reference")
+        result = self.run_script("uninstall", "--purge", "--confirm", PROJECT)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(f"Removed: the oracle-view container, the files of install, the state volume {VOLUME}, "
+                      "the users file.\n", result.stdout)
+        self.assertRegex(result.stderr, r"NOT removed: the image id[0-9a-f]+ \(see above\)\.\n")
+        self.assertTrue((self.dir / ".oracle-view").exists())
+        self.set_state(image_rm_error="")
+        result = self.run_script("uninstall", "--purge", "--confirm", PROJECT)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertRegex(result.stdout, r"\nRemoved: the oracle-view container, the files of install, the image id[0-9a-f]+, "
+                                        + re.escape(f"{self.dir}.") + "\n")
+        self.assertFalse(self.dir.exists())
+        self.assertEqual(json.loads(self.state.read_text())["images"], [])
 
     def test_a_held_lock_stops_every_change(self):
         self.installed()
@@ -762,7 +863,7 @@ elif command.startswith("SELECT count(*) FROM pg_roles WHERE rolname = 'oracle_v
 elif command == "SHOW ssl":
     out = state["ssl"] + "\n"
 elif command == "SHOW hba_file":
-    out = "/etc/postgresql/16/main/pg_hba.conf\n"
+    out = state["hba_file"] + "\n"
 elif "FROM pg_extension" in command:
     out = state["extensions"] + "\n"
 elif "the password is a SCRAM-SHA-256 verifier" in command:
@@ -785,6 +886,11 @@ RIGHTS_OK = ["OK|the password is a SCRAM-SHA-256 verifier", "OK|LOGIN, CONNECTIO
              "OK|USAGE and UPDATE on every sequence of public (0 without)", "OK|no TRUNCATE",
              "OK|no CREATE in public", "OK|owns no table, view or sequence (DDL on the Odoo tables fails)"]
 HBA_LINE = "host    perodua_oracle    oracle_view_rp    {}/32    scram-sha-256"
+BLOCK = "# BEGIN perodua-db-deploy perodua_oracle"  # deploy-db.sh: the first line of its block for the database
+DEPLOY_DB = SCRIPT.with_name("deploy-db.sh")
+SETTINGS_OF_THE_VERIFIER = ("SET log_statement = 'none';", "SET log_min_duration_statement = -1;",
+                            "SET log_min_error_statement = panic;", "SET log_min_duration_sample = -1;",
+                            "SET log_transaction_sample_rate = 0;", "SET pg_stat_statements.track_utility = off;")
 
 
 @needs_root_on_linux
@@ -803,7 +909,8 @@ class OracleViewRoleTest(unittest.TestCase):
         self.env = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}", FAKE_PG_STATE=str(self.state),
                         FAKE_PG_LOG=str(self.log))
         self.set_state(running=True, database=True, role_exists=False, role_status=0, ssl="on", extensions="",
-                       rights=RIGHTS_OK, hba_output="RESULT: OK - the first matching line uses scram-sha-256.\n")
+                       rights=RIGHTS_OK, hba_output="RESULT: OK - the first matching line uses scram-sha-256.\n",
+                       hba_file=HBA_FILE)
         self.verifier = self.tmp / "rp_grey.verifier"
         self.verifier.write_text(VERIFIER + "\n")
 
@@ -870,15 +977,14 @@ class OracleViewRoleTest(unittest.TestCase):
         # Out of the server log and the error text, before each statement with the verifier:
         # at the start of the session, and again after each \connect.
         start = sql[:sql.index("\\if :ovb_old\n")]
-        for setting in ("SET log_statement = 'none';", "SET log_min_duration_statement = -1;",
-                        "SET log_min_error_statement = panic;"):
+        for setting in SETTINGS_OF_THE_VERIFIER:
             self.assertIn(setting, start)
         for statement in ("CREATE ROLE oracle_view_rp LOGIN PASSWORD :'ovb_verifier' CONNECTION LIMIT 10;",
-                          "ALTER ROLE oracle_view_rp LOGIN PASSWORD :'ovb_verifier' CONNECTION LIMIT 10;"):
+                          "ALTER ROLE oracle_view_rp LOGIN PASSWORD :'ovb_verifier' CONNECTION LIMIT 10;",
+                          "DROP ROLE oracle_view_ro;"):  # the session after \connect postgres, while the verifier is set
             at = sql.index(statement)
             since_connect = sql[sql.rfind("\\connect", 0, at) + 1:at]
-            for setting in ("SET log_statement = 'none';", "SET log_min_duration_statement = -1;",
-                            "SET log_min_error_statement = panic;"):
+            for setting in SETTINGS_OF_THE_VERIFIER:
                 self.assertIn(setting, since_connect)
             for setting in ("\\set VERBOSITY terse\n", "\\set SHOW_CONTEXT never\n"):
                 self.assertLess(sql.index(setting), at)
@@ -952,6 +1058,49 @@ class OracleViewRoleTest(unittest.TestCase):
         result = self.run_script("role", "--check")
         self.assertEqual(result.returncode, 1)
         self.assertIn("gave no result", result.stderr)
+
+    def test_the_block_of_deploy_db_gets_the_line_above_it(self):
+        hba = self.tmp / "pg_hba.conf"
+        hba.write_text(f"# PostgreSQL Client Authentication\n\n{BLOCK}\nhost \"perodua_oracle\" all 0.0.0.0/0 reject\n"
+                       "# END perodua-db-deploy perodua_oracle\nlocal all postgres peer\n")
+        self.set_state(role_exists=True, hba_file=str(hba), hba_output="RESULT: NOT OK - no matching line.\n")
+        note = (f"NOTE: {hba} holds the block of deploy-db.sh for perodua_oracle (line 3). Each later\n"
+                "deploy-db.sh run writes that block again at the top of the file, above the line of oracle_view_rp,\n"
+                "and deletes the line when it is inside the block. After each deploy-db.sh run, run:\n"
+                "    sudo bash oracle-view.sh role --check\n"
+                f"and move the line of oracle_view_rp back above the line \"{BLOCK}\".\n")
+        result = self.run_script("role", "--check")
+        self.assertEqual(result.returncode, 3)
+        self.assertIn(f'  2. Add this line above line 3, "{BLOCK}": a line inside or below that block of deploy-db.sh '
+                      "does not work:\n       " + HBA_LINE.format("192.168.23.13") + "\n", result.stdout)
+        self.assertIn(note, result.stdout)
+        self.set_state(hba_output="RESULT: CHECK BY HAND - a line above the first matching line has a rule.\n")
+        result = self.run_script("role", "--check")
+        self.assertEqual(result.returncode, 4)
+        self.assertIn(f'add this line above them, and above line 3, "{BLOCK}"', result.stdout)
+        self.assertIn(note, result.stdout)
+        self.set_state(hba_output="RESULT: OK - the first matching line uses scram-sha-256.\n")
+        result = self.run_script("role", "--check")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(note, result.stdout)  # also when the line is above the block now
+        self.assertIn("The role is ready", result.stdout)
+        # The block of another database, or none: no note.
+        for text in (hba.read_text().replace("perodua_oracle", "perodua_oracle2"), "local all postgres peer\n"):
+            with self.subTest(text=text):
+                hba.write_text(text)
+                result = self.run_script("role", "--check")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn("NOTE:", result.stdout)
+
+    def test_a_pg_hba_conf_with_errors_needs_a_check_by_hand(self):
+        self.set_state(role_exists=True, hba_output="RESULT: CHECK BY HAND - pg_hba.conf has lines with errors (the last "
+                                                    "list). PostgreSQL does not load such a file.\n")
+        result = self.run_script("role", "--check")
+        self.assertEqual(result.returncode, 4)
+        self.assertIn("PostgreSQL does not load a pg_hba.conf with errors, so this check cannot tell which lines it uses.\n"
+                      "  1. Correct the lines of the last list, in the files that it names.\n", result.stdout)
+        self.assertNotIn('Read the lines that the list marks "check by hand"', result.stdout)
+        self.assertNotIn("The role is ready", result.stdout)
 
     def test_role_check_needs_the_role(self):
         result = self.run_script("role", "--check")
@@ -1038,12 +1187,17 @@ def has_postgres_user():
         return False
 
 
-@unittest.skipUnless(hasattr(os, "geteuid") and os.geteuid() == 0 and Path("/proc/self/fd").is_dir()
-                     and (PG_BIN / "initdb").exists() and shutil.which("runuser") and has_postgres_user(),
-                     "needs root and PostgreSQL 16 on Linux (the test image)")
-class RoleOnPostgresTest(unittest.TestCase):
-    """The role SQL, the rights check and the pg_hba.conf check on a real throwaway cluster."""
-    PORT = "55432"
+def deploy_db_hba_writer():
+    """The Python program with which deploy-db.sh writes its block at the top of pg_hba.conf."""
+    found = re.search(r'python3 - "\$HBA" "\$DB_NAME" "\$DB_USER" "\$APP_CIDR" "\$STAGING" <<\'PY\'\n(.*?)\nPY\n',
+                      DEPLOY_DB.read_text(), re.S)
+    return found.group(1) if found else None
+
+
+class PostgresCluster:
+    """A throwaway PostgreSQL 16 cluster for one test class, on its own port, with its server log."""
+    PORT = None
+    SERVER_OPTIONS = ""
     APP = "192.0.2.13"  # a documentation address: no line of the cluster lets it in at first
 
     @classmethod
@@ -1061,8 +1215,8 @@ class RoleOnPostgresTest(unittest.TestCase):
                          "host all all 127.0.0.1/32 scram-sha-256"]
         cls.write_hba(cls.hba_lines)
         cls.as_postgres([str(PG_BIN / "pg_ctl"), "-D", str(cls.data), "-l", str(cls.server_log), "-w", "-o",
-                         f"-p {cls.PORT} -k /var/run/postgresql -c listen_addresses=127.0.0.1 -c log_statement=all",
-                         "start"])
+                         f"-p {cls.PORT} -k /var/run/postgresql -c listen_addresses=127.0.0.1 -c log_statement=all "
+                         + cls.SERVER_OPTIONS, "start"])
         cls.addClassCleanup(shutil.rmtree, cls.tmp, ignore_errors=True)
         cls.addClassCleanup(cls.as_postgres, [str(PG_BIN / "pg_ctl"), "-D", str(cls.data), "-m", "immediate", "stop"])
         cls.sql("postgres", "CREATE ROLE odoo LOGIN")
@@ -1089,6 +1243,16 @@ class RoleOnPostgresTest(unittest.TestCase):
                                "-c", query], cwd=cls.tmp, check=True, capture_output=True, text=True,
                               timeout=60).stdout.strip()
 
+    def reload(self, ssl=None):
+        """Reload the configuration, and wait until a new session has it."""
+        if ssl is not None:
+            self.sql("postgres", f"ALTER SYSTEM SET ssl = {'on' if ssl else 'off'}")
+        before = self.sql("postgres", "SELECT pg_conf_load_time()")
+        self.sql("postgres", "SELECT pg_reload_conf()")
+        deadline = time.monotonic() + 10
+        while self.sql("postgres", "SELECT pg_conf_load_time()") == before and time.monotonic() < deadline:
+            time.sleep(0.1)
+
     def tool(self, query):  # as the tool signs in: over TCP with the password of the image
         return subprocess.run([str(PG_BIN / "psql"), "-X", "-At", "-c", query,
                                f"host=127.0.0.1 port={self.PORT} dbname=perodua_oracle user=oracle_view_rp sslmode=prefer"],
@@ -1099,10 +1263,36 @@ class RoleOnPostgresTest(unittest.TestCase):
         return subprocess.run(["bash", str(SCRIPT), *args, "--pg-port", self.PORT], cwd=self.tmp,
                               stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120)
 
-    def test_role_rights_pg_hba_check_and_drop_on_a_real_server(self):
+    def make_role(self):
         verifier = self.tmp / "rp_grey.verifier"
         verifier.write_text(VERIFIER + "\n")
-        result = self.run_script("role", "--verifier-file", str(verifier), "--app-ip", self.APP)
+        return self.run_script("role", "--verifier-file", str(verifier), "--app-ip", self.APP)
+
+    def check(self, lines, **reload):
+        """role --check with these pg_hba.conf lines after the two local lines."""
+        self.write_hba(self.hba_lines[:2] + lines)
+        self.reload(**reload)
+        return self.run_script("role", "--check", "--app-ip", self.APP)
+
+
+REAL_POSTGRES = unittest.skipUnless(
+    hasattr(os, "geteuid") and os.geteuid() == 0 and Path("/proc/self/fd").is_dir() and (PG_BIN / "initdb").exists()
+    and shutil.which("runuser") and has_postgres_user(), "needs root and PostgreSQL 16 on Linux (the test image)")
+
+
+@REAL_POSTGRES
+class RoleOnPostgresTest(PostgresCluster, unittest.TestCase):
+    """The role SQL, the rights check and the pg_hba.conf check on a real throwaway cluster."""
+    PORT = "55432"
+    # Each statement is also logged by the sampling of statements and of transactions.
+    SERVER_OPTIONS = "-c log_min_duration_sample=0 -c log_statement_sample_rate=1 -c log_transaction_sample_rate=1"
+
+    def test_role_rights_pg_hba_check_and_drop_on_a_real_server(self):  # the first test of the class (by name)
+        self.assertEqual(self.sql("postgres", "SELECT count(*) FROM pg_roles WHERE rolname = 'oracle_view_ro'"), "1")
+        self.addCleanup(self.reload)
+        self.addCleanup(self.write_hba, self.hba_lines)
+        verifier = self.tmp / "rp_grey.verifier"
+        result = self.make_role()
         output = result.stdout + result.stderr
         # The ::1 line above is IPv6: it cannot match the App server, so this is NOT OK, not CHECK BY HAND.
         self.assertEqual(result.returncode, 3, output)
@@ -1112,8 +1302,20 @@ class RoleOnPostgresTest(unittest.TestCase):
         self.assertEqual(self.sql("postgres", "SELECT count(*) FROM pg_roles WHERE rolname = 'oracle_view_ro'"), "0")
         log = self.server_log.read_text(errors="replace")
         self.assertIn("SET log_statement = 'none'", log)  # the log records statements
+        for setting, value in (("log_min_duration_sample", "0"), ("log_statement_sample_rate", "1"),
+                               ("log_transaction_sample_rate", "1")):  # the server also logs by sampling
+            self.assertEqual(self.sql("postgres", f"SHOW {setting}"), value)
         self.assertNotIn(STORED_KEY, log)
         self.assertNotIn(STORED_KEY, output)
+        # Each right is checked alone: without DELETE on one table, the line for INSERT, UPDATE and DELETE fails.
+        self.sql("perodua_oracle", "REVOKE DELETE ON res_partner FROM oracle_view_rp")
+        missing = self.run_script("role", "--check", "--app-ip", self.APP)
+        self.assertEqual(missing.returncode, 1, missing.stdout + missing.stderr)
+        self.assertIn("FAIL INSERT, UPDATE and DELETE on every table of public (1 without)\n", missing.stdout)
+        self.assertEqual(len(re.findall(r"^OK   ", missing.stdout, re.M)), 10, missing.stdout)
+        self.assertIn("Nothing in pg_hba.conf was checked", missing.stderr)
+        self.assertNotIn("RESULT:", missing.stdout)
+        self.sql("perodua_oracle", "GRANT DELETE ON res_partner TO oracle_view_rp")
         # A table that Odoo makes later gets the rights too (default privileges).
         self.sql("perodua_oracle", "SET ROLE odoo; CREATE TABLE later_table (id int)")
         self.assertEqual(self.tool("SHOW default_transaction_read_only").stdout.strip(), "on")
@@ -1152,6 +1354,176 @@ class RoleOnPostgresTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.sql("postgres", "SELECT count(*) FROM pg_roles WHERE rolname = 'oracle_view_rp'"), "0")
         self.assertEqual(self.sql("perodua_oracle", "SELECT count(*) FROM res_partner"), "1")
+
+    def test_the_pg_hba_check_reads_each_kind_of_rule(self):
+        self.write_hba(self.hba_lines)
+        self.reload()
+        self.assertEqual(self.make_role().returncode, 3)
+        self.addCleanup(self.run_script, "drop-role", "--confirm", "oracle_view_rp")
+        self.addCleanup(self.reload, ssl=False)
+        self.addCleanup(self.write_hba, self.hba_lines)
+        rest = self.hba_lines[2:]
+
+        def rp(kind="host", database="perodua_oracle", user="oracle_view_rp", address=f"{self.APP}/32",
+               method="scram-sha-256"):
+            return f"{kind} {database} {user} {address} {method}"
+        ok, md5 = "RESULT: OK - the first matching line uses scram-sha-256.", "RESULT: OK - the first matching line uses md5."
+        cases = [  # (name, lines, ssl, exit status, text of the output)
+            ("hostnossl, ssl off", [rp("hostnossl")], False, 0, ok),
+            ("hostssl, ssl off", [rp("hostssl")], False, 3, "| hostssl record cannot match because SSL is disabled | "
+                                                             "loaded, never matches"),
+            ("hostssl, ssl on", [rp("hostssl")], True, 0, ok),
+            ("hostnossl, ssl on", [rp("hostnossl")], True, 3, "RESULT: NOT OK"),
+            ("md5", [rp(method="md5")], False, 0, md5),
+            ("an all address", [rp(address="all")], False, 0, ok),
+            ("a reject first", [rp(method="reject"), rp()], False, 3, "first matching line uses: reject"),
+            ("password first", [rp(method="password"), rp()], False, 3, "RESULT: NOT OK"),
+            ("samenet above", ["host all all samenet scram-sha-256", rp()], False, 4, "RESULT: CHECK BY HAND - a line above"),
+            ("a database regular expression above", [rp(database="/^perodua"), rp()], False, 4,
+             "RESULT: CHECK BY HAND - a line above"),
+            ("a user regular expression above", [rp(user="/^oracle_view"), rp()], False, 4,
+             "RESULT: CHECK BY HAND - a line above"),
+            ("samegroup above", [rp(database="samegroup"), rp()], False, 4, "RESULT: CHECK BY HAND - a line above"),
+            ("a line with an error", ["host all all 10.0.0.0/33 scram-sha-256", rp()], False, 4,
+             "RESULT: CHECK BY HAND - pg_hba.conf has lines with errors"),
+        ]
+        (self.data / "server.crt").exists() or subprocess.run(
+            ["openssl", "req", "-new", "-x509", "-days", "1", "-nodes", "-subj", "/CN=localhost",
+             "-keyout", str(self.data / "server.key"), "-out", str(self.data / "server.crt")],
+            check=True, capture_output=True, timeout=60)
+        for name in ("server.key", "server.crt"):
+            shutil.chown(self.data / name, "postgres", "postgres")
+            (self.data / name).chmod(0o600)
+        for name, lines, ssl, status, text in cases:
+            with self.subTest(name=name):
+                result = self.check(lines + rest, ssl=ssl)
+                self.assertEqual(self.sql("postgres", "SHOW ssl"), "on" if ssl else "off")
+                self.assertEqual(result.returncode, status, result.stdout + result.stderr)
+                self.assertIn(text, result.stdout)
+        # md5 lets the role in: its password is a SCRAM-SHA-256 verifier, so PostgreSQL uses SCRAM.
+        self.write_hba(self.hba_lines[:2] + ["host perodua_oracle oracle_view_rp 127.0.0.1/32 md5"])
+        self.reload(ssl=False)
+        self.assertEqual(self.tool("SELECT 1").stdout.strip(), "1")
+        # The rules are taken in the order of PostgreSQL, also through an include file: line 10 of the
+        # included file comes before line 4 of pg_hba.conf.
+        included = self.data / "oracle-view-include.conf"
+        included.write_text("# made-up include file\n" * 9 + rp(method="reject") + "\n")
+        shutil.chown(included, "postgres", "postgres")
+        result = self.check(["include oracle-view-include.conf", rp()] + rest)
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn("first matching line uses: reject", result.stdout)
+        result = self.check([rp(), "include oracle-view-include.conf"] + rest)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_the_block_of_a_later_deploy_db_run_goes_above_the_line(self):
+        writer = deploy_db_hba_writer()
+        self.assertIsNotNone(writer, "the pg_hba.conf writer of deploy-db.sh")
+
+        def deploy_db():  # as deploy-db.sh for perodua_oracle with the App role odoo writes pg_hba.conf
+            subprocess.run(["python3", "-", str(self.hba), "perodua_oracle", "odoo", "198.51.100.0/24", ""],
+                           input=writer, text=True, check=True, timeout=60)
+            self.reload()
+        self.write_hba(self.hba_lines)
+        self.reload()
+        self.assertEqual(self.make_role().returncode, 3)
+        self.addCleanup(self.run_script, "drop-role", "--confirm", "oracle_view_rp")
+        self.addCleanup(self.reload)
+        self.addCleanup(self.write_hba, self.hba_lines)
+        line = HBA_LINE.format(self.APP)
+        self.write_hba(self.hba_lines[:2] + [line] + self.hba_lines[2:])
+        self.reload()
+        self.assertEqual(self.run_script("role", "--check", "--app-ip", self.APP).returncode, 0)
+        deploy_db()
+        lines = self.hba.read_text().splitlines()
+        self.assertEqual(lines[0], BLOCK)
+        self.assertLess(lines.index('host "perodua_oracle" all 0.0.0.0/0 reject'), lines.index(line))
+        result = self.run_script("role", "--check", "--app-ip", self.APP)
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)  # the reject of the block comes first
+        self.assertIn("first matching line uses: reject", result.stdout)
+        self.assertIn(f'  2. Add this line above line 1, "{BLOCK}"', result.stdout)
+        self.assertIn("After each deploy-db.sh run, run:\n"
+                      f"    sudo bash oracle-view.sh role --check --app-ip {self.APP} --pg-port {self.PORT}\n", result.stdout)
+        # Above the block it lets the App server in, and the note stays.
+        self.hba.write_text(line + "\n" + "".join(text + "\n" for text in lines if text != line))
+        self.reload()
+        result = self.run_script("role", "--check", "--app-ip", self.APP)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"NOTE: {self.hba} holds the block of deploy-db.sh for perodua_oracle (line 2).", result.stdout)
+        # The next deploy-db.sh run puts its block above the line again.
+        deploy_db()
+        self.assertEqual(self.run_script("role", "--check", "--app-ip", self.APP).returncode, 3)
+
+
+@REAL_POSTGRES
+class StatementStatsOnPostgresTest(PostgresCluster, unittest.TestCase):
+    """With pg_stat_statements loaded, the statements with the verifier stay out of it."""
+    PORT = "55433"
+    SERVER_OPTIONS = "-c shared_preload_libraries=pg_stat_statements -c pg_stat_statements.track_utility=on"
+    WITH_THE_VERIFIER = "SELECT count(*) FROM pg_stat_statements WHERE query ~ 'ROLE oracle_view_rp LOGIN PASSWORD'"
+
+    def test_the_verifier_stays_out_of_pg_stat_statements(self):
+        self.assertEqual(self.make_role().returncode, 3)
+        self.sql("postgres", "CREATE EXTENSION pg_stat_statements")
+        self.addCleanup(self.sql, "postgres", "DROP EXTENSION pg_stat_statements")
+        # It records utility statements: the CREATE ROLE of the cluster setup is there.
+        self.assertNotEqual(self.sql("postgres", "SELECT count(*) FROM pg_stat_statements "
+                                                 "WHERE query LIKE 'CREATE ROLE odoo%'"), "0")
+        self.assertEqual(self.sql("postgres", self.WITH_THE_VERIFIER), "0")
+        self.assertEqual(self.sql("postgres", f"SELECT count(*) FROM pg_stat_statements WHERE strpos(query, '{STORED_KEY}') > 0"), "0")
+        # A second run (ALTER ROLE) too.
+        self.assertEqual(self.make_role().returncode, 3)
+        self.assertEqual(self.sql("postgres", self.WITH_THE_VERIFIER), "0")
+
+
+README = (SCRIPT.parents[1] / "README.md").read_text()
+SECTION = README.split("\n## Oracle Field Browser\n", 1)[1].split("\n## ", 1)[0]
+
+
+def words(text):  # the text with each run of white space as one space, as Markdown shows it
+    return " ".join(text.split())
+
+
+class OracleViewDocsTest(unittest.TestCase):
+    """The README and the usage text name the pinned release and the steps that the script expects."""
+
+    def test_the_readme_and_the_usage_name_the_pinned_release(self):
+        tag = IMAGE.split("@")[0]
+        self.assertEqual(set(re.findall(r"oracle-view:(grey-v[0-9][0-9.]*[0-9])", README)), {tag.split(":")[1]})
+        self.assertIn(f"`{tag}`", SECTION)
+        self.assertIn(f"Wait for `Installed: {RELEASE}`.", SECTION)
+        usage = subprocess.run(["bash", str(SCRIPT), "--help"], capture_output=True, text=True, timeout=60)
+        self.assertEqual(usage.returncode, 0, usage.stderr)
+        self.assertIn(f"install    Pulls the pinned image ({RELEASE}) from the private registry", usage.stdout)
+
+    def test_the_intro_names_the_tool(self):
+        intro = README.split("\n## ", 1)[0]
+        self.assertIn("**Oracle Field Browser** (separate)", intro)
+        self.assertIn("See [Oracle Field Browser](#oracle-field-browser).", words(intro))
+        self.assertEqual(README.count("\n## Oracle Field Browser\n"), 1)  # the anchor of the link
+
+    def test_the_move_from_the_manual_install_deletes_its_folder_after_the_last_use(self):
+        steps = SECTION.split("\n### From the manual install\n", 1)[1].split("\n### ", 1)[0]
+        order = ["uninstall-app.sh", "install --config /opt/oracle-view/.env", "sudo cp /opt/oracle-view/users",
+                 "sudo rm -rf /opt/oracle-view\n", "Put the route back"]
+        at = [steps.index(text) for text in order]
+        self.assertEqual(at, sorted(at))
+        self.assertEqual(steps.count("/opt/oracle-view"), steps[:at[3]].count("/opt/oracle-view") + 1)
+        self.assertIn("The state volume `oracle-view_oracle-view-state` (the mapping edits and the SQL audit) is a Docker "
+                      "volume, not in that folder: it stays.", words(steps))
+
+    def test_the_readme_and_the_script_know_the_block_of_deploy_db(self):
+        deploy_db = DEPLOY_DB.read_text()
+        self.assertIn("begin=f'# BEGIN perodua-db-deploy {db}'", deploy_db)
+        self.assertIn("block += [f'host \"{name}\" all 0.0.0.0/0 reject',f'host \"{name}\" all ::/0 reject']", deploy_db)
+        self.assertIn("text='\\n'.join(block+[end]+remaining)+'\\n'", deploy_db)  # at the top, on every run
+        self.assertIn('marker="# BEGIN perodua-db-deploy $RP_DATABASE"', TEXT)
+        text = words(SECTION)
+        for sentence in ("Each `deploy-db.sh` run writes its block for the database at the top of `pg_hba.conf`, from "
+                         "`# BEGIN perodua-db-deploy perodua_oracle` to `# END perodua-db-deploy perodua_oracle`.",
+                         'ends with `host "perodua_oracle" all 0.0.0.0/0 reject`.',
+                         "after every `deploy-db.sh` run, run `sudo bash oracle-view.sh role --check` and move the line "
+                         "back above the block."):
+            self.assertIn(sentence, text)
 
 
 if __name__ == "__main__":
