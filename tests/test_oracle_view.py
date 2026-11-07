@@ -1327,10 +1327,18 @@ class PostgresCluster:
 
     @classmethod
     def make_old_ro(cls):  # the read-only role of an earlier bundle, with rights in both databases
+        cls.drop_old_ro()
         cls.sql("postgres", "CREATE ROLE oracle_view_ro LOGIN")
         for database, table in ((RP_DB, "res_partner"), (OLD_DB, "old_partner")):
             cls.sql("postgres", f"GRANT CONNECT ON DATABASE {database} TO oracle_view_ro")
             cls.sql(database, f"GRANT SELECT ON {table} TO oracle_view_ro")
+
+    @classmethod
+    def drop_old_ro(cls):  # oracle_view_ro and its rights, when it exists: each test can run alone
+        if cls.sql("postgres", "SELECT count(*) FROM pg_roles WHERE rolname = 'oracle_view_ro'") == "1":
+            for database in cls.sql("postgres", "SELECT datname FROM pg_database WHERE NOT datistemplate").split():
+                cls.sql(database, "DROP OWNED BY oracle_view_ro")
+            cls.sql("postgres", "DROP ROLE oracle_view_ro")
 
     @classmethod
     def as_postgres(cls, command):
@@ -1543,41 +1551,55 @@ class RoleOnPostgresTest(PostgresCluster, unittest.TestCase):
         self.sql("postgres", "DROP TABLE made_up_elsewhere")
         self.assertEqual(self.run_script("role", "--check", "--app-ip", self.APP).returncode, 0)
 
-    def test_the_old_database_is_cleaned_in_one_transaction(self):
-        # A stop after DROP OWNED BY in the old database (here an error that a psql in front of the real one adds
-        # right after it) must not leave the role without CONNECT on perodua_oracle2.
-        self.assertEqual(self.make_role().returncode, 3)
-        self.addCleanup(self.run_script, "drop-role", "--confirm", "oracle_view_rp")
-        self.old_release_rights()
-        wrapper = self.tmp / "stop-after-drop-owned"
+    def stop_after(self, text):
+        """A psql in front of the real one: it adds an error right after the first text in a SQL script."""
+        wrapper = self.tmp / ("stop-" + hashlib.sha256(text.encode()).hexdigest()[:8])
         wrapper.mkdir(exist_ok=True)
         (wrapper / "psql").write_text(f"""#!/usr/bin/env python3
 import os, subprocess, sys
 real = {str(PG_BIN / "psql")!r}
 if "-f" in sys.argv:
-    script = sys.stdin.read().replace("DROP OWNED BY oracle_view_rp;\\n", "DROP OWNED BY oracle_view_rp;\\nSELECT 1/0;\\n", 1)
+    script = sys.stdin.read().replace({text!r}, {text + "SELECT 1/0;" + chr(10)!r}, 1)
     sys.exit(subprocess.run([real, *sys.argv[1:]], input=script, text=True).returncode)
 os.execv(real, [real, *sys.argv[1:]])
 """)
         (wrapper / "psql").chmod(0o755)
         shutil.chown(wrapper, "postgres", "postgres")
-        result = self.make_role(path=wrapper)
+        return wrapper
+
+    def test_the_old_database_is_cleaned_in_one_transaction(self):
+        # A stop after DROP OWNED BY in the old database must not leave the role without CONNECT on
+        # perodua_oracle2: DROP OWNED BY also revokes it there.
+        self.assertEqual(self.make_role().returncode, 3)
+        self.addCleanup(self.run_script, "drop-role", "--confirm", "oracle_view_rp")
+        self.old_release_rights()
+        result = self.make_role(path=self.stop_after("DROP OWNED BY oracle_view_rp;\n"))
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("division by zero", result.stdout + result.stderr)
         # Nothing of the transaction stays: the role keeps CONNECT on perodua_oracle2, and its old rights too.
         self.assertEqual(self.sql("postgres", "SELECT has_database_privilege('oracle_view_rp', 'perodua_oracle2', 'CONNECT')"), "t")
         self.assertEqual(self.tool("SELECT count(*) FROM res_partner").stdout.strip(), "1")
         self.assertEqual(self.rights_in(OLD_DB), (2, 4))
-        # The next run without the stop cleans the old database.
+        # A stop right after the transaction: it removed the old rights and gave CONNECT on perodua_oracle2
+        # again, so the tool keeps its way in before the later grants of the run.
+        result = self.make_role(path=self.stop_after("COMMIT;\n"))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("division by zero", result.stdout + result.stderr)
+        self.assertEqual(self.rights_in(OLD_DB), (0, 0))
+        self.assertEqual(self.sql("postgres", "SELECT has_database_privilege('oracle_view_rp', 'perodua_oracle2', 'CONNECT')"), "t")
+        self.assertEqual(self.tool("SELECT count(*) FROM res_partner").stdout.strip(), "1")
+        # The next run without a stop ends as usual.
+        self.old_release_rights()
         self.assertEqual(self.make_role().returncode, 3)
         self.assertEqual(self.rights_in(OLD_DB), (0, 0))
         self.assertEqual(self.tool("SELECT count(*) FROM res_partner").stdout.strip(), "1")
 
     def test_the_old_database_may_be_missing(self):
+        self.drop_old_ro()
         self.sql("postgres", "ALTER DATABASE perodua_oracle RENAME TO made_up_away")
         self.addCleanup(self.sql, "postgres", "ALTER DATABASE made_up_away RENAME TO perodua_oracle")
         self.sql("postgres", "CREATE ROLE oracle_view_ro LOGIN")  # an earlier bundle, with rights in perodua_oracle2
-        self.addCleanup(self.sql, "postgres", "DROP ROLE IF EXISTS oracle_view_ro")
+        self.addCleanup(self.drop_old_ro)
         self.sql("postgres", "GRANT CONNECT ON DATABASE perodua_oracle2 TO oracle_view_ro")
         self.sql(RP_DB, "GRANT SELECT ON res_partner TO oracle_view_ro")
         self.addCleanup(self.run_script, "drop-role", "--confirm", "oracle_view_rp")
@@ -1597,7 +1619,7 @@ os.execv(real, [real, *sys.argv[1:]])
         self.addCleanup(self.run_script, "drop-role", "--confirm", "oracle_view_rp")
         self.old_release_rights()  # rights in perodua_oracle that an earlier change left
         self.make_old_ro()
-        self.addCleanup(self.sql, "postgres", "DROP ROLE IF EXISTS oracle_view_ro")
+        self.addCleanup(self.drop_old_ro)
         self.assertNotEqual(self.rights_in(RP_DB), (0, 0))
         self.assertNotEqual(self.rights_in(RP_DB, "oracle_view_ro"), (0, 0))
         self.assertNotEqual(self.rights_in(OLD_DB, "oracle_view_ro"), (0, 0))
