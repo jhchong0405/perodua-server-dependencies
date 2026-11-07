@@ -1816,6 +1816,13 @@ class OracleViewDocsTest(unittest.TestCase):
                          "applies. A key with no value (`OVB_LIVE_TIMEOUT=`) in `--config` removes a saved value."):
             self.assertIn(sentence, text)
 
+    def test_the_readme_names_the_verifier_file_of_the_image_build(self):
+        # deploy/build-image.sh of oracle-view 9cd7a93: RP_VERIFIER=$SECRETS/rp_grey.verifier
+        self.assertIn("writes the SCRAM-SHA-256 verifier of the role password to `secrets/rp_grey.verifier` in its "
+                      "output folder.", words(SECTION))
+        self.assertIn("scp OUTPUT_FOLDER/secrets/rp_grey.verifier YOU@DB_SERVER:\n", SECTION)
+        self.assertIn("sudo bash oracle-view.sh role --verifier-file ~/rp_grey.verifier\n", SECTION)
+
     def test_the_readme_and_the_usage_name_the_pinned_release(self):
         tag = IMAGE.split("@")[0]
         self.assertEqual(set(re.findall(r"oracle-view:(grey-v[0-9][0-9.]*[0-9])", README)), {tag.split(":")[1]})

@@ -630,7 +630,11 @@ checks:
   `sha256` digest, the release name from its tag; `install` pulls exactly it
   (once), `compose.yml` names it with `pull_policy: never` and `up` never pulls;
   the usage text and every `oracle-view:grey-v...` tag of the README name that
-  release (`OracleViewDocsTest`, which needs no root);
+  release; the pin is exactly `grey-v1.0.2@sha256:a5b48111...` and neither the
+  script nor the README names `grey-v1.0.1` or `8e82b47f` (`OracleViewDocsTest`,
+  which needs no root, also checks the README sentences of the tests below and
+  that only the lines `RP_DATABASE=perodua_oracle2` and
+  `OLD_RP_DATABASE=perodua_oracle` of the script name a database);
 - the Docker engine: an API older than 1.44 (Docker 25, for `start_interval`) or
   an engine that does not answer stops `install` before the pull and before any
   file is made; 1.44, 1.100 and 2.0 pass;
@@ -646,10 +650,16 @@ checks:
   `OVB_RP_SSLMODE=require`; `compose.yml` and `oracle-view.env` 0600 in a 0700
   directory; the pull and `up` hold the lock;
 - the settings: each bad value (memory form and minimum, processes, CPUs,
-  `OVB_RP_SSLMODE` other than `require` or `prefer`, shell syntax) and an unknown
-  key stop before any Docker call and make nothing; `--config` reads over the
-  saved settings, and the `.env` of the manual install (comments, Windows line
-  ends) is a valid `--config`;
+  `OVB_RP_SSLMODE` other than `require` or `prefer`, a time-out outside 5-3600
+  or not plain digits, shell syntax) and an unknown key stop before any Docker
+  call and make nothing; `--config` reads over the saved settings, and the
+  `.env` of the manual install (comments, Windows line ends) and
+  `oracle-view.env.example` are a valid `--config`;
+- the time-outs `OVB_LIVE_TIMEOUT` and `OVB_SQL_TIMEOUT`: without a value (also
+  when the environment of the command has them) neither `compose.yml` nor
+  `oracle-view.env` has them and `status` names the image default (300 s); 5 and
+  3600 go to the environment of the container as strings and stay saved; a key
+  with no value in `--config` removes a saved value;
 - the users: `perodua` (admin) and `pm` (editor) get random passwords through
   `make_user.py` on standard input only (`--network none`, `--read-only`, no
   capabilities, uid 10001); the users file is 0400 for 10001, the passwords are
@@ -690,7 +700,8 @@ standard input and the user. It checks:
   the `role.sql` of the bundle, an empty file and a missing file are refused
   before any SQL, and the content is never printed; a Windows line end is
   accepted;
-- the role SQL: it runs as `postgres` on the local socket with `ON_ERROR_STOP`;
+- the role SQL: it runs as `postgres` on the local socket with `ON_ERROR_STOP`
+  and the psql variables `ovb_db=perodua_oracle2` and `ovb_old_db=perodua_oracle`;
   the verifier is only in the first stdin line (`\set ovb_verifier`), in no
   argument and no output; `log_statement`, `log_min_duration_statement`,
   `log_min_error_statement`, `log_min_duration_sample`,
@@ -698,32 +709,40 @@ standard input and the user. It checks:
   `VERBOSITY terse` and `SHOW_CONTEXT never` come before each statement with the
   verifier, also after `\connect postgres`; the grants of the owner decision are
   there, and no `TRUNCATE`, `SUPERUSER`, `CREATE`, `ALTER SYSTEM`, ownership or
-  reload;
-- a `FAIL` right or a short answer stops before the `pg_hba.conf` check;
+  reload; in the old database, after the end of the sessions of the role there,
+  one transaction holds `DROP OWNED BY oracle_view_rp` and `GRANT CONNECT,
+  TEMPORARY ON DATABASE :"ovb_db"`, and only when that database exists;
+  `oracle_view_ro` gets `DROP OWNED BY` in both databases before `DROP ROLE`;
+- a `FAIL` right, a right on another database (with the way to remove it) or a
+  short answer (11 lines, not 12) stops before the `pg_hba.conf` check;
 - the `pg_hba.conf` check sends the App address as a psql variable, prints the
   line, the backup, the reload and the check commands, exits 3 (`NOT OK`), 4
   (`CHECK BY HAND`, with `--app-ip` and `--pg-port` in the commands) or 0, and no
   call reloads or writes a file; `role --check` needs the role and sends no role
   SQL;
-- a `pg_hba.conf` with the block of `deploy-db.sh` for `perodua_oracle`: the
-  line goes above its `# BEGIN perodua-db-deploy perodua_oracle` line (with the
+- a `pg_hba.conf` with the block of `deploy-db.sh` for `perodua_oracle2`: the
+  line goes above its `# BEGIN perodua-db-deploy perodua_oracle2` line (with the
   line number), and a `NOTE` says that each later `deploy-db.sh` run puts the
   block above the line again, with the `role --check` to run after it; also
-  with `RESULT: OK`, and not for the block of another database;
+  with `RESULT: OK`, and not for the block of another database (also
+  `perodua_oracle` and `perodua_oracle22`);
 - a `pg_hba.conf` that PostgreSQL does not load (an error line) gives exit 4 and
   the steps to correct it;
 - `ssl = off` and `dblink` or `postgres_fdw` are reported, and nothing is revoked;
-- a stopped PostgreSQL or a missing `perodua_oracle` stops `role` and `drop-role`
-  before any SQL; usage errors exit 2 with no call;
-- `drop-role` needs `--confirm oracle_view_rp` and sends the steps in order
-  (`NOLOGIN`, end the sessions, `DROP OWNED BY` in `perodua_oracle`, `DROP ROLE`);
+- a stopped PostgreSQL or a missing `perodua_oracle2` stops `role` and
+  `drop-role` before any SQL; usage errors exit 2 with no call;
+- `drop-role` needs `--confirm oracle_view_rp` and sends the steps in order, for
+  each role (`NOLOGIN`, end the sessions, `DROP OWNED BY` in `perodua_oracle2`
+  and then in `perodua_oracle` when it exists, `DROP ROLE`);
 - a held lock stops `role` and `drop-role`.
 
 `RoleOnPostgresTest` (root and PostgreSQL 16, as in the test image) starts a
-cluster on port 55432 with `log_statement = all`, an Odoo-like owner, a table, a
-view and the role `oracle_view_ro` of an earlier bundle. `role` sets exactly the
-verifier of the file, drops `oracle_view_ro`, and keeps the verifier out of the
-server log and the output. As the tool signs in (TCP, the made-up password), the
+cluster on port 55432 with `log_statement = all`, an Odoo-like owner, the RP
+database `perodua_oracle2` (a table and a view) and the old database
+`perodua_oracle` (a table), both without the rights of `PUBLIC` as `deploy-db.sh`
+makes them, and the role `oracle_view_ro` of an earlier bundle with rights in
+both. `role` sets exactly the verifier of the file, drops `oracle_view_ro`, and
+keeps the verifier out of the server log and the output. As the tool signs in (TCP, the made-up password), the
 role reads, is read-only by default, writes in a `READ WRITE` transaction (also
 in a table that the owner makes later), and cannot `TRUNCATE`, `ALTER` or
 `CREATE`. The server also logs by sampling (`log_min_duration_sample = 0`,
@@ -747,13 +766,34 @@ each on the real server:
 | `reject` above the line, `password` above the line | off | 3 |
 | `samenet`, a database `/^perodua`, a user `/^oracle_view` or the database `samegroup` above the line | off | 4 |
 | an error line (`10.0.0.0/33`) above the line | off | 4 |
+| a line with an unsure field and a field that cannot match, above the line: `host all +admins ::1/128`, `host replication +repl 10.0.0.0/8`, `host all +dba 10.1.2.3/32`, `+dba` or `samenet` on another database, a host name for another user, `hostgssenc` with `+dba`, `hostssl` with `samenet` | off | 0 |
+| `+dba`, a host name, `sameuser` or `hostnossl ... samehost` above the line, each other field matching | off | 4 |
+| `samenet` below the line | off | 0 |
+| a line for `oracle_view_rp` on `perodua_oracle` above the line (and a `NOTE`) | off | 0 |
 | `include` of a file whose line 10 is a `reject`, above line 4 of the line | off | 3 |
 
 The pg_hba.conf writer of `deploy-db.sh` (its Python program, taken from the
-script) then writes its block for `perodua_oracle` at the top: the line below the
+script) then writes its block for `perodua_oracle2` at the top: the line below the
 block gives exit 3, with the line number of `# BEGIN perodua-db-deploy
-perodua_oracle` and the `NOTE`; the line moved above the block gives exit 0; the
+perodua_oracle2` and the `NOTE`; the line moved above the block gives exit 0; the
 next run of the writer puts the block above it again (exit 3).
+
+The old database, on the same cluster:
+- a role with the rights of the earlier releases in `perodua_oracle` only (a
+  grant on the database, the schema, a table, a sequence and a default
+  privilege) and a session there: `role` ends the session, leaves no right
+  there (the database ACL and `pg_shdepend`), the tool cannot connect there and
+  reads `perodua_oracle2`, and with the printed line the run ends with exit 0
+  and 12 `OK` lines; a later grant in another database (`postgres`) gives the
+  `FAIL` line with that name and exit 1 in `role --check`;
+- one transaction: a `psql` in front of the real one adds an error right after
+  `DROP OWNED BY oracle_view_rp` in the old database; `role` exits 1, and the
+  role keeps `CONNECT` on `perodua_oracle2` (the tool reads it) and its old
+  rights; the next run cleans them;
+- `perodua_oracle` renamed away: `role` skips the step (exit 0, 12 `OK` lines,
+  `oracle_view_ro` dropped) and `drop-role` succeeds;
+- `drop-role` with rights of `oracle_view_rp` and `oracle_view_ro` in both
+  databases drops both roles and keeps the rows.
 
 `StatementStatsOnPostgresTest` starts a second cluster (port 55433) with
 `pg_stat_statements` loaded and `track_utility` on: it records the utility
