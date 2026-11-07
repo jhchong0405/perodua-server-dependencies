@@ -2167,12 +2167,18 @@ Do the steps in this order.
    ```
 
    `role --check` does only the checks; it needs no verifier file. With
-   `RESULT: CHECK BY HAND`, a line above the first matching line uses a rule that
+   `RESULT: CHECK BY HAND`, a line above the first matching line has a field that
    the check cannot read (`samehost`, `samenet`, a host name, `+group`, `@file`, a
-   regular expression `/...`, `sameuser`, `samerole`, `samegroup`): read those
-   lines in the `hba_file`, then add the line above them. A `pg_hba.conf` with an
-   error line also gives `RESULT: CHECK BY HAND`: PostgreSQL does not load such a
-   file, so correct the line of the last list first. The check takes the rules in
+   regular expression `/...`, `sameuser`, `samerole`, `samegroup`), and each of
+   its other fields (type, database, user, address) can match: read those lines
+   in the `hba_file`, then add the line above them. A line with a field that
+   cannot match is not "check by hand", for example
+   `host all +admins ::1/128 scram-sha-256` (IPv6: it never matches the IPv4
+   address of the App server), `host replication +repl 10.0.0.0/8 scram-sha-256`
+   (the database `replication`) and `host all +dba 10.1.2.3/32 scram-sha-256`
+   (another address). A `pg_hba.conf` with an error line also gives
+   `RESULT: CHECK BY HAND`: PostgreSQL does not load such a file, so first correct
+   the lines of the list `pg_hba.conf lines with errors`. The check takes the rules in
    the order of PostgreSQL (`rule_number`, also through `include` files). It knows
    the transport: with `ssl = on` the tool connects with TLS, so a `hostssl` line
    matches and a `hostnossl` line does not; with `ssl = off` it is the other way
@@ -2180,7 +2186,10 @@ Do the steps in this order.
    the role is a SCRAM-SHA-256 verifier, so PostgreSQL uses SCRAM through that
    line. `--app-ip ADDRESS` gives another address of the App server (default
    `192.168.23.13`) and `--pg-port PORT` another PostgreSQL port (default `5432`),
-   to `role` and to `role --check`.
+   to `role` and to `role --check`. The list `pg_hba.conf lines for oracle_view_rp
+   on perodua_oracle` is empty: a line there is from an earlier release, and the
+   check adds a `NOTE`. Change its database to `perodua_oracle2`, or delete it,
+   then reload and check again.
 
    **A DB server set up with `deploy-db.sh`.** Each `deploy-db.sh` run writes its
    block for the database at the top of `pg_hba.conf`, from

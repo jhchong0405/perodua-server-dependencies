@@ -846,7 +846,7 @@ extensions_note() {
     fi
 }
 
-hba_sql() {   # with the psql variable ovb_app: does a pg_hba.conf line let the App server in? It changes nothing.
+hba_sql() {   # with the psql variables ovb_app, ovb_db and ovb_old_db: does a pg_hba.conf line let the App server in? It changes nothing.
     cat <<'SQL'
 -- oracle-view.sh: hba-check
 -- pg_hba.conf takes the first rule that matches (type, database, user, address), in the
@@ -854,37 +854,49 @@ hba_sql() {   # with the psql variable ovb_app: does a pg_hba.conf line let the 
 -- on the transport: with ssl on, the tool connects with TLS (sslmode require or prefer),
 -- so host and hostssl lines match and hostnossl lines do not; with ssl off, host and
 -- hostnossl lines match (the tool then needs sslmode prefer). The tool has no Kerberos:
--- a hostgssenc line never matches, a hostnogssenc line does. An IPv6 line never matches
--- the IPv4 address of the App server. A line that this check cannot read (samehost,
--- samenet, a host name, +group, @file, a regular expression /..., sameuser, samerole,
--- samegroup) above the first matching line gives RESULT: CHECK BY HAND, and so does a
--- line with an error that stops PostgreSQL from loading the file (its type is empty). A
--- line that PostgreSQL loads with a warning (a hostssl line with ssl off) never matches.
--- md5 is OK: for a role with a SCRAM-SHA-256 verifier, PostgreSQL then uses SCRAM.
+-- a hostgssenc line never matches, a hostnogssenc line does. md5 is OK: for a role with
+-- a SCRAM-SHA-256 verifier, PostgreSQL then uses SCRAM.
+-- Each field of a line (database, user, address) matches the App server, does not match
+-- it, or is unsure: this check cannot read it (database @file, a regular expression /...,
+-- sameuser, samerole, samegroup; user +group, @file, /...; address samehost, samenet or a
+-- host name). An IPv6 address never matches the IPv4 address of the App server, and is
+-- never unsure. A line is "check by hand" when its type can match, each of the three
+-- fields matches or is unsure, and at least one is unsure. Such a line above the first
+-- matching line gives RESULT: CHECK BY HAND, and so does a line with an error that stops
+-- PostgreSQL from loading the file (its type is empty). A line that PostgreSQL loads with
+-- a warning (a hostssl line with ssl off) never matches.
 \pset footer off
 \echo == pg_hba.conf and TLS of this server
 SELECT current_setting('hba_file') AS hba_file, current_setting('listen_addresses') AS listen_addresses,
        current_setting('port') AS port, current_setting('password_encryption') AS password_encryption,
        current_setting('ssl') AS ssl;
-CREATE TEMPORARY VIEW ovb_hba_rules AS
+-- One row per host line that PostgreSQL loads: for each field, _ok (it matches the App
+-- server) and _unsure (this check cannot read it).
+CREATE TEMPORARY VIEW ovb_hba_fields AS
   SELECT rule_number, file_name, line_number, type, database, user_name, address, netmask, auth_method,
          (type = 'host' OR type = 'hostnogssenc'
           OR (type = 'hostssl' AND current_setting('ssl') = 'on')
-          OR (type = 'hostnossl' AND current_setting('ssl') <> 'on'))
-         AND ('all' = ANY (database) OR :'ovb_db' = ANY (database))
-         AND ('all' = ANY (user_name) OR 'oracle_view_rp' = ANY (user_name))
+          OR (type = 'hostnossl' AND current_setting('ssl') <> 'on')) AS type_ok,
+         ('all' = ANY (database) OR :'ovb_db' = ANY (database)) AS database_ok,
+         EXISTS (SELECT 1 FROM unnest(database) d
+                  WHERE d ~ '^[@/]' OR d IN ('sameuser', 'samerole', 'samegroup')) AS database_unsure,
+         ('all' = ANY (user_name) OR 'oracle_view_rp' = ANY (user_name)) AS user_ok,
+         EXISTS (SELECT 1 FROM unnest(user_name) u WHERE u ~ '^[+@/]') AS user_unsure,
          -- CASE: the casts run only on IPv4 lines (an IPv6 mask with an IPv4 address is an error).
-         AND (address = 'all'
-              OR CASE WHEN address ~ '^[0-9.]+$' AND netmask ~ '^[0-9.]+$'
-                      THEN (:'ovb_app'::inet & netmask::inet) = (address::inet & netmask::inet)
-                      ELSE false END) AS matches,
-         type IN ('host', 'hostssl', 'hostnossl', 'hostnogssenc')
-         AND (address IN ('samehost', 'samenet') OR (address !~ '^([0-9.]+|all)$' AND address !~ ':')
-              OR EXISTS (SELECT 1 FROM unnest(user_name) u WHERE u ~ '^[+@/]')
-              OR EXISTS (SELECT 1 FROM unnest(database) d
-                          WHERE d ~ '^[@/]' OR d IN ('sameuser', 'samerole', 'samegroup'))) AS unsure
+         (address = 'all'
+          OR CASE WHEN address ~ '^[0-9.]+$' AND netmask ~ '^[0-9.]+$'
+                  THEN (:'ovb_app'::inet & netmask::inet) = (address::inet & netmask::inet)
+                  ELSE false END) AS address_ok,
+         -- samehost, samenet or a host name; an IPv4 or IPv6 address is never unsure.
+         (address IN ('samehost', 'samenet') OR (address !~ '^([0-9.]+|all)$' AND address !~ ':')) AS address_unsure
     FROM pg_hba_file_rules
    WHERE error IS NULL AND type <> 'local';
+CREATE TEMPORARY VIEW ovb_hba_rules AS
+  SELECT *,
+         coalesce(type_ok AND database_ok AND user_ok AND address_ok, false) AS matches,
+         coalesce(type_ok AND (database_ok OR database_unsure) AND (user_ok OR user_unsure)
+                  AND (address_ok OR address_unsure) AND NOT (database_ok AND user_ok AND address_ok), false) AS unsure
+    FROM ovb_hba_fields;
 \echo == The lines that can match the App server :ovb_app, database :ovb_db, user oracle_view_rp
 SELECT rule_number, line_number, type, database, user_name, address, netmask, auth_method,
        CASE WHEN matches THEN 'matches' ELSE 'check by hand' END AS result, file_name
@@ -892,7 +904,7 @@ SELECT rule_number, line_number, type, database, user_name, address, netmask, au
 SELECT coalesce((SELECT auth_method FROM ovb_hba_rules WHERE matches ORDER BY rule_number LIMIT 1), 'none')
          AS first_auth_method,
        EXISTS (SELECT 1 FROM ovb_hba_rules
-                WHERE unsure AND NOT matches
+                WHERE unsure
                   AND rule_number < coalesce((SELECT min(rule_number) FROM ovb_hba_rules WHERE matches), 2147483647))
          AS unsure_before,
        EXISTS (SELECT 1 FROM pg_hba_file_rules WHERE error IS NOT NULL AND type IS NULL) AS hba_errors \gset ovb_
@@ -903,7 +915,7 @@ SELECT :'ovb_first_auth_method' IN ('scram-sha-256', 'md5') AS ovb_hba_ok,
 \echo NOTE: md5 also works for this role (its password is a SCRAM verifier, so PostgreSQL uses SCRAM).
 \endif
 \if :ovb_hba_errors
-\echo RESULT: CHECK BY HAND - pg_hba.conf has lines with errors (the last list). PostgreSQL does not load such a file, so this check cannot tell which lines it uses.
+\echo RESULT: CHECK BY HAND - pg_hba.conf has lines with errors (the list "pg_hba.conf lines with errors"). PostgreSQL does not load such a file, so this check cannot tell which lines it uses.
 \elif :ovb_unsure_before
 \echo RESULT: CHECK BY HAND - a line above the first matching line has a rule that this check cannot read.
 \elif :ovb_hba_ok
@@ -915,6 +927,21 @@ SELECT :'ovb_first_auth_method' IN ('scram-sha-256', 'md5') AS ovb_hba_ok,
 SELECT file_name, line_number, error,
        CASE WHEN type IS NULL THEN 'the file does not load' ELSE 'loaded, never matches' END AS effect
   FROM pg_hba_file_rules WHERE error IS NOT NULL;
+-- A line for the role on the database of the earlier releases gives access without a reason.
+\echo == pg_hba.conf lines for oracle_view_rp on :ovb_old_db, the database of the earlier releases (expected: none)
+SELECT rule_number, line_number, type, database, user_name, address, netmask, auth_method, file_name
+  FROM pg_hba_file_rules
+ WHERE error IS NULL AND :'ovb_old_db' <> :'ovb_db' AND :'ovb_old_db' = ANY (database)
+   AND 'oracle_view_rp' = ANY (user_name)
+ ORDER BY rule_number;
+SELECT count(*) > 0 AS ovb_old_lines
+  FROM pg_hba_file_rules
+ WHERE error IS NULL AND :'ovb_old_db' <> :'ovb_db' AND :'ovb_old_db' = ANY (database)
+   AND 'oracle_view_rp' = ANY (user_name) \gset
+\if :ovb_old_lines
+\echo NOTE: the tool does not read :ovb_old_db any more: a line of the list above lets oracle_view_rp in there without a reason.
+\echo Change its database to :ovb_db, or delete it (back up the file first), reload PostgreSQL (no restart) and check again.
+\endif
 SQL
 }
 
@@ -936,7 +963,7 @@ hba_check() {   # returns 0 when the App server gets in, 3 when the line is miss
         cat <<TEXT
 
 PostgreSQL does not load a pg_hba.conf with errors, so this check cannot tell which lines it uses.
-  1. Correct the lines of the last list, in the files that it names.
+  1. Correct the lines of the list "pg_hba.conf lines with errors", in the files that it names.
   2. Reload (no restart):  $reload
   3. Check again:          $again
 TEXT

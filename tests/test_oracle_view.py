@@ -1134,12 +1134,13 @@ class OracleViewRoleTest(unittest.TestCase):
                 self.assertNotIn("NOTE:", result.stdout)
 
     def test_a_pg_hba_conf_with_errors_needs_a_check_by_hand(self):
-        self.set_state(role_exists=True, hba_output="RESULT: CHECK BY HAND - pg_hba.conf has lines with errors (the last "
-                                                    "list). PostgreSQL does not load such a file.\n")
+        self.set_state(role_exists=True, hba_output="RESULT: CHECK BY HAND - pg_hba.conf has lines with errors (the list "
+                                                    "\"pg_hba.conf lines with errors\"). PostgreSQL does not load such "
+                                                    "a file.\n")
         result = self.run_script("role", "--check")
         self.assertEqual(result.returncode, 4)
         self.assertIn("PostgreSQL does not load a pg_hba.conf with errors, so this check cannot tell which lines it uses.\n"
-                      "  1. Correct the lines of the last list, in the files that it names.\n", result.stdout)
+                      "  1. Correct the lines of the list \"pg_hba.conf lines with errors\", in the files that it names.\n", result.stdout)
         self.assertNotIn('Read the lines that the list marks "check by hand"', result.stdout)
         self.assertNotIn("The role is ready", result.stdout)
 
@@ -1590,6 +1591,29 @@ os.execv(real, [real, *sys.argv[1:]])
             ("samegroup above", [rp(database="samegroup"), rp()], False, 4, "RESULT: CHECK BY HAND - a line above"),
             ("a line with an error", ["host all all 10.0.0.0/33 scram-sha-256", rp()], False, 4,
              "RESULT: CHECK BY HAND - pg_hba.conf has lines with errors"),
+            # A field that cannot match makes a line with an unsure field a line that never matches.
+            ("+group on IPv6 above", ["host all +admins ::1/128 scram-sha-256", rp()], False, 0, ok),
+            ("+group on the database replication above", ["host replication +repl 10.0.0.0/8 scram-sha-256", rp()],
+             False, 0, ok),
+            ("+group on another address above", ["host all +dba 10.1.2.3/32 scram-sha-256", rp()], False, 0, ok),
+            ("+group on another database above", [rp(database=OLD_DB, user="+dba"), rp()], False, 0, ok),
+            ("samenet on another database above", [rp(database="made_up_other", address="samenet"), rp()], False, 0, ok),
+            ("a host name for another user above", [rp(user="odoo", address="app.example"), rp()], False, 0, ok),
+            ("a hostgssenc line with +group above", [rp(kind="hostgssenc", user="+dba"), rp()], False, 0, ok),
+            ("hostssl with samenet above, ssl off", ["hostssl all all samenet scram-sha-256", rp()], False, 0, ok),
+            # When the other fields match, an unsure field still needs a check by hand.
+            ("+group on the address of the App server above", [rp(user="+dba"), rp()], False, 4,
+             "RESULT: CHECK BY HAND - a line above"),
+            ("a host name above", [rp(address="app.example"), rp()], False, 4, "RESULT: CHECK BY HAND - a line above"),
+            ("sameuser above", [rp(database="sameuser"), rp()], False, 4, "RESULT: CHECK BY HAND - a line above"),
+            ("hostnossl with samehost above, ssl off", ["hostnossl all all samehost scram-sha-256", rp()], False, 4,
+             "RESULT: CHECK BY HAND - a line above"),
+            # Only above the first matching line.
+            ("samenet below", [rp(), "host all all samenet scram-sha-256"], False, 0, ok),
+            # A line for the role on the database of the earlier releases: a NOTE, the result stays.
+            ("a line for the old database", [rp(database=OLD_DB), rp()], False, 0,
+             "NOTE: the tool does not read perodua_oracle any more: a line of the list above lets oracle_view_rp in "
+             "there without a reason."),
         ]
         (self.data / "server.crt").exists() or subprocess.run(
             ["openssl", "req", "-new", "-x509", "-days", "1", "-nodes", "-subj", "/CN=localhost",
@@ -1604,6 +1628,7 @@ os.execv(real, [real, *sys.argv[1:]])
                 self.assertEqual(self.sql("postgres", "SHOW ssl"), "on" if ssl else "off")
                 self.assertEqual(result.returncode, status, result.stdout + result.stderr)
                 self.assertIn(text, result.stdout)
+                self.assertEqual("NOTE: the tool does not read" in result.stdout, name == "a line for the old database")
         # md5 lets the role in: its password is a SCRAM-SHA-256 verifier, so PostgreSQL uses SCRAM.
         self.write_hba(self.hba_lines[:2] + ["host perodua_oracle2 oracle_view_rp 127.0.0.1/32 md5"])
         self.reload(ssl=False)
@@ -1724,6 +1749,16 @@ class OracleViewDocsTest(unittest.TestCase):
         self.assertIn("in perodua_oracle2 and perodua_oracle.", words(usage))
         self.assertIn("It ends the sessions of the role in perodua_oracle (the database of the earlier releases) and "
                       "removes its rights there.", words(usage))
+
+    def test_the_readme_names_lines_that_are_not_a_check_by_hand(self):
+        text = words(SECTION)
+        for sentence in ('A line with a field that cannot match is not "check by hand", for example '
+                         "`host all +admins ::1/128 scram-sha-256` (IPv6: it never matches the IPv4 address of the App "
+                         "server), `host replication +repl 10.0.0.0/8 scram-sha-256` (the database `replication`) and "
+                         "`host all +dba 10.1.2.3/32 scram-sha-256` (another address).",
+                         "and each of its other fields (type, database, user, address) can match",
+                         "The list `pg_hba.conf lines for oracle_view_rp on perodua_oracle` is empty"):
+            self.assertIn(sentence, text)
 
     def test_the_readme_and_the_usage_name_the_pinned_release(self):
         tag = IMAGE.split("@")[0]
