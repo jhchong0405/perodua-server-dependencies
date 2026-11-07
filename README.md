@@ -9,6 +9,9 @@ Client Stable UIUX v1.2.2 on Ubuntu 24.04 amd64 servers with sudo and internet a
 - **RP adapter** (separate): the RP integration gateway's read-only command line
   for the Oracle EBS database (health check, survey, exports), also pulled from
   there. See [RP adapter](#rp-adapter).
+- **Oracle Field Browser** (separate): the web tool for the integration work (the
+  Oracle EBS objects, the RP database, the RP-to-Oracle mapping and a SQL
+  console), also pulled from there. See [Oracle Field Browser](#oracle-field-browser).
 
 Both can also run on one server: do steps 2 and 3 on that server. With two
 servers, allow **App → DB port 5432**. Browsers need **App port 8110**.
@@ -2377,7 +2380,17 @@ exists. Change to this script in this order:
    sudo bash oracle-view.sh install
    ```
 
-4. Put the route back ([step 3](#3-the-route-app-server)).
+4. Delete the folder of the manual install. It holds the old users file with the
+   password hashes, `.env` and `compose.yml`:
+
+   ```bash
+   sudo rm -rf /opt/oracle-view
+   ```
+
+   The state volume `oracle-view_oracle-view-state` (the mapping edits and the
+   SQL audit) is a Docker volume, not in that folder: it stays.
+
+5. Put the route back ([step 3](#3-the-route-app-server)).
 
 On the DB server, `role` updates the role of the manual install in place.
 
