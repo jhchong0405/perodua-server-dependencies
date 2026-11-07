@@ -2117,14 +2117,32 @@ Do the steps in this order.
    `idle_in_transaction_session_timeout = 60s`. It does not get superuser, the
    ownership of a table (Odoo owns the tables, so DDL on them fails), `TRUNCATE` or
    `CREATE` in `public`. The command drops the role `oracle_view_ro` of an earlier
-   bundle, after it ends its sessions. To run it again is safe: it sets the same
-   verifier and grants.
+   bundle, after it ends its sessions and removes its rights in `perodua_oracle2`
+   and `perodua_oracle`. To run it again is safe: it sets the same verifier and
+   grants.
+
+   **The old database `perodua_oracle`.** The earlier releases of this script and
+   of the manual bundle gave the role its rights on `perodua_oracle`. The image
+   does not read that database any more, so the command ends the sessions of the
+   role there and removes all its rights there (`DROP OWNED BY`). `DROP OWNED BY`
+   also removes the `CONNECT` and `TEMPORARY` rights of the role on every other
+   database (a database is a shared object), and `deploy-db.sh` revokes the rights
+   of `PUBLIC` on its database. So `perodua_oracle2` gets them again in the same
+   transaction: a stop between the two changes nothing, and the tool keeps its
+   way in. When the server has no `perodua_oracle`, the command skips this step.
+   After the grants, the line `no right on a database other than
+   perodua_oracle2` of the rights check lists each other database where the role
+   still has a right (a grant, a default privilege or an object there). Such a
+   database stops the command (exit status 1) before the `pg_hba.conf` check:
+   remove that right there (`REVOKE ... FROM oracle_view_rp`, or
+   `DROP OWNED BY oracle_view_rp` in that database), then run `role` again. It
+   grants `CONNECT` and `TEMPORARY` on `perodua_oracle2` again.
 
 3. Read the output:
 
    | Part | Expected |
    | --- | --- |
-   | `== Rights of oracle_view_rp` | Each line starts with `OK`. A `FAIL` line stops the command. |
+   | `== Rights of oracle_view_rp` | Each line starts with `OK`, also `no right on a database other than perodua_oracle2`. A `FAIL` line stops the command. |
    | `== TLS: SHOW ssl` | `ssl = on`. With `off`, see [TLS to the RP database](#tls-to-the-rp-database). |
    | `== Extensions that can write in a Read run` | `none`. With `dblink` or `postgres_fdw` in `perodua_oracle2`, a Read run of the SQL console can write through them. The command changes no right: that is an owner decision. |
    | `== pg_hba.conf check` | `RESULT: OK` (exit status 0). `RESULT: NOT OK` (exit status 3) or `RESULT: CHECK BY HAND` (exit status 4): do step 4. |
@@ -2393,7 +2411,8 @@ exists. Change to this script in this order:
 
 5. Put the route back ([step 3](#3-the-route-app-server)).
 
-On the DB server, `role` updates the role of the manual install in place.
+On the DB server, `role` updates the role of the manual install in place, and
+removes its rights on `perodua_oracle` when an earlier bundle gave them.
 
 ### Uninstall
 
@@ -2404,7 +2423,7 @@ Do the steps in this order.
 | Port 80 rules (App server), if you added them | `sudo ufw delete allow from WAF_1 to any port 80 proto tcp`, the same for `WAF_2`, `sudo ufw delete deny 80/tcp`. When step 4 turned ufw on: `sudo ufw disable` and the default of before (`/root/ufw-status.before-oracle-view`) |
 | Route (App server) | `sudo cp -p /etc/perodua-https/routes.conf.before-oracle-view /etc/perodua-https/routes.conf`, then `sudo bash https.sh apply` |
 | Container (App server) | `sudo bash oracle-view.sh uninstall`, then type `oracle-view`. It removes the container, `initial-login.txt` and the files `install` made. The state volume, the users file and the image stay; `install` uses them again. `--purge` also removes the state volume (the mapping edits and the SQL audit), the users file and every local image of `perodua-deploy.novutal.com/oracle-view`. It lists what it removed. When a step fails, it also lists what it did not remove, keeps the deployment and exits 1: correct the cause, then run it again |
-| Role (DB server) | `sudo bash oracle-view.sh drop-role`, then type `oracle_view_rp`. It ends the sessions of the role and drops it with its grants (also `oracle_view_ro` of an earlier bundle). Rows that the SQL console changed stay changed |
+| Role (DB server) | `sudo bash oracle-view.sh drop-role`, then type `oracle_view_rp`. It ends the sessions of the role, removes its rights in `perodua_oracle2` and in `perodua_oracle` (when it exists, so that an old grant cannot make the drop fail) and drops it (also `oracle_view_ro` of an earlier bundle). Rows that the SQL console changed stay changed |
 | `pg_hba.conf` line (DB server), if you added one | `sudo cp -p HBA_FILE.before-oracle-view HBA_FILE`, then `sudo -u postgres psql -X -d postgres -c 'SELECT pg_reload_conf()'` |
 | Registry | Delete the tag `oracle-view:grey-v1.0.2` and the tags of earlier releases when nobody needs them: each image holds the secrets |
 

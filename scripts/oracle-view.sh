@@ -29,6 +29,9 @@ FIRST_USERS=(perodua:admin pm:editor)
 # database is the one of the grey App (owner decision of 2026-11-07). The SQL of role,
 # role --check and drop-role reads it as the psql variable ovb_db.
 RP_DATABASE=perodua_oracle2
+# The database of the releases before grey-v1.0.2 (ovb_old_db): role and drop-role remove
+# the rights of the role there.
+OLD_RP_DATABASE=perodua_oracle
 RP_ROLE=oracle_view_rp
 APP_IP=192.168.23.13      # the App server, as the DB server sees it
 PG_PORT=5432
@@ -77,15 +80,18 @@ uninstall  Removes the container and the files install made in --dir. The state
 role       Creates or updates the role oracle_view_rp on the database $RP_DATABASE
            with the SCRAM-SHA-256 verifier in --verifier-file (the image build
            wrote it; never the password), and its grants: read and write on the
-           tables, read-only by default, no DDL on the Odoo tables. Then it checks
-           the rights, shows SHOW ssl and whether dblink or postgres_fdw is
-           installed, and checks pg_hba.conf for the App server (--app-ip, default
-           192.168.23.13). It never edits pg_hba.conf: it prints the line to add.
+           tables, read-only by default, no DDL on the Odoo tables. It ends the
+           sessions of the role in $OLD_RP_DATABASE (the database of the earlier
+           releases) and removes its rights there. Then it checks the rights (also
+           that the role has no right on another database), shows SHOW ssl and
+           whether dblink or postgres_fdw is installed, and checks pg_hba.conf for
+           the App server (--app-ip, default 192.168.23.13). It never edits
+           pg_hba.conf: it prints the line to add.
            --check: the checks only, after a pg_hba.conf change.
 drop-role  Ends the sessions of oracle_view_rp and drops the role and its grants
-           in $RP_DATABASE.
-           Rows that the SQL console changed stay changed. Type the role name to
-           confirm, or pass it with --confirm.
+           in $RP_DATABASE and $OLD_RP_DATABASE. Rows that the SQL console
+           changed stay changed. Type the role name to confirm, or pass it with
+           --confirm.
 Exit codes: 0 done; 1 error; 2 usage; role: 3 pg_hba.conf needs the printed line,
 4 pg_hba.conf needs a check by hand (a line the check cannot read, or an error).
 HELP
@@ -603,7 +609,7 @@ pg() {   # $1 database, then psql options: as postgres over the local socket, st
 }
 pg_value() { pg "$1" -At -c "$2"; }
 pg_sql() {   # a SQL script on stdin, with the database names as psql variables, then more options
-    pg postgres -q -v "ovb_db=$RP_DATABASE" "$@" -f -
+    pg postgres -q -v "ovb_db=$RP_DATABASE" -v "ovb_old_db=$OLD_RP_DATABASE" "$@" -f -
 }
 db_ready() {
     local answer
@@ -642,13 +648,48 @@ SET log_min_error_statement = panic;
 SET log_min_duration_sample = -1;
 SET log_transaction_sample_rate = 0;
 SET pg_stat_statements.track_utility = off;
-SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'oracle_view_ro') AS ovb_ro \gset
+SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'oracle_view_ro') AS ovb_ro,
+       EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'oracle_view_rp') AS ovb_rp,
+       :'ovb_old_db' <> :'ovb_db'
+         AND EXISTS (SELECT 1 FROM pg_database WHERE datname = :'ovb_old_db') AS ovb_old \gset
 \if :ovb_ro
 \echo The read-only role oracle_view_ro of an earlier bundle: its sessions end and it is dropped
 ALTER ROLE oracle_view_ro NOLOGIN;
 SELECT count(pg_terminate_backend(pid)) AS ended_sessions FROM pg_stat_activity WHERE usename = 'oracle_view_ro' \gset
+\endif
+-- The releases before grey-v1.0.2 gave the role its rights in ovb_old_db. The image does
+-- not read that database any more: the sessions of the role there end, and DROP OWNED BY
+-- removes its rights there. DROP OWNED BY also revokes the rights of the role on every
+-- database (CONNECT, TEMPORARY: a database is a shared object), and deploy-db.sh revokes
+-- CONNECT from PUBLIC. So ovb_db gets them again in the same transaction: a stop between
+-- the two changes nothing, and the tool keeps its way in. No old database: nothing to do.
+\if :ovb_old
+\if :ovb_rp
+\echo The rights of oracle_view_rp in :ovb_old_db, the database of the earlier releases: its sessions there end and the rights are removed
+SELECT count(pg_terminate_backend(pid)) AS ended_sessions FROM pg_stat_activity
+ WHERE usename = 'oracle_view_rp' AND datname = :'ovb_old_db' \gset
+\endif
+\connect :ovb_old_db
+SET log_statement = 'none';
+SET log_min_duration_statement = -1;
+SET log_min_error_statement = panic;
+SET log_min_duration_sample = -1;
+SET log_transaction_sample_rate = 0;
+SET pg_stat_statements.track_utility = off;
+BEGIN;
+\if :ovb_ro
+DROP OWNED BY oracle_view_ro;
+\endif
+\if :ovb_rp
+DROP OWNED BY oracle_view_rp;
+GRANT CONNECT, TEMPORARY ON DATABASE :"ovb_db" TO oracle_view_rp;
+\endif
+COMMIT;
+\endif
+\if :ovb_ro
 \connect :ovb_db
 DROP OWNED BY oracle_view_ro;
+\endif
 \connect postgres
 SET log_statement = 'none';
 SET log_min_duration_statement = -1;
@@ -656,13 +697,13 @@ SET log_min_error_statement = panic;
 SET log_min_duration_sample = -1;
 SET log_transaction_sample_rate = 0;
 SET pg_stat_statements.track_utility = off;
+\if :ovb_ro
 DROP ROLE oracle_view_ro;
 \endif
-SELECT NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'oracle_view_rp') AS ovb_new \gset
-\if :ovb_new
-CREATE ROLE oracle_view_rp LOGIN PASSWORD :'ovb_verifier' CONNECTION LIMIT 10;
-\else
+\if :ovb_rp
 ALTER ROLE oracle_view_rp LOGIN PASSWORD :'ovb_verifier' CONNECTION LIMIT 10;
+\else
+CREATE ROLE oracle_view_rp LOGIN PASSWORD :'ovb_verifier' CONNECTION LIMIT 10;
 \endif
 \unset ovb_verifier
 \set VERBOSITY default
@@ -744,18 +785,36 @@ SELECT CASE WHEN ok THEN 'OK' ELSE 'FAIL' END || '|' || what FROM (
   UNION ALL
   SELECT 11, count(*) = 0, 'owns no table, view or sequence (DDL on the Odoo tables fails)'
     FROM pg_class WHERE relowner = (SELECT oid FROM pg_roles WHERE rolname = 'oracle_view_rp')
+  UNION ALL
+  -- A right in another database (a grant, a default privilege or an object there) or on it.
+  SELECT 12, count(*) = 0, 'no right on a database other than ' || current_database()
+         || coalesce(' (it has rights on: ' || string_agg(d.datname, ', ' ORDER BY d.datname) || ')', '')
+    FROM pg_database d
+   WHERE d.datname <> current_database()
+     AND (EXISTS (SELECT 1 FROM pg_shdepend s
+                   WHERE s.dbid = d.oid AND s.refclassid = 'pg_authid'::regclass
+                     AND s.refobjid = (SELECT oid FROM pg_roles WHERE rolname = 'oracle_view_rp'))
+          OR EXISTS (SELECT 1 FROM aclexplode(d.datacl) a
+                      WHERE a.grantee = (SELECT oid FROM pg_roles WHERE rolname = 'oracle_view_rp')))
 ) checks ORDER BY n
 SQL
 )
 
 role_checks() {   # prints each right; a missing or an extra right stops the command
-    local out result what failed=0
+    local out result what failed=0 elsewhere=0
     out=$(pg_value "$RP_DATABASE" "$ROLE_CHECK_SQL") || die 'The check of the rights failed (above)'
-    [[ $(grep -c . <<< "$out") == 11 ]] || die "The check of the rights gave an unexpected answer: $out"
+    [[ $(grep -c . <<< "$out") == 12 ]] || die "The check of the rights gave an unexpected answer: $out"
     while IFS='|' read -r result what; do
         printf '%-4s %s\n' "$result" "$what"
-        [[ $result == OK ]] || failed=1
+        [[ $result == OK ]] && continue
+        failed=1
+        [[ $what != 'no right on a database other than '* ]] || elsewhere=1
     done <<< "$out"
+    if ((elsewhere)); then
+        printf '\nIn each database of the FAIL line, remove the rights of %s (REVOKE ... FROM %s, or DROP OWNED BY %s there),\n' \
+            "$RP_ROLE" "$RP_ROLE" "$RP_ROLE" >&2
+        printf 'then run role again: it grants CONNECT and TEMPORARY on %s again.\n' "$RP_DATABASE" >&2
+    fi
     ((failed == 0)) || die "The role $RP_ROLE does not have the rights above. Nothing in pg_hba.conf was checked."
 }
 
@@ -928,15 +987,23 @@ drop_sql() {
     cat <<'SQL'
 -- oracle-view.sh: drop-role
 -- Stops new logins of oracle_view_rp (and of oracle_view_ro of an earlier bundle), ends
--- their sessions, removes their grants and default privileges in ovb_db (DROP OWNED BY)
--- and drops the roles. The rows that the SQL console changed stay changed.
+-- their sessions, removes their grants and default privileges in ovb_db and in
+-- ovb_old_db, the database of the earlier releases, when it exists (DROP OWNED BY: a
+-- grant there cannot make DROP ROLE fail), and drops the roles. The rows that the SQL
+-- console changed stay changed.
 SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'oracle_view_rp') AS ovb_rp,
-       EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'oracle_view_ro') AS ovb_ro \gset
+       EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'oracle_view_ro') AS ovb_ro,
+       :'ovb_old_db' <> :'ovb_db'
+         AND EXISTS (SELECT 1 FROM pg_database WHERE datname = :'ovb_old_db') AS ovb_old \gset
 \if :ovb_rp
 ALTER ROLE oracle_view_rp NOLOGIN;
 SELECT count(pg_terminate_backend(pid)) AS ended_sessions FROM pg_stat_activity WHERE usename = 'oracle_view_rp' \gset
 \connect :ovb_db
 DROP OWNED BY oracle_view_rp;
+\if :ovb_old
+\connect :ovb_old_db
+DROP OWNED BY oracle_view_rp;
+\endif
 \connect postgres
 DROP ROLE oracle_view_rp;
 \echo role oracle_view_rp dropped
@@ -948,6 +1015,10 @@ ALTER ROLE oracle_view_ro NOLOGIN;
 SELECT count(pg_terminate_backend(pid)) AS ended_sessions FROM pg_stat_activity WHERE usename = 'oracle_view_ro' \gset
 \connect :ovb_db
 DROP OWNED BY oracle_view_ro;
+\if :ovb_old
+\connect :ovb_old_db
+DROP OWNED BY oracle_view_ro;
+\endif
 \connect postgres
 DROP ROLE oracle_view_ro;
 \echo role oracle_view_ro of an earlier bundle dropped
@@ -989,8 +1060,8 @@ cmd_drop_role() {
     db_lock
     find_psql
     db_ready
-    printf 'This ends the sessions of %s, removes its rights in %s and drops it (also oracle_view_ro of an earlier bundle).\n' \
-        "$RP_ROLE" "$RP_DATABASE"
+    printf 'This ends the sessions of %s, removes its rights in %s and %s and drops it (also oracle_view_ro of an earlier bundle).\n' \
+        "$RP_ROLE" "$RP_DATABASE" "$OLD_RP_DATABASE"
     printf 'Rows that the SQL console changed stay changed.\n'
     confirm "$RP_ROLE"
     drop_sql | pg_sql || die "Dropping the role $RP_ROLE failed (above)"
