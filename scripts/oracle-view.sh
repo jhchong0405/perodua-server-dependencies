@@ -37,6 +37,10 @@ APP_IP=192.168.23.13      # the App server, as the DB server sees it
 PG_PORT=5432
 SETTINGS=(OVB_MEM_LIMIT OVB_PIDS_LIMIT OVB_CPUS OVB_RP_SSLMODE)
 OVB_MEM_LIMIT=1g OVB_PIDS_LIMIT=256 OVB_CPUS=1.5 OVB_RP_SSLMODE=require
+# Optional, in seconds: without a value the container gets no such variable, and the
+# default of the image applies (300 s). The image reads both (5-3600).
+OPTIONAL=(OVB_LIVE_TIMEOUT OVB_SQL_TIMEOUT)
+OVB_LIVE_TIMEOUT='' OVB_SQL_TIMEOUT=''
 COMMAND='' CONFIG='' NON_INTERACTIVE=0 CONFIRM='' PURGE=0 VERIFIER_FILE='' CHECK_ONLY=0
 TEMP_DIR='' STAGE='' STAGED=0 AUTH_DIR='' VERIFIER=''
 GIVEN=()                  # the options on the command line, checked against the command
@@ -152,7 +156,8 @@ read_settings() {   # literal KEY=VALUE lines, never shell code; unknown keys ar
         [[ $line == *=* ]] || die "$file: not a KEY=VALUE line: $line"
         key=${line%%=*}
         case $key in
-            OVB_MEM_LIMIT|OVB_PIDS_LIMIT|OVB_CPUS|OVB_RP_SSLMODE) printf -v "$key" '%s' "${line#*=}" ;;
+            OVB_MEM_LIMIT|OVB_PIDS_LIMIT|OVB_CPUS|OVB_RP_SSLMODE|OVB_LIVE_TIMEOUT|OVB_SQL_TIMEOUT)
+                printf -v "$key" '%s' "${line#*=}" ;;
             *) die "$file: unknown key $key" ;;
         esac
     done < "$file"
@@ -160,7 +165,7 @@ read_settings() {   # literal KEY=VALUE lines, never shell code; unknown keys ar
 
 problem() {   # $1 key, $2 value: prints why the value cannot be used, nothing when it can
     local value=$2 memory='^([1-9][0-9]{0,5})([mg])$' count='^[1-9][0-9]{0,4}$'
-    local cpus='^[0-9]{1,2}(\.[0-9]{1,2})?$' zero='^0+(\.0+)?$'
+    local cpus='^[0-9]{1,2}(\.[0-9]{1,2})?$' zero='^0+(\.0+)?$' seconds='^[1-9][0-9]{0,3}$'
     case $1 in
         OVB_MEM_LIMIT)
             if [[ ! $value =~ $memory ]]; then echo 'a memory size such as 1g or 768m'
@@ -169,12 +174,15 @@ problem() {   # $1 key, $2 value: prints why the value cannot be used, nothing w
         OVB_PIDS_LIMIT) [[ $value =~ $count ]] && ((10#$value >= 32 && 10#$value <= 32768)) || echo 'a number of processes, 32-32768' ;;
         OVB_CPUS) [[ $value =~ $cpus && ! $value =~ $zero ]] || echo 'a number of CPUs such as 1.5 (0.01-99.99)' ;;
         OVB_RP_SSLMODE) [[ $value == require || $value == prefer ]] || echo 'require, or prefer when the DB server has ssl off (clear text)' ;;
+        OVB_LIVE_TIMEOUT|OVB_SQL_TIMEOUT)
+            [[ -z $value ]] || { [[ $value =~ $seconds ]] && ((10#$value >= 5 && 10#$value <= 3600)); } \
+                || echo 'a number of seconds, 5-3600, or no value for the default of the image (300)' ;;
     esac
 }
 
 check_settings() {
     local key reason
-    for key in "${SETTINGS[@]}"; do
+    for key in "${SETTINGS[@]}" "${OPTIONAL[@]}"; do
         reason=$(problem "$key" "${!key}")
         [[ -z $reason ]] || die "$key=${!key} cannot be used: it must be $reason"
     done
@@ -291,7 +299,10 @@ stage_users() {   # the users file, with each missing first user made by make_us
 }
 
 stage_files() {   # $1 image: compose.yml and oracle-view.env of the new generation, checked by Compose in $STAGE
-    local image=$1 key
+    local image=$1 key optional=''
+    for key in "${OPTIONAL[@]}"; do   # only the time-outs with a value: else the default of the image applies
+        [[ -z ${!key} ]] || optional+="      $key: \"${!key}\""$'\n'
+    done
     cat > "$STAGE/compose.yml" <<YAML
 # Written by oracle-view.sh install from oracle-view.env: edit that file, then run install.
 services:
@@ -316,7 +327,7 @@ services:
       - "127.0.0.1:$PORT:8797"
     environment:
       OVB_RP_SSLMODE: "$OVB_RP_SSLMODE"
-    mem_limit: "$OVB_MEM_LIMIT"
+${optional}    mem_limit: "$OVB_MEM_LIMIT"
     memswap_limit: "$OVB_MEM_LIMIT"
     pids_limit: $OVB_PIDS_LIMIT
     cpus: $OVB_CPUS
@@ -338,6 +349,7 @@ YAML
     {
         printf '# Settings of oracle-view.sh (literal KEY=VALUE). After a change: sudo bash oracle-view.sh install\n'
         for key in "${SETTINGS[@]}"; do printf '%s=%s\n' "$key" "${!key}"; done
+        for key in "${OPTIONAL[@]}"; do [[ -z ${!key} ]] || printf '%s=%s\n' "$key" "${!key}"; done
     } > "$STAGE/oracle-view.env"
     docker compose --project-name "$PROJECT" --file "$STAGE/compose.yml" config --quiet \
         || die 'The generated compose file is not valid. Nothing was changed.'
@@ -481,6 +493,8 @@ cmd_install() {
     fi
 }
 
+timeout_text() { if [[ -n $1 ]]; then printf '%s s' "$1"; else printf '300 s (the default of the image)'; fi; }
+
 cmd_status() {
     local image users
     open_deployment
@@ -494,6 +508,7 @@ cmd_status() {
     printf 'Listens:  127.0.0.1:%s (this server only)\n' "$PORT"
     printf 'Settings: memory %s, %s processes, %s CPUs, TLS to the RP database %s (%s/oracle-view.env)\n' \
         "$OVB_MEM_LIMIT" "$OVB_PIDS_LIMIT" "$OVB_CPUS" "$OVB_RP_SSLMODE" "$DEPLOY_DIR"
+    printf 'Time-outs: live Oracle calls %s, SQL console %s\n' "$(timeout_text "$OVB_LIVE_TIMEOUT")" "$(timeout_text "$OVB_SQL_TIMEOUT")"
     # Only the name and the role: a line is name:role:<hash>, an old line name:<hash> is an admin.
     users=$(awk -F: 'NF { printf "%s%s (%s)", sep, $1, (($2 ~ /^(viewer|editor|admin)$/) ? $2 : "admin"); sep = ", " }' \
         "$DEPLOY_DIR/users" 2> /dev/null || true)

@@ -2281,6 +2281,14 @@ pass the keys of [oracle-view.env.example](scripts/oracle-view.env.example) with
 | `OVB_PIDS_LIMIT` | `256` | Processes and threads of the container |
 | `OVB_CPUS` | `1.5` | CPUs of the container |
 | `OVB_RP_SSLMODE` | `require` | TLS to the RP database ([TLS to the RP database](#tls-to-the-rp-database)); `prefer` also allows clear text |
+| `OVB_LIVE_TIMEOUT` | none: the image default, `300` | Seconds (5-3600) for each round trip of a live Oracle call of the Oracle view (Rows, Filter, Count rows, Check values, Check definition, Look up, Refresh) |
+| `OVB_SQL_TIMEOUT` | none: the image default, `300` | Seconds (5-3600) for one statement of the SQL console |
+
+The two time-outs are optional. Without a value, `install` gives the container no
+such variable, and the default of the image applies. A key with no value
+(`OVB_LIVE_TIMEOUT=`) in `--config` removes a saved value. The start lines of
+`sudo docker logs oracle-view` show the values (`Live Oracle: ...` and
+`SQL console: ...`), and `status` shows them in its `Time-outs:` line.
 
 | Command | What it does |
 | --- | --- |

@@ -455,7 +455,11 @@ class OracleViewAppTest(unittest.TestCase):
         cases = [("OVB_MEM_LIMIT", "1 g"), ("OVB_MEM_LIMIT", "128m"), ("OVB_MEM_LIMIT", "1G"),
                  ("OVB_MEM_LIMIT", "$(touch /tmp/oracle-view-test)"), ("OVB_PIDS_LIMIT", "16"),
                  ("OVB_PIDS_LIMIT", "40000"), ("OVB_CPUS", "0"), ("OVB_CPUS", "0.00"), ("OVB_CPUS", "1,5"),
-                 ("OVB_CPUS", "100"), ("OVB_RP_SSLMODE", "disable"), ("OVB_RP_SSLMODE", "verify-full")]
+                 ("OVB_CPUS", "100"), ("OVB_RP_SSLMODE", "disable"), ("OVB_RP_SSLMODE", "verify-full"),
+                 ("OVB_LIVE_TIMEOUT", "4"), ("OVB_LIVE_TIMEOUT", "3601"), ("OVB_LIVE_TIMEOUT", "0"),
+                 ("OVB_LIVE_TIMEOUT", "0120"), ("OVB_LIVE_TIMEOUT", "1_20"), ("OVB_LIVE_TIMEOUT", "120s"),
+                 ("OVB_SQL_TIMEOUT", "4"), ("OVB_SQL_TIMEOUT", "3601"), ("OVB_SQL_TIMEOUT", "-5"),
+                 ("OVB_SQL_TIMEOUT", "5.5"), ("OVB_SQL_TIMEOUT", " 60"), ("OVB_SQL_TIMEOUT", "10000")]
         for key, value in cases:
             with self.subTest(key=key, value=value):
                 self.write_config(**{key: value})
@@ -489,6 +493,48 @@ class OracleViewAppTest(unittest.TestCase):
                                "OVB_CPUS=1.5\r\n# TLS to the RP database\r\nOVB_RP_SSLMODE=require\r\n")
         self.installed()
         self.assertIn('      OVB_RP_SSLMODE: "require"\n', (self.dir / "compose.yml").read_text())
+
+    def test_the_time_outs_are_optional_settings(self):
+        # Not set: no variable for the container, so the image default (300 s) applies. The environment of
+        # the command is not a setting.
+        result = self.install(OVB_LIVE_TIMEOUT="120", OVB_SQL_TIMEOUT="60")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertNotIn("TIMEOUT", (self.dir / "compose.yml").read_text())
+        self.assertNotIn("TIMEOUT", (self.dir / "oracle-view.env").read_text())
+        default = "300 s (the default of the image)"
+        self.assertIn(f"Time-outs: live Oracle calls {default}, SQL console {default}\n", self.run_script("status").stdout)
+        # The ends of the range, as strings of the environment of the container, after OVB_RP_SSLMODE.
+        self.write_config(OVB_LIVE_TIMEOUT="5", OVB_SQL_TIMEOUT="3600")
+        self.installed()
+        self.assertIn('      OVB_RP_SSLMODE: "require"\n      OVB_LIVE_TIMEOUT: "5"\n      OVB_SQL_TIMEOUT: "3600"\n'
+                      '    mem_limit: "1g"\n', (self.dir / "compose.yml").read_text())
+        self.assertEqual([line for line in (self.dir / "oracle-view.env").read_text().splitlines() if not line.startswith("#")],
+                         ["OVB_MEM_LIMIT=1g", "OVB_PIDS_LIMIT=256", "OVB_CPUS=1.5", "OVB_RP_SSLMODE=require",
+                          "OVB_LIVE_TIMEOUT=5", "OVB_SQL_TIMEOUT=3600"])
+        self.assertIn("Time-outs: live Oracle calls 5 s, SQL console 3600 s\n", self.run_script("status").stdout)
+        self.config.unlink()
+        self.installed()  # the saved values stay
+        self.assertIn('      OVB_LIVE_TIMEOUT: "5"\n      OVB_SQL_TIMEOUT: "3600"\n', (self.dir / "compose.yml").read_text())
+        # A key with no value removes the saved value.
+        self.write_config(OVB_SQL_TIMEOUT="")
+        self.installed()
+        compose = (self.dir / "compose.yml").read_text()
+        self.assertIn('      OVB_RP_SSLMODE: "require"\n      OVB_LIVE_TIMEOUT: "5"\n    mem_limit: "1g"\n', compose)
+        self.assertNotIn("OVB_SQL_TIMEOUT", compose + (self.dir / "oracle-view.env").read_text())
+        self.assertIn(f"Time-outs: live Oracle calls 5 s, SQL console {default}\n", self.run_script("status").stdout)
+
+    def test_the_example_settings_are_a_valid_config(self):
+        text = SCRIPT.with_name("oracle-view.env.example").read_text()
+        for line in ("\n# OVB_LIVE_TIMEOUT=300\n", "\n# OVB_SQL_TIMEOUT=300\n", "in seconds: 5-3600"):
+            self.assertIn(line, text)
+        self.config.write_text(text)
+        self.installed()
+        self.assertNotIn("TIMEOUT", (self.dir / "compose.yml").read_text())
+        # The defaults that it names are values in the range.
+        self.config.write_text(text.replace("# OVB_LIVE_TIMEOUT=", "OVB_LIVE_TIMEOUT=").replace("# OVB_SQL_TIMEOUT=",
+                                                                                              "OVB_SQL_TIMEOUT="))
+        self.installed()
+        self.assertIn('      OVB_LIVE_TIMEOUT: "300"\n      OVB_SQL_TIMEOUT: "300"\n', (self.dir / "compose.yml").read_text())
 
     # ------------------------------------------------------------------ users
     def test_the_first_users_get_passwords_only_in_the_root_file(self):
@@ -1758,6 +1804,16 @@ class OracleViewDocsTest(unittest.TestCase):
                          "`host all +dba 10.1.2.3/32 scram-sha-256` (another address).",
                          "and each of its other fields (type, database, user, address) can match",
                          "The list `pg_hba.conf lines for oracle_view_rp on perodua_oracle` is empty"):
+            self.assertIn(sentence, text)
+
+    def test_the_readme_names_the_time_outs(self):
+        text = words(SECTION)
+        for sentence in ("| `OVB_LIVE_TIMEOUT` | none: the image default, `300` | Seconds (5-3600) for each round trip of a "
+                         "live Oracle call of the Oracle view",
+                         "| `OVB_SQL_TIMEOUT` | none: the image default, `300` | Seconds (5-3600) for one statement of the "
+                         "SQL console |",
+                         "Without a value, `install` gives the container no such variable, and the default of the image "
+                         "applies. A key with no value (`OVB_LIVE_TIMEOUT=`) in `--config` removes a saved value."):
             self.assertIn(sentence, text)
 
     def test_the_readme_and_the_usage_name_the_pinned_release(self):
