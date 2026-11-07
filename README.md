@@ -2146,13 +2146,32 @@ Do the steps in this order.
 
    `role --check` does only the checks; it needs no verifier file. With
    `RESULT: CHECK BY HAND`, a line above the first matching line uses a rule that
-   the check cannot read (`samehost`, `samenet`, a host name, `+group`, `@file`,
-   `sameuser`, `samerole`): read those lines in the `hba_file`, then add the line
-   above them. The check knows the transport: with `ssl = on` the tool connects
-   with TLS, so a `hostssl` line matches and a `hostnossl` line does not; with
-   `ssl = off` it is the other way round. `--app-ip ADDRESS` gives another address
-   of the App server (default `192.168.23.13`) and `--pg-port PORT` another
-   PostgreSQL port (default `5432`), to `role` and to `role --check`.
+   the check cannot read (`samehost`, `samenet`, a host name, `+group`, `@file`, a
+   regular expression `/...`, `sameuser`, `samerole`, `samegroup`): read those
+   lines in the `hba_file`, then add the line above them. A `pg_hba.conf` with an
+   error line also gives `RESULT: CHECK BY HAND`: PostgreSQL does not load such a
+   file, so correct the line of the last list first. The check takes the rules in
+   the order of PostgreSQL (`rule_number`, also through `include` files). It knows
+   the transport: with `ssl = on` the tool connects with TLS, so a `hostssl` line
+   matches and a `hostnossl` line does not; with `ssl = off` it is the other way
+   round. A first matching line with `md5` is also `RESULT: OK`: the password of
+   the role is a SCRAM-SHA-256 verifier, so PostgreSQL uses SCRAM through that
+   line. `--app-ip ADDRESS` gives another address of the App server (default
+   `192.168.23.13`) and `--pg-port PORT` another PostgreSQL port (default `5432`),
+   to `role` and to `role --check`.
+
+   **A DB server set up with `deploy-db.sh`.** Each `deploy-db.sh` run writes its
+   block for the database at the top of `pg_hba.conf`, from
+   `# BEGIN perodua-db-deploy perodua_oracle` to
+   `# END perodua-db-deploy perodua_oracle`. The block lets in only the App role
+   and ends with `host "perodua_oracle" all 0.0.0.0/0 reject`. A line for
+   `oracle_view_rp` below the block never matches, and the next `deploy-db.sh`
+   run deletes a line inside the block. When the file holds the block, the
+   command tells you to put the line above the `# BEGIN perodua-db-deploy
+   perodua_oracle` line, and adds a `NOTE`. Each later `deploy-db.sh` run puts
+   its block above the line again: after every `deploy-db.sh` run, run
+   `sudo bash oracle-view.sh role --check` and move the line back above the
+   block.
 
 5. Delete the copy of the verifier file: `rm ~/rp_grey.verifier`.
 

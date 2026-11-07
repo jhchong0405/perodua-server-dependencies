@@ -84,7 +84,7 @@ drop-role  Ends the sessions of oracle_view_rp and drops the role and its grants
            Rows that the SQL console changed stay changed. Type the role name to
            confirm, or pass it with --confirm.
 Exit codes: 0 done; 1 error; 2 usage; role: 3 pg_hba.conf needs the printed line,
-4 a pg_hba.conf line needs a check by hand.
+4 pg_hba.conf needs a check by hand (a line the check cannot read, or an error).
 HELP
 }
 
@@ -746,21 +746,25 @@ extensions_note() {
 hba_sql() {   # with the psql variable ovb_app: does a pg_hba.conf line let the App server in? It changes nothing.
     cat <<'SQL'
 -- oracle-view.sh: hba-check
--- pg_hba.conf takes the first line that matches (type, database, user, address). The
--- type depends on the transport: with ssl on, the tool connects with TLS (sslmode
--- require or prefer), so host and hostssl lines match and hostnossl lines do not;
--- with ssl off, host and hostnossl lines match (the tool then needs sslmode prefer).
--- The tool has no Kerberos: a hostgssenc line never matches, a hostnogssenc line does.
--- An IPv6 line never matches the IPv4 address of the App server. A line that this
--- check cannot read (samehost, samenet, a host name, +group, @file, sameuser,
--- samerole) above the first matching line gives RESULT: CHECK BY HAND.
+-- pg_hba.conf takes the first rule that matches (type, database, user, address), in the
+-- order of rule_number (include files count where they are included). The type depends
+-- on the transport: with ssl on, the tool connects with TLS (sslmode require or prefer),
+-- so host and hostssl lines match and hostnossl lines do not; with ssl off, host and
+-- hostnossl lines match (the tool then needs sslmode prefer). The tool has no Kerberos:
+-- a hostgssenc line never matches, a hostnogssenc line does. An IPv6 line never matches
+-- the IPv4 address of the App server. A line that this check cannot read (samehost,
+-- samenet, a host name, +group, @file, a regular expression /..., sameuser, samerole,
+-- samegroup) above the first matching line gives RESULT: CHECK BY HAND, and so does a
+-- line with an error that stops PostgreSQL from loading the file (its type is empty). A
+-- line that PostgreSQL loads with a warning (a hostssl line with ssl off) never matches.
+-- md5 is OK: for a role with a SCRAM-SHA-256 verifier, PostgreSQL then uses SCRAM.
 \pset footer off
 \echo == pg_hba.conf and TLS of this server
 SELECT current_setting('hba_file') AS hba_file, current_setting('listen_addresses') AS listen_addresses,
        current_setting('port') AS port, current_setting('password_encryption') AS password_encryption,
        current_setting('ssl') AS ssl;
 CREATE TEMPORARY VIEW ovb_hba_rules AS
-  SELECT line_number, type, database, user_name, address, netmask, auth_method,
+  SELECT rule_number, file_name, line_number, type, database, user_name, address, netmask, auth_method,
          (type = 'host' OR type = 'hostnogssenc'
           OR (type = 'hostssl' AND current_setting('ssl') = 'on')
           OR (type = 'hostnossl' AND current_setting('ssl') <> 'on'))
@@ -773,38 +777,47 @@ CREATE TEMPORARY VIEW ovb_hba_rules AS
                       ELSE false END) AS matches,
          type IN ('host', 'hostssl', 'hostnossl', 'hostnogssenc')
          AND (address IN ('samehost', 'samenet') OR (address !~ '^([0-9.]+|all)$' AND address !~ ':')
-              OR user_name::text ~ '[+@]' OR database::text ~ '(@|sameuser|samerole)') AS unsure
+              OR EXISTS (SELECT 1 FROM unnest(user_name) u WHERE u ~ '^[+@/]')
+              OR EXISTS (SELECT 1 FROM unnest(database) d
+                          WHERE d ~ '^[@/]' OR d IN ('sameuser', 'samerole', 'samegroup'))) AS unsure
     FROM pg_hba_file_rules
    WHERE error IS NULL AND type <> 'local';
 \echo == The lines that can match the App server, database perodua_oracle, user oracle_view_rp
-SELECT line_number, type, database, user_name, address, netmask, auth_method,
-       CASE WHEN matches THEN 'matches' ELSE 'check by hand' END AS result
-  FROM ovb_hba_rules WHERE matches OR unsure ORDER BY line_number;
-SELECT coalesce((SELECT auth_method FROM ovb_hba_rules WHERE matches ORDER BY line_number LIMIT 1), 'none')
+SELECT rule_number, line_number, type, database, user_name, address, netmask, auth_method,
+       CASE WHEN matches THEN 'matches' ELSE 'check by hand' END AS result, file_name
+  FROM ovb_hba_rules WHERE matches OR unsure ORDER BY rule_number;
+SELECT coalesce((SELECT auth_method FROM ovb_hba_rules WHERE matches ORDER BY rule_number LIMIT 1), 'none')
          AS first_auth_method,
        EXISTS (SELECT 1 FROM ovb_hba_rules
                 WHERE unsure AND NOT matches
-                  AND line_number < coalesce((SELECT min(line_number) FROM ovb_hba_rules WHERE matches), 2147483647))
-         AS unsure_before \gset ovb_
-SELECT :'ovb_first_auth_method' = 'scram-sha-256' AS ovb_hba_ok, :'ovb_first_auth_method' = 'md5' AS ovb_hba_md5 \gset
+                  AND rule_number < coalesce((SELECT min(rule_number) FROM ovb_hba_rules WHERE matches), 2147483647))
+         AS unsure_before,
+       EXISTS (SELECT 1 FROM pg_hba_file_rules WHERE error IS NOT NULL AND type IS NULL) AS hba_errors \gset ovb_
+SELECT :'ovb_first_auth_method' IN ('scram-sha-256', 'md5') AS ovb_hba_ok,
+       :'ovb_first_auth_method' = 'md5' AS ovb_hba_md5 \gset
 \echo first matching line uses: :ovb_first_auth_method
 \if :ovb_hba_md5
 \echo NOTE: md5 also works for this role (its password is a SCRAM verifier, so PostgreSQL uses SCRAM).
 \endif
-\if :ovb_unsure_before
+\if :ovb_hba_errors
+\echo RESULT: CHECK BY HAND - pg_hba.conf has lines with errors (the last list). PostgreSQL does not load such a file, so this check cannot tell which lines it uses.
+\elif :ovb_unsure_before
 \echo RESULT: CHECK BY HAND - a line above the first matching line has a rule that this check cannot read.
 \elif :ovb_hba_ok
-\echo RESULT: OK - the first matching line uses scram-sha-256.
+\echo RESULT: OK - the first matching line uses :ovb_first_auth_method.
 \else
-\echo RESULT: NOT OK - no matching line, or the first matching line does not use scram-sha-256.
+\echo RESULT: NOT OK - no matching line, or the first matching line does not use scram-sha-256 or md5.
 \endif
 \echo == pg_hba.conf lines with errors (expected: none)
-SELECT line_number, error FROM pg_hba_file_rules WHERE error IS NOT NULL;
+SELECT file_name, line_number, error,
+       CASE WHEN type IS NULL THEN 'the file does not load' ELSE 'loaded, never matches' END AS effect
+  FROM pg_hba_file_rules WHERE error IS NOT NULL;
 SQL
 }
 
 hba_check() {   # returns 0 when the App server gets in, 3 when the line is missing, 4 for a check by hand
-    local out hba again reload line="host    $RP_DATABASE    $RP_ROLE    $APP_IP/32    scram-sha-256"
+    local out hba again reload block status=0 where='above the first line of the list above, or above the first host line'
+    local line="host    $RP_DATABASE    $RP_ROLE    $APP_IP/32    scram-sha-256" marker="# BEGIN perodua-db-deploy $RP_DATABASE"
     out=$(hba_sql | pg postgres -q -v "ovb_app=$APP_IP" -f -) || die 'The pg_hba.conf check failed (above)'
     printf '%s\n' "$out"
     hba=$(pg_value postgres 'SHOW hba_file')
@@ -812,33 +825,59 @@ hba_check() {   # returns 0 when the App server gets in, 3 when the line is miss
     [[ $APP_IP == 192.168.23.13 ]] || again+=" --app-ip $APP_IP"
     [[ $PG_PORT == 5432 ]] || again+=" --pg-port $PG_PORT"
     reload="sudo -u postgres psql -X -p $PG_PORT -d postgres -c 'SELECT pg_reload_conf()'"
-    if grep -q 'RESULT: CHECK BY HAND' <<< "$out"; then
+    # Each deploy-db.sh run writes its block for the database at the top of pg_hba.conf. The
+    # block lets in only the App role and ends with lines that reject every other role.
+    block=$(grep -m 1 -nxF -- "$marker" "$hba" 2> /dev/null | cut -d: -f1) || block=''
+    [[ -z $block ]] || where="above line $block, \"$marker\": a line inside or below that block of deploy-db.sh does not work"
+    if grep -q 'RESULT: CHECK BY HAND - pg_hba.conf has lines with errors' <<< "$out"; then
+        cat <<TEXT
+
+PostgreSQL does not load a pg_hba.conf with errors, so this check cannot tell which lines it uses.
+  1. Correct the lines of the last list, in the files that it names.
+  2. Reload (no restart):  $reload
+  3. Check again:          $again
+TEXT
+        status=4
+    elif grep -q 'RESULT: CHECK BY HAND' <<< "$out"; then
+        [[ -z $block ]] || where="above them, and $where"
+        [[ -n $block ]] || where='above them'
         cat <<TEXT
 
 Read the lines that the list marks "check by hand" in $hba. When none of them matches the
 App server ($APP_IP, database $RP_DATABASE, user $RP_ROLE), the first "matches" line decides.
-To be sure, add this line above them:
+To be sure, add this line $where:
     $line
   1. Back up the file first:  sudo cp -p $hba $hba.before-oracle-view
   2. Reload (no restart):     $reload
   3. Check again:             $again
 TEXT
-        return 4
-    fi
-    if grep -q 'RESULT: NOT OK' <<< "$out"; then
+        status=4
+    elif grep -q 'RESULT: NOT OK' <<< "$out"; then
         cat <<TEXT
 
 This command never edits pg_hba.conf. To let the App server ($APP_IP) in:
   1. Back up the file:  sudo cp -p $hba $hba.before-oracle-view
-  2. Add this line above the first line of the list above, or above the first host line:
+  2. Add this line $where:
        $line
   3. Reload (no restart):  $reload
   4. Check again:  $again
 Way back: sudo cp -p $hba.before-oracle-view $hba, then the reload of step 3.
 TEXT
-        return 3
+        status=3
+    else
+        grep -q 'RESULT: OK' <<< "$out" || die 'The pg_hba.conf check gave no result (above)'
     fi
-    grep -q 'RESULT: OK' <<< "$out" || die 'The pg_hba.conf check gave no result (above)'
+    if [[ -n $block ]]; then
+        cat <<TEXT
+
+NOTE: $hba holds the block of deploy-db.sh for $RP_DATABASE (line $block). Each later
+deploy-db.sh run writes that block again at the top of the file, above the line of $RP_ROLE,
+and deletes the line when it is inside the block. After each deploy-db.sh run, run:
+    $again
+and move the line of $RP_ROLE back above the line "$marker".
+TEXT
+    fi
+    return "$status"
 }
 
 drop_sql() {
