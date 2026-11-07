@@ -912,6 +912,12 @@ elif command == "SHOW hba_file":
     out = state["hba_file"] + "\n"
 elif "FROM pg_extension" in command:
     out = state["extensions"] + "\n"
+elif command.startswith("SELECT count(*) || '|' || pg_size_pretty") and "n.nspname = 'ovb_stage'" in command:
+    out = state["stage_total"] + "\n"
+elif command.startswith("SELECT format('    %-40s %12s  %s'") and "n.nspname = 'ovb_stage'" in command:
+    out = "".join(line + "\n" for line in state["stage_list"])
+elif command.startswith("WITH s AS (") and command.endswith("SELECT obj FROM outside ORDER BY obj"):
+    out = "".join(line + "\n" for line in state["stage_outside"])
 elif "the password is a SCRAM-SHA-256 verifier" in command:
     out = "".join(line + "\n" for line in state["rights"])
 else:
@@ -930,8 +936,16 @@ RIGHTS_OK = ["OK|the password is a SCRAM-SHA-256 verifier", "OK|LOGIN, CONNECTIO
              "OK|SELECT on every table and view of public (0 without)",
              "OK|INSERT, UPDATE and DELETE on every table of public (0 without)",
              "OK|USAGE and UPDATE on every sequence of public (0 without)", "OK|no TRUNCATE",
-             "OK|no CREATE in public", "OK|owns no table, view or sequence (DDL on the Odoo tables fails)",
-             "OK|no right on a database other than perodua_oracle2"]
+             "OK|no CREATE in public", "OK|owns nothing outside the schema ovb_stage (DDL on the Odoo tables fails)",
+             "OK|no right on a database other than perodua_oracle2",
+             # The schema of the staging tables of Copy to RP (copy design, section 4.3).
+             "OK|owns one schema, ovb_stage", "OK|USAGE and CREATE on the schema ovb_stage",
+             "OK|no right of PUBLIC on the schema ovb_stage"]
+STAGE_SQL = ("CREATE SCHEMA IF NOT EXISTS ovb_stage AUTHORIZATION oracle_view_rp;\n", "REVOKE ALL ON SCHEMA ovb_stage FROM PUBLIC;\n",
+             "GRANT USAGE, CREATE ON SCHEMA ovb_stage TO oracle_view_rp;\n")
+# Two staging tables, as the list of the script shows them.
+STAGE_LIST = ["    ovb_copy_20261107_parts                       1160 kB  oracle_view_rp",
+              "    ovb_copy_20261106_prices                   8192 bytes  oracle_view_rp"]
 RP_DB = "perodua_oracle2"  # the database of the grey App (owner decision of 2026-11-07) and of the image
 OLD_DB = "perodua_oracle"  # the database of the releases before grey-v1.0.2: role and drop-role clean it
 # role and drop-role clean the old database only when it accepts connections (not ALLOW_CONNECTIONS false,
@@ -981,7 +995,7 @@ class OracleViewRoleTest(unittest.TestCase):
                         FAKE_PG_LOG=str(self.log))
         self.set_state(running=True, database=True, role_exists=False, role_status=0, ssl="on", extensions="",
                        rights=RIGHTS_OK, hba_output="RESULT: OK - the first matching line uses scram-sha-256.\n",
-                       hba_file=HBA_FILE)
+                       hba_file=HBA_FILE, stage_total="0|0 bytes", stage_list=[], stage_outside=[])
         self.verifier = self.tmp / "rp_grey.verifier"
         self.verifier.write_text(VERIFIER + "\n")
 
@@ -1077,6 +1091,11 @@ class OracleViewRoleTest(unittest.TestCase):
         for word in ("TRUNCATE", "ALTER SYSTEM", "pg_reload_conf", "OWNER TO", "GRANT CREATE", "GRANT ALL"):
             self.assertNotIn(word, statements)
         self.assertIsNone(re.search(r"(?<!NO)SUPERUSER", statements))
+        # Copy to RP: the schema ovb_stage of the role in ovb_db, after the grants there; CREATE only there.
+        self.assertNotIn(-1, in_order(sql, ["\\connect :ovb_db\nGRANT USAGE ON SCHEMA public TO oracle_view_rp;", *STAGE_SQL]))
+        self.assertEqual(sql.rfind("\\connect"), sql.rfind("\\connect :ovb_db\n"))  # the schema goes to ovb_db
+        self.assertEqual(re.findall(r"^.*\bCREATE\b.*ON SCHEMA.*$", statements, re.M), [STAGE_SQL[2].strip()])
+        self.assertEqual(re.findall(r"^.*\bREVOKE\b.*$", statements, re.M), [STAGE_SQL[1].strip()])
         # The old database: its sessions of the role end, and in ONE transaction DROP OWNED BY removes the
         # rights of the role (also on every database) and ovb_db gets CONNECT and TEMPORARY again.
         old = sql[sql.index("\\if :ovb_old\n"):]
@@ -1098,20 +1117,56 @@ class OracleViewRoleTest(unittest.TestCase):
                                             "\\connect :ovb_db\nDROP OWNED BY oracle_view_ro;\n",
                                             "\\connect postgres\n", "DROP ROLE oracle_view_ro;\n"]))
         self.assertIn("OK   the password is a SCRAM-SHA-256 verifier\n", result.stdout)
+        self.assertIn("== Staging tables of Copy to RP: the schema ovb_stage of perodua_oracle2\n"
+                      "none: ovb_stage holds no table\n", result.stdout)
         self.assertIn("The role is ready", result.stdout)
         self.assertIn(f"Delete your copy of the verifier file: rm {self.verifier}", result.stdout)
 
     def test_a_missing_right_stops_before_the_pg_hba_check(self):
         elsewhere = "FAIL|no right on a database other than perodua_oracle2 (it has rights on: perodua_oracle)"
+        owner = "FAIL|owns one schema, ovb_stage (it owns: no schema; the owner of ovb_stage is odoo)"
+        outside = "FAIL|owns nothing outside the schema ovb_stage (DDL on the Odoo tables fails) (it owns: public.x)"
+        stage_hint = ("The schema ovb_stage of perodua_oracle2 holds the staging tables of Copy to RP: oracle_view_rp "
+                      "must own it, with USAGE and CREATE there,\n")
         for rights, message in ((RIGHTS_OK[:8] + ["FAIL|no TRUNCATE"] + RIGHTS_OK[9:], "does not have the rights above"),
-                                (RIGHTS_OK[:11] + [elsewhere], SAFE_FORM_HINT),
-                                (RIGHTS_OK[:11], "unexpected answer"), (RIGHTS_OK[4:], "unexpected answer")):
-            with self.subTest(message=message):
+                                (RIGHTS_OK[:11] + [elsewhere] + RIGHTS_OK[12:], SAFE_FORM_HINT),
+                                (RIGHTS_OK[:12] + [owner] + RIGHTS_OK[13:], stage_hint),
+                                (RIGHTS_OK[:13] + ["FAIL|USAGE and CREATE on the schema ovb_stage"] + RIGHTS_OK[14:],
+                                 stage_hint),
+                                (RIGHTS_OK[:14] + ["FAIL|no right of PUBLIC on the schema ovb_stage"], stage_hint),
+                                (RIGHTS_OK[:10] + [outside] + RIGHTS_OK[11:], "does not have the rights above"),
+                                (RIGHTS_OK[:12], "unexpected answer"),  # the 12 checks of the releases before ovb_stage
+                                (RIGHTS_OK[:14], "unexpected answer"), (RIGHTS_OK[4:], "unexpected answer")):
+            with self.subTest(rights=rights):
                 self.set_state(rights=rights)
                 result = self.role()
                 self.assertEqual(result.returncode, 1)
                 self.assertIn(message, result.stderr)
                 self.assertEqual(self.scripts("hba-check"), [])
+                if message is not stage_hint:  # the hint of ovb_stage only for a FAIL line of ovb_stage
+                    self.assertNotIn("staging tables", result.stderr)
+
+    def test_role_lists_the_staging_tables_with_their_sizes(self):
+        self.set_state(role_exists=True, stage_total="2|1168 kB", stage_list=STAGE_LIST)
+        for args in (["--check"], ["--verifier-file", str(self.verifier)]):
+            with self.subTest(args=args):
+                result = self.run_script("role", *args)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("== Staging tables of Copy to RP: the schema ovb_stage of perodua_oracle2\n"
+                              "2 tables, 1168 kB on disk:\n"
+                              f"    {'table':<40} {'size':>12}  owner\n"
+                              + "".join(line + "\n" for line in STAGE_LIST)
+                              + "To free the disk, drop the staging tables that nobody needs (README.md, Oracle Field "
+                              "Browser).\n", result.stdout)
+                # After the rights, before TLS and the pg_hba.conf check: the list changes nothing.
+                self.assertNotIn(-1, in_order(result.stdout, ["== Rights of oracle_view_rp", "== Staging tables",
+                                                              "== TLS: SHOW ssl", "== pg_hba.conf check"]))
+                self.assertEqual(self.scripts("drop-role"), [])
+        self.set_state(stage_total="no answer")
+        result = self.run_script("role", "--check")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("The list of the tables in ovb_stage gave an unexpected answer", result.stderr)
+        self.assertEqual(self.scripts("hba-check"), [])
 
     def test_the_pg_hba_check_prints_the_line_and_never_edits_the_file(self):
         self.set_state(role_exists=True, hba_output="RESULT: NOT OK - no matching line.\n")
@@ -1215,8 +1270,9 @@ class OracleViewRoleTest(unittest.TestCase):
         self.assertIn("OVB_RP_SSLMODE=prefer", result.stdout)
         self.assertIn("perodua_oracle2 has: dblink, postgres_fdw\n", result.stdout)
         self.assertIn("This command changes no right", result.stdout)
-        for each in self.calls():
-            self.assertNotIn("REVOKE", " ".join(each["args"]) + each.get("stdin", ""))
+        for each in self.calls():  # the only REVOKE is the one of PUBLIC on the schema ovb_stage
+            sent = (" ".join(each["args"]) + each.get("stdin", "")).replace(STAGE_SQL[1], "")
+            self.assertNotIn("REVOKE", sent)
         self.set_state(ssl="on", extensions="")
         result = self.role()
         self.assertNotIn("WARNING", result.stdout)
@@ -1238,6 +1294,7 @@ class OracleViewRoleTest(unittest.TestCase):
                      ["role", "--check", "--dir", "/opt/x"], ["role", "--check", "--app-ip", "192.168.23"],
                      ["role", "--check", "--app-ip", "host.example"], ["role", "--check", "--pg-port", "70000"],
                      ["drop-role", "--verifier-file", str(self.verifier)], ["install", "--check"],
+                     ["role", "--check", "--drop-staging"], ["uninstall", "--drop-staging"],
                      ["status", "--purge"], ["frobnicate"], []):
             with self.subTest(args=args):
                 result = self.run_script(*args)
@@ -1269,6 +1326,86 @@ class OracleViewRoleTest(unittest.TestCase):
         self.assertIn("pg_terminate_backend", sql)
         self.assertIn(f"stays in {HBA_FILE}: remove it by hand", result.stdout)
         self.assertIn("SELECT pg_reload_conf()", result.stdout)
+        # The schema ovb_stage of Copy to RP: dropped in ovb_db before DROP OWNED BY, and only with the choice of
+        # the script (ovb_drop_staging) when it holds tables; else the role gets its LOGIN back and nothing goes.
+        self.assertIn("-v ovb_drop_staging=off", " ".join(call["args"]))
+        self.assertIn("It also drops the schema ovb_stage of perodua_oracle2: the staging tables of Copy to RP and "
+                      "their data are dropped.\n", result.stdout)
+        steps = ["coalesce((SELECT rolcanlogin FROM pg_roles WHERE rolname = 'oracle_view_rp'), false) AS ovb_rp_login",
+                 "ALTER ROLE oracle_view_rp NOLOGIN;", "WHERE usename = 'oracle_view_rp'", "\\connect :ovb_db\n",
+                 "count(c.oid) > 0 AND NOT :'ovb_drop_staging'::boolean AS ovb_stage_kept",
+                 "\\if :ovb_stage_kept\n\\connect postgres\n\\if :ovb_rp_login\nALTER ROLE oracle_view_rp LOGIN;\n\\endif\n",
+                 "RAISE EXCEPTION 'ovb_stage holds staging tables", "\\endif\n\\if :ovb_stage\nWITH s AS (",
+                 "WHERE nsp IS DISTINCT FROM (SELECT oid FROM s)) SELECT count(*) > 0 AS ovb_stage_outside,",
+                 "AS ovb_stage_outside_list FROM outside \\gset\n",
+                 "\\if :ovb_stage_outside\n\\connect postgres\n\\if :ovb_rp_login\nALTER ROLE oracle_view_rp LOGIN;\n"
+                 "\\endif\n", "RAISE EXCEPTION 'objects outside ovb_stage depend on it",
+                 "\\endif\nDROP SCHEMA ovb_stage CASCADE;\n",
+                 "\\echo schema ovb_stage dropped, with its :ovb_stage_tables staging tables and their data",
+                 "\\endif\nDROP OWNED BY oracle_view_rp;\n", "DROP ROLE oracle_view_rp;"]
+        self.assertNotIn(-1, in_order(sql, steps), sql)
+        self.assertEqual(sql.count("\nDROP SCHEMA"), 1)
+        # Materialized views hold data too: they count with the tables, as in the list of the script.
+        self.assertIn("LEFT JOIN pg_class c ON c.relnamespace = n.oid AND c.relkind IN ('r', 'p', 'm')", sql)
+        self.assertNotIn("== Staging tables", result.stdout)  # no role: no list
+
+    def test_drop_role_stops_when_the_staging_tables_hold_data(self):
+        self.set_state(role_exists=True, stage_total="2|1168 kB", stage_list=STAGE_LIST)
+        listed = ("== Staging tables of Copy to RP: the schema ovb_stage of perodua_oracle2\n2 tables, 1168 kB on disk:\n"
+                  f"    {'table':<40} {'size':>12}  owner\n" + "".join(line + "\n" for line in STAGE_LIST))
+        for args in (["--confirm", "oracle_view_rp"], []):  # before the confirmation
+            with self.subTest(args=args):
+                result = self.run_script("drop-role", *args)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn(listed, result.stdout)
+                self.assertIn("drop-role drops these 2 tables and their data (1168 kB). To keep a table, copy it first",
+                              result.stderr)
+                self.assertIn("    sudo -u postgres pg_dump -p 5432 -d perodua_oracle2 -n ovb_stage -Fc -f "
+                              "/var/tmp/ovb_stage.dump\n", result.stderr)
+                self.assertIn("The schema ovb_stage holds 2 staging tables (above). To drop them with the role, run "
+                              "drop-role again with --drop-staging. Nothing was changed.", result.stderr)
+                self.assertNotIn("Type oracle_view_rp", result.stdout + result.stderr)
+                self.assertEqual(self.scripts(), [])
+        result = self.run_script("drop-role", "--drop-staging")  # the choice is not the confirmation
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("No terminal to confirm on: pass --confirm oracle_view_rp. Nothing was changed.", result.stderr)
+        self.assertEqual(self.scripts(), [])
+        result = self.run_script("drop-role", "--confirm", "oracle_view_rp", "--drop-staging", "--pg-port", "5433")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(listed, result.stdout)
+        (call,) = self.scripts("drop-role")
+        self.assertIn("-v ovb_drop_staging=on", " ".join(call["args"]))
+        self.assertIn("-p 5433", " ".join(call["args"]))
+        # Without tables, the schema goes without the choice: no data goes with it.
+        self.set_state(role_exists=True, stage_total="0|0 bytes", stage_list=[])
+        result = self.run_script("drop-role", "--confirm", "oracle_view_rp")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("none: ovb_stage holds no table\n", result.stdout)
+        (call,) = self.scripts("drop-role")
+        self.assertIn("-v ovb_drop_staging=off", " ".join(call["args"]))
+
+    def test_drop_role_stops_when_objects_outside_depend_on_the_staging_schema(self):
+        outside = ["table constraint copy_fk on public.t_ref", "view public.v_copy"]
+        self.set_state(role_exists=True, stage_total="2|1168 kB", stage_list=STAGE_LIST, stage_outside=outside)
+        for args in (["--confirm", "oracle_view_rp", "--drop-staging"], ["--confirm", "oracle_view_rp"], []):
+            with self.subTest(args=args):
+                result = self.run_script("drop-role", *args)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn("These objects outside the schema ovb_stage depend on an object in it. drop-role drops "
+                              "the schema with CASCADE,\nso it would drop them too, with their data:\n"
+                              "    table constraint copy_fk on public.t_ref\n    view public.v_copy\n", result.stderr)
+                self.assertIn("Objects outside the schema ovb_stage depend on it (above). Nothing was changed.",
+                              result.stderr)
+                self.assertNotIn("Type oracle_view_rp", result.stdout + result.stderr)
+                self.assertEqual(self.scripts(), [])
+        (query,) = [call["args"][call["args"].index("-c") + 1] for call in self.calls()
+                    if "-c" in call["args"] and call["args"][call["args"].index("-c") + 1].startswith("WITH s AS (")]
+        self.assertIn("WHERE n.nspname = 'ovb_stage' AND r.rolname = 'oracle_view_rp'", query)
+        self.assertIn("WHERE d.deptype <> 'i'", query)
+        self.set_state(stage_outside=[])
+        result = self.run_script("drop-role", "--confirm", "oracle_view_rp", "--drop-staging")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(self.scripts("drop-role")), 1)
 
     def test_a_held_lock_stops_role_and_drop_role(self):
         fd = os.open(lock_path("role"), os.O_RDWR | os.O_CREAT, 0o600)
@@ -1425,7 +1562,8 @@ class RoleOnPostgresTest(PostgresCluster, unittest.TestCase):
     # Each statement is also logged by the sampling of statements and of transactions.
     SERVER_OPTIONS = "-c log_min_duration_sample=0 -c log_statement_sample_rate=1 -c log_transaction_sample_rate=1"
 
-    def test_role_rights_pg_hba_check_and_drop_on_a_real_server(self):  # the first test of the class (by name)
+    def test_role_rights_pg_hba_check_and_drop_on_a_real_server(self):
+        self.make_old_ro()  # an earlier test of the class (by name) can have dropped it
         self.assertEqual(self.sql("postgres", "SELECT count(*) FROM pg_roles WHERE rolname = 'oracle_view_ro'"), "1")
         self.addCleanup(self.reload)
         self.addCleanup(self.write_hba, self.hba_lines)
@@ -1435,7 +1573,7 @@ class RoleOnPostgresTest(PostgresCluster, unittest.TestCase):
         # The ::1 line above is IPv6: it cannot match the App server, so this is NOT OK, not CHECK BY HAND.
         self.assertEqual(result.returncode, 3, output)
         self.assertIn("RESULT: NOT OK", result.stdout)
-        self.assertEqual(len(re.findall(r"^OK   ", result.stdout, re.M)), 12, result.stdout)
+        self.assertEqual(len(re.findall(r"^OK   ", result.stdout, re.M)), 15, result.stdout)
         self.assertIn("OK   no right on a database other than perodua_oracle2\n", result.stdout)
         self.assertEqual(self.sql("postgres", "SELECT rolpassword FROM pg_authid WHERE rolname = 'oracle_view_rp'"), VERIFIER)
         # oracle_view_ro had rights in both databases: both are cleaned, so it could be dropped.
@@ -1452,7 +1590,7 @@ class RoleOnPostgresTest(PostgresCluster, unittest.TestCase):
         missing = self.run_script("role", "--check", "--app-ip", self.APP)
         self.assertEqual(missing.returncode, 1, missing.stdout + missing.stderr)
         self.assertIn("FAIL INSERT, UPDATE and DELETE on every table of public (1 without)\n", missing.stdout)
-        self.assertEqual(len(re.findall(r"^OK   ", missing.stdout, re.M)), 11, missing.stdout)
+        self.assertEqual(len(re.findall(r"^OK   ", missing.stdout, re.M)), 14, missing.stdout)
         self.assertIn("Nothing in pg_hba.conf was checked", missing.stderr)
         self.assertNotIn("RESULT:", missing.stdout)
         self.sql(RP_DB, "GRANT DELETE ON res_partner TO oracle_view_rp")
@@ -1494,6 +1632,7 @@ class RoleOnPostgresTest(PostgresCluster, unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.sql("postgres", "SELECT count(*) FROM pg_roles WHERE rolname = 'oracle_view_rp'"), "0")
         self.assertEqual(self.sql(RP_DB, "SELECT count(*) FROM res_partner"), "1")
+        self.assertEqual(self.sql(RP_DB, "SELECT count(*) FROM pg_namespace WHERE nspname = 'ovb_stage'"), "0")
 
     def with_the_line(self):  # the printed pg_hba.conf line at the top of the host lines
         self.addCleanup(self.reload)
@@ -1535,7 +1674,7 @@ class RoleOnPostgresTest(PostgresCluster, unittest.TestCase):
         self.assertIn("RESULT: OK", result.stdout)
         self.assertIn("The rights of oracle_view_rp in perodua_oracle, the database of the earlier releases", result.stdout)
         self.assertIn("OK   no right on a database other than perodua_oracle2\n", result.stdout)
-        self.assertEqual(len(re.findall(r"^OK   ", result.stdout, re.M)), 12, result.stdout)
+        self.assertEqual(len(re.findall(r"^OK   ", result.stdout, re.M)), 15, result.stdout)
         # The session there ended; no grant, default privilege or object of the role is left there.
         deadline = time.monotonic() + 10
         while session.poll() is None and time.monotonic() < deadline:
@@ -1678,7 +1817,7 @@ touch {started}
                     self.sql("postgres", refuse)
                     result = self.make_role()
                     self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
-                    self.assertEqual(len(re.findall(r"^OK   ", result.stdout, re.M)), 12, result.stdout)
+                    self.assertEqual(len(re.findall(r"^OK   ", result.stdout, re.M)), 15, result.stdout)
                     result = self.run_script("drop-role", "--confirm", "oracle_view_rp")
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                     self.assertIn("role oracle_view_rp dropped", result.stdout)
@@ -1725,7 +1864,7 @@ touch {started}
         result = self.make_role()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn("The rights of oracle_view_rp in perodua_oracle", result.stdout)
-        self.assertEqual(len(re.findall(r"^OK   ", result.stdout, re.M)), 12, result.stdout)
+        self.assertEqual(len(re.findall(r"^OK   ", result.stdout, re.M)), 15, result.stdout)
         self.assertEqual(self.sql("postgres", "SELECT count(*) FROM pg_roles WHERE rolname = 'oracle_view_ro'"), "0")
         self.assertEqual(self.tool("SELECT count(*) FROM res_partner").stdout.strip(), "1")
         result = self.run_script("drop-role", "--confirm", "oracle_view_rp")
@@ -1748,6 +1887,161 @@ touch {started}
         self.assertEqual(self.sql("postgres", "SELECT count(*) FROM pg_roles WHERE rolname IN ('oracle_view_rp', 'oracle_view_ro')"), "0")
         self.assertEqual(self.sql(RP_DB, "SELECT count(*) FROM res_partner"), "1")
         self.assertEqual(self.sql(OLD_DB, "SELECT count(*) FROM old_partner"), "1")
+
+    def stage_tables(self):
+        return self.sql(RP_DB, "SELECT coalesce(string_agg(relname, ' ' ORDER BY relname), '') FROM pg_class"
+                               " WHERE relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'ovb_stage')"
+                               " AND relkind = 'r'")
+
+    def test_the_staging_schema_of_copy_to_rp(self):
+        # Copy to RP (copy design, section 4.3): the role owns the schema ovb_stage and makes its staging tables
+        # there; it still has no CREATE in public, no TRUNCATE on a table of public and owns nothing else.
+        self.drop_old_ro()
+        self.with_the_line()
+        result = self.make_role()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.addCleanup(self.run_script, "drop-role", "--confirm", "oracle_view_rp", "--drop-staging")
+        self.assertEqual(len(re.findall(r"^OK   ", result.stdout, re.M)), 15, result.stdout)
+        for line in ("OK   owns nothing outside the schema ovb_stage (DDL on the Odoo tables fails)\n",
+                     "OK   owns one schema, ovb_stage\n", "OK   USAGE and CREATE on the schema ovb_stage\n",
+                     "OK   no right of PUBLIC on the schema ovb_stage\n", "OK   no CREATE in public\n", "OK   no TRUNCATE\n",
+                     "== Staging tables of Copy to RP: the schema ovb_stage of perodua_oracle2\nnone: ovb_stage holds no table\n"):
+            self.assertIn(line, result.stdout)
+        self.assertEqual(self.sql(RP_DB, "SELECT pg_get_userbyid(nspowner) || ' ' || nspacl::text FROM pg_namespace"
+                                         " WHERE nspname = 'ovb_stage'"), "oracle_view_rp {oracle_view_rp=UC/oracle_view_rp}")
+        self.assertEqual(self.sql(RP_DB, "SELECT has_schema_privilege('odoo', 'ovb_stage', 'USAGE')"), "f")
+        # A table made after the check of drop-role: the drop stops, the role gets its LOGIN back, nothing goes.
+        late = self.add_after("\\connect :ovb_db\n", "CREATE TABLE ovb_stage.made_late (id int);\n")
+        result = self.run_script("drop-role", "--confirm", "oracle_view_rp", path=late)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("none: ovb_stage holds no table\n", result.stdout)
+        self.assertIn("ovb_stage holds 1 staging tables now. Nothing was dropped.", result.stdout)
+        self.assertIn("run drop-role again, with --drop-staging to drop them", result.stderr)
+        self.assertEqual(self.sql("postgres", "SELECT rolcanlogin FROM pg_roles WHERE rolname = 'oracle_view_rp'"), "t")
+        self.assertEqual(self.stage_tables(), "made_late")
+        self.assertEqual(self.tool("SELECT count(*) FROM res_partner").stdout.strip(), "1")
+        self.sql(RP_DB, "DROP TABLE ovb_stage.made_late")
+        # The tool makes a staging table in a READ WRITE transaction; nowhere else.
+        made = self.tool("BEGIN READ WRITE; CREATE TABLE ovb_stage.copy_parts AS SELECT g AS id, repeat('x', 200) AS name"
+                         " FROM generate_series(1, 2000) g; CREATE INDEX ON ovb_stage.copy_parts (id); COMMIT")
+        self.assertEqual(made.returncode, 0, made.stderr)
+        self.assertEqual(self.tool("SELECT count(*) FROM ovb_stage.copy_parts").stdout.strip(), "2000")
+        for query in ("CREATE TABLE public.mine (id int)", "CREATE TABLE mine (id int)", "TRUNCATE res_partner",
+                      "CREATE SCHEMA made_up_more", "ALTER TABLE res_partner ADD COLUMN x int"):
+            with self.subTest(query=query):
+                self.assertNotEqual(self.tool(f"BEGIN READ WRITE; {query}; ROLLBACK").returncode, 0)
+        with self.assertRaises(subprocess.CalledProcessError):  # PUBLIC, and so Odoo, has no right there
+            self.sql(RP_DB, "SET ROLE odoo; SELECT count(*) FROM ovb_stage.copy_parts")
+        result = self.run_script("role", "--check", "--app-ip", self.APP)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len(re.findall(r"^OK   ", result.stdout, re.M)), 15, result.stdout)
+        self.assertRegex(result.stdout, r"\n1 tables, [0-9]+ kB on disk:\n    table +size  owner\n"
+                                        r"    copy_parts +[0-9]+ kB  oracle_view_rp\nTo free the disk")
+        # An object of the role outside ovb_stage stops role --check.
+        self.sql(RP_DB, "CREATE FUNCTION public.made_up_f() RETURNS int LANGUAGE sql AS 'SELECT 1';"
+                        " ALTER FUNCTION public.made_up_f() OWNER TO oracle_view_rp")
+        self.addCleanup(self.sql, RP_DB, "DROP FUNCTION IF EXISTS public.made_up_f()")
+        result = self.run_script("role", "--check", "--app-ip", self.APP)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("FAIL owns nothing outside the schema ovb_stage (DDL on the Odoo tables fails) (it owns: "
+                      "public.made_up_f())\n", result.stdout)
+        self.assertNotIn("RESULT:", result.stdout)
+        self.sql(RP_DB, "DROP FUNCTION public.made_up_f()")
+        # drop-role stops before any change while ovb_stage holds tables, and names the choice.
+        result = self.run_script("drop-role", "--confirm", "oracle_view_rp")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertRegex(result.stdout, r"    copy_parts +[0-9]+ kB  oracle_view_rp\n")
+        self.assertIn("run drop-role again with --drop-staging. Nothing was changed.", result.stderr)
+        self.assertEqual(self.stage_tables(), "copy_parts")
+        self.assertEqual(self.tool("SELECT count(*) FROM ovb_stage.copy_parts").stdout.strip(), "2000")
+        # With --drop-staging: the schema, its tables and the role go; the rows of the Odoo tables stay.
+        result = self.run_script("drop-role", "--confirm", "oracle_view_rp", "--drop-staging")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertRegex(result.stdout, r"schema ovb_stage dropped, with its 1 staging tables and their data \([0-9]+ kB\)\n")
+        self.assertIn("role oracle_view_rp dropped", result.stdout)
+        self.assertEqual(self.sql(RP_DB, "SELECT count(*) FROM pg_namespace WHERE nspname = 'ovb_stage'"), "0")
+        self.assertEqual(self.sql("postgres", "SELECT count(*) FROM pg_roles WHERE rolname = 'oracle_view_rp'"), "0")
+        self.assertEqual(self.sql(RP_DB, "SELECT count(*) FROM res_partner"), "1")
+
+    def test_drop_role_keeps_what_depends_on_the_staging_schema(self):
+        # A materialized view of the role in ovb_stage holds data: it counts as a staging table. An object
+        # outside ovb_stage that depends on a staging object stops drop-role, also with --drop-staging, because
+        # DROP SCHEMA ovb_stage CASCADE would drop it too.
+        self.drop_old_ro()
+        self.with_the_line()
+        self.assertEqual(self.make_role().returncode, 0)
+        self.addCleanup(self.run_script, "drop-role", "--confirm", "oracle_view_rp", "--drop-staging")
+        made = self.tool("BEGIN READ WRITE; CREATE MATERIALIZED VIEW ovb_stage.parts_snap AS SELECT g AS id"
+                         " FROM generate_series(1, 500) g; COMMIT")
+        self.assertEqual(made.returncode, 0, made.stderr)
+        result = self.run_script("role", "--check", "--app-ip", self.APP)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertRegex(result.stdout, r"\n1 tables, [0-9]+ kB on disk:\n    table +size  owner\n"
+                                        r"    parts_snap +[0-9]+ kB  oracle_view_rp\n")
+        result = self.run_script("drop-role", "--confirm", "oracle_view_rp")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("The schema ovb_stage holds 1 staging tables (above).", result.stderr)
+        self.assertEqual(self.tool("SELECT count(*) FROM ovb_stage.parts_snap").stdout.strip(), "500")
+        # A view and a foreign key in public on a staging table: drop-role stops before the confirmation.
+        made = self.tool("BEGIN READ WRITE; CREATE TABLE ovb_stage.copy_keys (id int PRIMARY KEY);"
+                         " INSERT INTO ovb_stage.copy_keys SELECT generate_series(1, 3); COMMIT")
+        self.assertEqual(made.returncode, 0, made.stderr)
+        self.sql(RP_DB, "CREATE VIEW public.v_copy AS SELECT id FROM ovb_stage.copy_keys;"
+                        " CREATE TABLE public.t_ref (id int CONSTRAINT copy_fk REFERENCES ovb_stage.copy_keys (id));"
+                        " INSERT INTO public.t_ref VALUES (1)")
+        self.addCleanup(self.sql, RP_DB, "DROP VIEW IF EXISTS public.v_copy; DROP TABLE IF EXISTS public.t_ref")
+        for args in (["--drop-staging"], []):
+            with self.subTest(args=args):
+                result = self.run_script("drop-role", "--confirm", "oracle_view_rp", *args)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("so it would drop them too, with their data:\n"
+                              "    table constraint copy_fk on public.t_ref\n    view public.v_copy\n", result.stderr)
+                self.assertIn("Objects outside the schema ovb_stage depend on it (above). Nothing was changed.",
+                              result.stderr)
+        self.assertEqual(self.sql("postgres", "SELECT rolcanlogin FROM pg_roles WHERE rolname = 'oracle_view_rp'"), "t")
+        # A dependency made after the check of the script: the SQL stops, gives LOGIN back and drops nothing.
+        self.sql(RP_DB, "DROP VIEW public.v_copy")
+        self.sql(RP_DB, "ALTER TABLE public.t_ref DROP CONSTRAINT copy_fk")
+        late = self.add_after("\\connect :ovb_db\n", "CREATE VIEW public.v_late AS SELECT id FROM ovb_stage.copy_keys;\n")
+        self.addCleanup(self.sql, RP_DB, "DROP VIEW IF EXISTS public.v_late")
+        result = self.run_script("drop-role", "--confirm", "oracle_view_rp", "--drop-staging", path=late)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("1 objects outside ovb_stage depend on it: view public.v_late\nNothing was dropped.\n", result.stdout)
+        self.assertIn("DROP SCHEMA ovb_stage CASCADE would drop them", result.stderr)
+        self.assertEqual(self.sql("postgres", "SELECT rolcanlogin FROM pg_roles WHERE rolname = 'oracle_view_rp'"), "t")
+        self.assertEqual(self.sql(RP_DB, "SELECT count(*) FROM public.v_late"), "3")
+        self.assertEqual(self.stage_tables(), "copy_keys")
+        self.assertEqual(self.tool("SELECT count(*) FROM ovb_stage.parts_snap").stdout.strip(), "500")
+        # Without the dependency, --drop-staging drops the schema with the table and the materialized view.
+        self.sql(RP_DB, "DROP VIEW public.v_late")
+        result = self.run_script("drop-role", "--confirm", "oracle_view_rp", "--drop-staging")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertRegex(result.stdout, r"schema ovb_stage dropped, with its 2 staging tables and their data \([0-9]+ kB\)\n")
+        self.assertEqual(self.sql(RP_DB, "SELECT count(*) FROM pg_namespace WHERE nspname = 'ovb_stage'"), "0")
+        self.assertEqual(self.sql(RP_DB, "SELECT count(*) FROM public.t_ref"), "1")
+
+    def test_a_staging_schema_of_another_owner_stays(self):
+        self.drop_old_ro()
+        self.sql(RP_DB, "CREATE SCHEMA ovb_stage AUTHORIZATION odoo; SET ROLE odoo; CREATE TABLE ovb_stage.odoo_table (id int)")
+        self.addCleanup(self.sql, RP_DB, "DROP SCHEMA IF EXISTS ovb_stage CASCADE")
+        self.addCleanup(self.run_script, "drop-role", "--confirm", "oracle_view_rp")
+        result = self.make_role()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("The schema ovb_stage of perodua_oracle2 belongs to another role: it stays as it is", result.stdout)
+        self.assertIn("FAIL owns one schema, ovb_stage (it owns: no schema; the owner of ovb_stage is odoo)\n", result.stdout)
+        self.assertIn("FAIL USAGE and CREATE on the schema ovb_stage\n", result.stdout)
+        self.assertEqual(len(re.findall(r"^OK   ", result.stdout, re.M)), 13, result.stdout)
+        self.assertIn("find out who made it before you change its owner or drop it", result.stderr)
+        self.assertNotIn("RESULT:", result.stdout)
+        self.assertEqual(self.sql(RP_DB, "SELECT pg_get_userbyid(nspowner) || ' ' || coalesce(nspacl::text, 'default')"
+                                         " FROM pg_namespace WHERE nspname = 'ovb_stage'"), "odoo default")
+        # drop-role leaves that schema and its table: they are not of the role.
+        result = self.run_script("drop-role", "--confirm", "oracle_view_rp")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("none: ovb_stage holds no table\n", result.stdout)
+        self.assertIn("schema ovb_stage of another owner stays: 0 staging tables of oracle_view_rp in it dropped", result.stdout)
+        self.assertEqual(self.stage_tables(), "odoo_table")
+        self.assertEqual(self.sql("postgres", "SELECT count(*) FROM pg_roles WHERE rolname = 'oracle_view_rp'"), "0")
 
     def test_the_pg_hba_check_reads_each_kind_of_rule(self):
         self.write_hba(self.hba_lines)

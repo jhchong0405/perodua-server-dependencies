@@ -2074,7 +2074,7 @@ route of [https.sh](#https). Every page and every API call needs a login.
 | --- | --- |
 | Container `oracle-view` on `127.0.0.1:8797` only, run from `/opt/perodua-oracle-view` | App server |
 | Route `stgiss.perodua.com.my /dev/oracle-view/ 8797 strip,http` | App server, `/etc/perodua-https/routes.conf` |
-| Role `oracle_view_rp` on the database `perodua_oracle2`: read and write on the tables, read-only by default | DB server (PostgreSQL 16) |
+| Role `oracle_view_rp` on the database `perodua_oracle2`: read and write on the tables, read-only by default, and the schema `ovb_stage` for the staging tables of Copy to RP | DB server (PostgreSQL 16) |
 | Image `perodua-deploy.novutal.com/oracle-view:grey-v1.0.2`, pulled by digest | Private registry |
 
 The image holds the Oracle settings file and the password of the role
@@ -2114,9 +2114,12 @@ Do the steps in this order.
    same rights on new tables and sequences, `default_transaction_read_only = on`
    (the pages stay read-only; a Write run of the SQL console turns it off for its
    own transaction), `statement_timeout = 30s` and
-   `idle_in_transaction_session_timeout = 60s`. It does not get superuser, the
-   ownership of a table (Odoo owns the tables, so DDL on them fails), `TRUNCATE` or
-   `CREATE` in `public`. The command drops the role `oracle_view_ro` of an earlier
+   `idle_in_transaction_session_timeout = 60s`. It also gets the schema
+   `ovb_stage` for the staging tables of Copy to RP (see
+   [The staging schema ovb_stage](#the-staging-schema-ovb_stage)). It does not get
+   superuser, the ownership of a table of `public` (Odoo owns the tables, so DDL on
+   them fails), `TRUNCATE` on a table of `public` or `CREATE` in `public`. The
+   command drops the role `oracle_view_ro` of an earlier
    bundle, after it ends its sessions and removes its rights in `perodua_oracle2`
    and `perodua_oracle`. To run it again is safe: it sets the same verifier and
    grants.
@@ -2152,7 +2155,8 @@ Do the steps in this order.
 
    | Part | Expected |
    | --- | --- |
-   | `== Rights of oracle_view_rp` | Each line starts with `OK`, also `no right on a database other than perodua_oracle2`. A `FAIL` line stops the command. |
+   | `== Rights of oracle_view_rp` | Each line starts with `OK`, also `no right on a database other than perodua_oracle2` and the three lines of the schema `ovb_stage`. A `FAIL` line stops the command. |
+   | `== Staging tables of Copy to RP` | The tables and materialized views in `ovb_stage`, each with its size on disk, and the total. `none` on a new role. The list changes nothing. |
    | `== TLS: SHOW ssl` | `ssl = on`. With `off`, see [TLS to the RP database](#tls-to-the-rp-database). |
    | `== Extensions that can write in a Read run` | `none`. With `dblink` or `postgres_fdw` in `perodua_oracle2`, a Read run of the SQL console can write through them. The command changes no right: that is an owner decision. |
    | `== pg_hba.conf check` | `RESULT: OK` (exit status 0). `RESULT: NOT OK` (exit status 3) or `RESULT: CHECK BY HAND` (exit status 4): do step 4. |
@@ -2215,6 +2219,78 @@ Do the steps in this order.
    block.
 
 5. Delete the copy of the verifier file: `rm ~/rp_grey.verifier`.
+
+#### The staging schema ovb_stage
+
+Copy to RP (copy design, section 4.3) writes its staging tables to the schema
+`ovb_stage` of `perodua_oracle2`, not to `public`. A release of the tool without
+Copy to RP does not use the schema, and an empty schema does no harm. `role`
+makes it when it is not there, and on each run gives the same rights again:
+
+```sql
+CREATE SCHEMA IF NOT EXISTS ovb_stage AUTHORIZATION oracle_view_rp;
+REVOKE ALL ON SCHEMA ovb_stage FROM PUBLIC;
+GRANT USAGE, CREATE ON SCHEMA ovb_stage TO oracle_view_rp;
+```
+
+The role owns `ovb_stage` and the tables that it makes there, so it can create,
+fill, empty and drop them. It still has no `CREATE` in `public`, no `TRUNCATE`
+on a table of `public` and no ownership of an Odoo table. `PUBLIC`, and so the
+Odoo role, has no right on `ovb_stage`. The rights check has three lines for the
+schema: `owns one schema, ovb_stage`, `USAGE and CREATE on the schema ovb_stage`
+and `no right of PUBLIC on the schema ovb_stage`. The line `owns nothing outside
+the schema ovb_stage` fails for an object of the role in another schema (a
+table, a view, a sequence, a function or another schema), also for a temporary
+table of an open session of the tool. A role made by an earlier release of this
+script has no `ovb_stage`, so `role --check` shows three `FAIL` lines: run
+`role --verifier-file` again. When a schema `ovb_stage` of another owner is
+already there, `role` changes nothing in it and gives no right there, and the
+line `owns one schema, ovb_stage` fails with the name of its owner: find out who
+made it before you change its owner or drop it, then run `role` again.
+
+**Disk use.** The staging tables are normal tables of `perodua_oracle2` on the
+DB server: they use its disk, its WAL and the space of each backup of the
+database (`pg_dump` of `perodua_oracle2` holds `ovb_stage` too). `role` and
+`role --check` list them with their sizes (`== Staging tables of Copy to RP`).
+`DELETE` of the rows does not give the disk back; `DROP TABLE` (or `TRUNCATE` of
+a staging table) does. To see the tables:
+
+```bash
+sudo bash oracle-view.sh role --check
+```
+
+To drop a staging table that nobody needs any more (`NAME` from that list):
+
+```bash
+sudo -u postgres psql -X -p 5432 -d perodua_oracle2 -c 'DROP TABLE ovb_stage."NAME"'
+```
+
+To drop all the staging tables and keep the schema:
+
+```bash
+sudo -u postgres psql -X -p 5432 -d perodua_oracle2 <<'SQL'
+SELECT format('DROP TABLE IF EXISTS ovb_stage.%I CASCADE', relname) FROM pg_class
+ WHERE relnamespace = 'ovb_stage'::regnamespace AND relkind IN ('r', 'p') \gexec
+SQL
+```
+
+A Write run of the SQL console of the tool can drop them too, as the role. A
+dropped table cannot come back: to keep one, copy it first, for example
+`sudo -u postgres pg_dump -p 5432 -d perodua_oracle2 -n ovb_stage -Fc -f /var/tmp/ovb_stage.dump`.
+
+`drop-role` drops the schema `ovb_stage` with its staging tables and their data.
+When `ovb_stage` holds tables (a materialized view counts as a table), it lists
+them and stops before any change (exit status 1): run it again with
+`--drop-staging` when the tables can go. Without tables it drops the empty
+schema. A schema `ovb_stage` of another owner stays; `drop-role` drops only the
+tables of the role in it.
+
+`drop-role` drops the schema with `CASCADE`, so it would also drop an object
+outside `ovb_stage` that depends on an object in it, for example a view or a
+foreign key in `public` on a staging table. When there is such an object,
+`drop-role` names it and stops before any change (exit status 1), also with
+`--drop-staging`. Remove the dependency first (for example `DROP VIEW`, or
+`ALTER TABLE ... DROP CONSTRAINT`), then run `drop-role` again.
 
 #### TLS to the RP database
 
@@ -2407,6 +2483,10 @@ A release that changes the database of the image (as `grey-v1.0.2` did, to
 2. Add the new `pg_hba.conf` line that `role` prints, then reload
    ([step 4](#1-the-rp-role-db-server)).
 
+A release of this repository that adds a right to the role (as the schema
+`ovb_stage` of Copy to RP) needs step 1 too: before it, `role --check` shows a
+`FAIL` line for each new right.
+
 Without them the new image cannot connect and does not become healthy: then the
 last release runs again. After step 1 that release cannot connect, because
 `role` removed the rights of the role on its old database. To go back to a
@@ -2467,12 +2547,13 @@ Do the steps in this order.
 | Port 80 rules (App server), if you added them | `sudo ufw delete allow from WAF_1 to any port 80 proto tcp`, the same for `WAF_2`, `sudo ufw delete deny 80/tcp`. When step 4 turned ufw on: `sudo ufw disable` and the default of before (`/root/ufw-status.before-oracle-view`) |
 | Route (App server) | `sudo cp -p /etc/perodua-https/routes.conf.before-oracle-view /etc/perodua-https/routes.conf`, then `sudo bash https.sh apply` |
 | Container (App server) | `sudo bash oracle-view.sh uninstall`, then type `oracle-view`. It removes the container, `initial-login.txt` and the files `install` made. The state volume, the users file and the image stay; `install` uses them again. `--purge` also removes the state volume (the mapping edits and the SQL audit), the users file and every local image of `perodua-deploy.novutal.com/oracle-view`. It lists what it removed. When a step fails, it also lists what it did not remove, keeps the deployment and exits 1: correct the cause, then run it again |
-| Role (DB server) | `sudo bash oracle-view.sh drop-role`, then type `oracle_view_rp`. It ends the sessions of the role, removes its rights in `perodua_oracle2` and in `perodua_oracle` (when it exists, so that an old grant cannot make the drop fail) and drops it (also `oracle_view_ro` of an earlier bundle). It skips a `perodua_oracle` that does not accept connections. Rows that the SQL console changed stay changed |
+| Role (DB server) | `sudo bash oracle-view.sh drop-role`, then type `oracle_view_rp`. It ends the sessions of the role, removes its rights in `perodua_oracle2` and in `perodua_oracle` (when it exists, so that an old grant cannot make the drop fail) and drops it (also `oracle_view_ro` of an earlier bundle). It skips a `perodua_oracle` that does not accept connections. It also drops the schema `ovb_stage` with the staging tables of Copy to RP and their data: when `ovb_stage` holds tables, it lists them and stops before any change; run it again with `--drop-staging` when they can go. It also stops when an object outside `ovb_stage` depends on an object in it ([The staging schema ovb_stage](#the-staging-schema-ovb_stage)). Rows that the SQL console changed stay changed |
 | `pg_hba.conf` line (DB server), if you added one | `sudo cp -p HBA_FILE.before-oracle-view HBA_FILE`, then `sudo -u postgres psql -X -d postgres -c 'SELECT pg_reload_conf()'` |
 | Registry | Delete the tag `oracle-view:grey-v1.0.2` and the tags of earlier releases when nobody needs them: each image holds the secrets |
 
 `uninstall` and `drop-role` without a terminal need `--confirm oracle-view` and
-`--confirm oracle_view_rp`.
+`--confirm oracle_view_rp`. `--drop-staging` is not a confirmation: `drop-role`
+needs both when `ovb_stage` holds tables.
 
 ### Risks of the owner decisions
 
