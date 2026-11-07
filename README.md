@@ -2061,7 +2061,7 @@ first puts the previous settings and secrets back.
 The Oracle Field Browser is a web tool for the integration work. It shows the
 Oracle EBS objects, the RP database (`perodua_oracle` on the DB server) and the
 RP-to-Oracle mapping, and it has a SQL console. `oracle-view.sh` runs the pinned
-image `perodua-deploy.novutal.com/oracle-view:grey-v1.0.0` with Docker Compose on
+image `perodua-deploy.novutal.com/oracle-view:grey-v1.0.1` with Docker Compose on
 the App server, and on the DB server it makes the role that the tool signs in
 with. The tool is at `https://stgiss.perodua.com.my/dev/oracle-view/` through a
 route of [https.sh](#https). Every page and every API call needs a login.
@@ -2071,7 +2071,7 @@ route of [https.sh](#https). Every page and every API call needs a login.
 | Container `oracle-view` on `127.0.0.1:8797` only, run from `/opt/perodua-oracle-view` | App server |
 | Route `stgiss.perodua.com.my /dev/oracle-view/ 8797 strip,http` | App server, `/etc/perodua-https/routes.conf` |
 | Role `oracle_view_rp` on the database `perodua_oracle`: read and write on the tables, read-only by default | DB server (PostgreSQL 16) |
-| Image `perodua-deploy.novutal.com/oracle-view:grey-v1.0.0`, pulled by digest | Private registry |
+| Image `perodua-deploy.novutal.com/oracle-view:grey-v1.0.1`, pulled by digest | Private registry |
 
 The image holds the Oracle settings file and the password of the role
 `oracle_view_rp` (owner decision of 2026-11-06). This repository holds no secret of
@@ -2204,7 +2204,7 @@ When asked, enter the registry username and password for
   container again: the tool reads the users file at its start only;
 - checks `http://127.0.0.1:8797/healthz` on the server.
 
-Wait for `Installed: oracle-view-grey-v1.0.0`. Then read the first passwords:
+Wait for `Installed: oracle-view-grey-v1.0.1`. Then read the first passwords:
 
 ```bash
 sudo cat /opt/perodua-oracle-view/initial-login.txt
@@ -2371,7 +2371,7 @@ Do the steps in this order.
 | Container (App server) | `sudo bash oracle-view.sh uninstall`, then type `oracle-view`. It removes the container, `initial-login.txt` and the files `install` made. The state volume, the users file and the image stay; `install` uses them again. `--purge` also removes the state volume (the mapping edits and the SQL audit), the users file and every local image of `perodua-deploy.novutal.com/oracle-view` |
 | Role (DB server) | `sudo bash oracle-view.sh drop-role`, then type `oracle_view_rp`. It ends the sessions of the role and drops it with its grants (also `oracle_view_ro` of an earlier bundle). Rows that the SQL console changed stay changed |
 | `pg_hba.conf` line (DB server), if you added one | `sudo cp -p HBA_FILE.before-oracle-view HBA_FILE`, then `sudo -u postgres psql -X -d postgres -c 'SELECT pg_reload_conf()'` |
-| Registry | Delete the tag `oracle-view:grey-v1.0.0` when nobody needs it |
+| Registry | Delete the tag `oracle-view:grey-v1.0.1` and the tags of earlier releases when nobody needs them: each image holds the secrets |
 
 `uninstall` and `drop-role` without a terminal need `--confirm oracle-view` and
 `--confirm oracle_view_rp`.

@@ -12,9 +12,9 @@ umask 077
 unset PGPASSWORD PGPASSFILE PGHOST PGHOSTADDR PGPORT PGUSER PGDATABASE PGOPTIONS \
     PGSERVICE PGSERVICEFILE PGSSLMODE || true
 
-RELEASE=oracle-view-grey-v1.0.0
+RELEASE=oracle-view-grey-v1.0.1
 # Published to the private registry only: every account that can pull it can read the secrets in it.
-IMAGE=perodua-deploy.novutal.com/oracle-view:grey-v1.0.0@sha256:714762ca26b78359fe53e114af73ef3905a8fb2b41b466d90287a85db9169ced
+IMAGE=perodua-deploy.novutal.com/oracle-view:grey-v1.0.1@sha256:8e82b47fd7050919f9f7fbd29642e20e64dda0ffa86ac45e811795249251e980
 REGISTRY=${IMAGE%%/*}
 REPOSITORY=${IMAGE%%[:@]*}
 IMAGE_UID=10001           # the image's unprivileged user: it reads the users file
@@ -45,7 +45,7 @@ STAMP=.users.sha256       # the users file the container read at its last start
 INITIAL='initial-login.txt'   # the first passwords, root only, never printed
 
 usage() {
-    cat <<'HELP'
+    cat <<HELP
 Usage, on the App server:
        sudo bash oracle-view.sh install [--config PATH] [--non-interactive] [--dir PATH]
        sudo bash oracle-view.sh status [--dir PATH]
@@ -55,7 +55,7 @@ Usage, on the DB server:
        sudo bash oracle-view.sh role --check [--app-ip ADDRESS] [--pg-port PORT]
        sudo bash oracle-view.sh drop-role [--confirm oracle_view_rp] [--pg-port PORT]
 
-install    Pulls the pinned image (oracle-view-grey-v1.0.0) from the private registry
+install    Pulls the pinned image ($RELEASE) from the private registry
            and runs it from --dir (default /opt/perodua-oracle-view, a new or empty
            directory the first time) with Docker Compose, on 127.0.0.1:8797 only.
            It makes the users perodua (admin) and pm (editor) when the users file
