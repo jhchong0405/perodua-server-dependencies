@@ -25,6 +25,7 @@ import tarfile
 import time
 import unittest
 
+from test_deploy_app import service_command
 from test_deploy_app_upgrade import RELEASE, REVISION, SCRIPT, SCRIPTS, UpgradeHarness
 
 
@@ -169,6 +170,7 @@ class ModuleUpgradeTests(ModuleUpgradeFixture, unittest.TestCase):
             self.assertIn(part, command)
         self.assertNotIn(' -i ', command)
         self.assertNotIn('-i', action)
+        self.assertNotIn('--limit-time-real-cron', command)  # only the App's cron thread gets 900 s
         [backup] = self.backups()
         self.assertEqual((backup / 'module-upgrade.log').read_text(), 'fake odoo -u\n')
         self.assertTrue((backup / 'uat-guard.json').is_file())
@@ -762,6 +764,10 @@ class DemoModuleUpgradeTests(ModuleUpgradeFixture, unittest.TestCase):
                          self.identity.replace(f'release={GREY}', f'release={DEMO_RELEASE}')
                                       .replace(f'revision={GREY_REVISION}', f'revision={DEMO_REVISION}'))
         self.assertIn(f'image: {DEMO_ODOO_IMAGE}', (self.deploy_dir / 'compose.yml').read_text())
+        # The 17:00 Back Order POs run of grey needs a cron pass of up to 900 s.
+        self.assertEqual(service_command((self.deploy_dir / 'compose.yml').read_text(), 'odoo'),
+                         ['odoo', '-c', '/etc/odoo/odoo.conf', '-d', 'perodua', '--proxy-mode', '--workers=0',
+                          '--limit-time-real-cron=900'])
         self.assertIn(f'Deployment verified: {DEMO_RELEASE} ({DEMO_REVISION})', result.stdout)
         self.assertIn('Held mail: 2 that the module upgrade queued, 1 that waited in the queue before the upgrade.', result.stdout)
         self.assertIn('Review the held mail: README.md, "Upgrade the demo-uiux line", lists it with psql on the DB server',

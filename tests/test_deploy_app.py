@@ -62,6 +62,18 @@ def service_environment(compose, service):
     return environment
 
 
+def service_command(compose, service):
+    """The command of one service in the generated compose.yml, as a list."""
+    lines = compose.splitlines()
+    start = lines.index(f"  {service}:")
+    for line in lines[start + 1:]:
+        if line.strip() and len(line) - len(line.lstrip(" ")) <= 2:
+            break  # the next service, or the next top-level key
+        if line.startswith("    command: "):
+            return json.loads(line.partition(": ")[2])
+    raise AssertionError(f"compose.yml has no command for {service}")
+
+
 class DeploymentSafetyTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="perodua-script-test-")
@@ -1091,6 +1103,18 @@ sys.exit(93)
                 self.assertFalse((self.deploy_dir / "secrets" / "smtp_password").exists())
                 written.append((saved, compose))
         self.assertEqual(written[0], written[1])
+
+    def test_the_odoo_command_gives_the_cron_thread_900_seconds(self):
+        # Odoo's default for a cron pass is limit_time_real (120 s); a longer
+        # pass reloads the threaded server. The 17:00 Back Order POs run needs
+        # about 240 s on grey (owner decision of 2026-11-08).
+        self.pulls_succeed()
+        self.write_config()
+        result = self.run_script("--non-interactive")
+        self.assertIn("Fixture stopped before", result.stdout)
+        command = service_command((self.deploy_dir / "compose.yml").read_text(), "odoo")
+        self.assertEqual(command, ["odoo", "-c", "/etc/odoo/odoo.conf", "-d", "perodua", "--proxy-mode",
+                                   "--workers=0", "--limit-time-real-cron=900"])
 
     def test_clearing_the_mail_settings_removes_them_and_the_saved_password(self):
         script = self.mail_copy()

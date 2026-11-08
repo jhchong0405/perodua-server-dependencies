@@ -541,6 +541,50 @@ A missing database is created by the App only if `DB_USER` has `CREATEDB`. With
 the least-privileged role from `deploy-db.sh`, the App stops and asks for the
 database to be created on the DB server with `DB_MODE=empty` first.
 
+### The Odoo command
+
+Each deployment, on both lines, writes this command for the `odoo` service of
+`compose.yml`:
+
+```yaml
+command: ["odoo", "-c", "/etc/odoo/odoo.conf", "-d", "DB_NAME", "--proxy-mode", "--workers=0", "--limit-time-real-cron=900"]
+```
+
+- `--workers=0`: one threaded Odoo server, with its cron thread inside it.
+- `--limit-time-real-cron=900`: one pass of the cron thread on the database
+  may run 900 seconds. Without it, Odoo 19 uses `limit_time_real` (120
+  seconds), and in a threaded server a cron pass that runs longer reloads the
+  whole server (`odoo/service/server.py`), and the pass does not finish. The
+  17:00 Back Order POs run confirms up to about 2,000 PO lines in one
+  transaction: 52 seconds on a Mac, about 240 seconds on grey. The run uses at most a third of
+  the limit in one pass, so 900 gives it 300 seconds. There is no cap on the
+  number of PO lines (owner decision of 2026-11-08).
+- The image's `odoo.conf` sets only `workers = 0`: the kit sets no other
+  limit, so the other limits of Odoo stay at their defaults.
+
+The run of `-u` of a module upgrade has no cron thread
+(`--max-cron-threads=0`) and does not get the option. A directory on a release
+that this kit version pins (`client-stable-uiux-v1.2.2` or
+`demo-uiux-grey-v0.56.1`) gets the option at its next `deploy-app.sh` run from
+this kit version: the run writes the new `compose.yml` and recreates the
+containers. A directory on another release keeps its old command, because
+this kit version does not deploy that release. On grey, which runs a release
+rolled by hand (`demo-uiux-grey-v0.58.1-oracle2` on 8 November 2026), add the
+option one time:
+
+1. Keep a copy: `sudo cp -p /opt/perodua-app-demo/compose.yml /opt/perodua-app-demo/compose.yml.before-cron-limit`.
+2. Add `"--limit-time-real-cron=900"` at the end of the `command:` list of the
+   `odoo` service in `/opt/perodua-app-demo/compose.yml`, after
+   `"--workers=0"`.
+3. Recreate the Odoo container, at a time when no cron runs (not near 17:00):
+   `sudo docker compose --project-name perodua-demo-uiux --file /opt/perodua-app-demo/compose.yml up -d --force-recreate odoo`.
+4. Check the running command:
+   `sudo docker inspect --format '{{json .Config.Cmd}}' "$(sudo docker compose --project-name perodua-demo-uiux --file /opt/perodua-app-demo/compose.yml ps -q odoo)"`
+   ends with `"--limit-time-real-cron=900"`.
+
+Step 10 of the grey steps in README.md, "Upgrade the demo-uiux line", gives
+the same step with the exact commands and the way back.
+
 ## Stop, start and reset (`service.sh`)
 
 `service.sh` stops, starts and restarts a deployment without deleting anything,
@@ -1991,7 +2035,7 @@ new database of the `demo-uiux` profile:
 | `perodua.image_modhash` = the md5 of the manifests of the profile's modules (without `perodua_client_stable`) | `preflight.py stamp`: the fingerprint of the kit, the md5 of every `perodua_*` manifest of the image. The two values differ: start the image only through this kit. |
 | `perodua.runtime_profile` = `demo-uiux` | `preflight.py stamp`: `demo-uiux`, after the checks below |
 | `report.url` = `http://127.0.0.1:8069` | `preflight.py public-urls`, with `web.base.url` from `PUBLIC_BASE_URL` |
-| `--proxy-mode` when `PERODUA_PROXY_MODE=1` | `--proxy-mode` in the command of `compose.yml` |
+| `--proxy-mode` when `PERODUA_PROXY_MODE=1` | `--proxy-mode` in the command of `compose.yml`, with `--limit-time-real-cron=900` ([The Odoo command](#the-odoo-command)) |
 | A later start with another image installs each baked module that is missing, then upgrades all | never: `--upgrade` runs `-u` of the installed modules only |
 
 Between the install and the stamp, the database stays `SETUP_PENDING`:
