@@ -728,6 +728,50 @@ On grey (v0.55.1, with `IMAGE_MAIL=on` and `MAIL_REDIRECT_TO=off`), in a
 
    It shows `17:00 Job Order Inbound run active: True`. Each later module
    upgrade keeps it on: this step is needed only once.
+10. Give the cron thread 900 seconds, one time (owner decision of
+    8 November 2026, [The Odoo command](docs/DEPLOYMENT.md#the-odoo-command)).
+    A `deploy-app.sh` run of this kit version writes
+    `"--limit-time-real-cron=900"` into the Odoo command of `compose.yml` only
+    in a directory on a release that this kit pins (`client-stable-uiux-v1.2.2`
+    or `demo-uiux-grey-v0.56.1`). A grey directory on another release (for
+    example a release rolled by hand, such as
+    `demo-uiux-grey-v0.58.1-oracle2`) keeps its old command: without this step,
+    a cron pass that runs longer than 120 seconds (the 17:00 Back Order POs
+    run) reloads the whole Odoo server. Do this step at a time when no cron
+    runs (not near 17:00). The App restarts, so it is down for about a minute.
+
+    ```bash
+    sudo grep -n -- '"--workers=0"' /opt/perodua-app-demo/compose.yml
+    ```
+
+    It shows one line, the `command:` of the `odoo` service. When the line
+    has `"--limit-time-real-cron=900"` already, stop here: nothing is needed.
+    Otherwise, keep a copy and add the option:
+
+    ```bash
+    sudo cp -p /opt/perodua-app-demo/compose.yml /opt/perodua-app-demo/compose.yml.before-cron-limit
+    sudo sed -i 's/"--workers=0"\]$/"--workers=0", "--limit-time-real-cron=900"]/' /opt/perodua-app-demo/compose.yml
+    sudo grep -c -- '"--workers=0", "--limit-time-real-cron=900"]' /opt/perodua-app-demo/compose.yml
+    ```
+
+    The last command shows `1`. Then recreate the Odoo container and check
+    the command that it runs:
+
+    ```bash
+    sudo docker compose --project-name perodua-demo-uiux --file /opt/perodua-app-demo/compose.yml up -d --force-recreate odoo
+    sudo docker inspect --format '{{json .Config.Cmd}}' \
+      "$(sudo docker compose --project-name perodua-demo-uiux --file /opt/perodua-app-demo/compose.yml ps -q odoo)"
+    ```
+
+    The last command shows the list of the command with
+    `"--limit-time-real-cron=900"` at its end, and
+    `sudo docker compose --project-name perodua-demo-uiux --file /opt/perodua-app-demo/compose.yml ps odoo`
+    shows `(healthy)` after the start. The way back: copy
+    `compose.yml.before-cron-limit` back to `compose.yml` and run the same
+    `up -d --force-recreate odoo`. A later `deploy-app.sh` run of a kit
+    version that pins the grey release writes the option itself. A roll by
+    hand that writes a new `compose.yml` must keep the option, or do this
+    step again.
 
 ## Repository layout
 

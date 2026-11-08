@@ -563,10 +563,27 @@ command: ["odoo", "-c", "/etc/odoo/odoo.conf", "-d", "DB_NAME", "--proxy-mode", 
   limit, so the other limits of Odoo stay at their defaults.
 
 The run of `-u` of a module upgrade has no cron thread
-(`--max-cron-threads=0`) and does not get the option. A directory that an
-earlier kit version deployed gets the option at its next `deploy-app.sh` run
-from this kit version: the run writes the new `compose.yml` and recreates the
-containers.
+(`--max-cron-threads=0`) and does not get the option. A directory on a release
+that this kit version pins (`client-stable-uiux-v1.2.2` or
+`demo-uiux-grey-v0.56.1`) gets the option at its next `deploy-app.sh` run from
+this kit version: the run writes the new `compose.yml` and recreates the
+containers. A directory on another release keeps its old command, because
+this kit version does not deploy that release. On grey, which runs a release
+rolled by hand (`demo-uiux-grey-v0.58.1-oracle2` on 8 November 2026), add the
+option one time:
+
+1. Keep a copy: `sudo cp -p /opt/perodua-app-demo/compose.yml /opt/perodua-app-demo/compose.yml.before-cron-limit`.
+2. Add `"--limit-time-real-cron=900"` at the end of the `command:` list of the
+   `odoo` service in `/opt/perodua-app-demo/compose.yml`, after
+   `"--workers=0"`.
+3. Recreate the Odoo container, at a time when no cron runs (not near 17:00):
+   `sudo docker compose --project-name perodua-demo-uiux --file /opt/perodua-app-demo/compose.yml up -d --force-recreate odoo`.
+4. Check the running command:
+   `sudo docker inspect --format '{{json .Config.Cmd}}' "$(sudo docker compose --project-name perodua-demo-uiux --file /opt/perodua-app-demo/compose.yml ps -q odoo)"`
+   ends with `"--limit-time-real-cron=900"`.
+
+Step 10 of the grey steps in README.md, "Upgrade the demo-uiux line", gives
+the same step with the exact commands and the way back.
 
 ## Stop, start and reset (`service.sh`)
 

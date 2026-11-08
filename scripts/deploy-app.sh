@@ -2008,7 +2008,8 @@ fi
 # UAT setup. No
 # PERODUA_DEMO_SEED: the image profile gives the sample data and the mock
 # screens, as on the demo line. The client-stable-uiux line gets none of
-# these lines, so its compose.yml stays as earlier kit versions write it.
+# these lines: its compose.yml differs from the one of earlier kit versions
+# only by --limit-time-real-cron=900 in the Odoo command (below).
 line_environment='' line_volumes=''
 if [[ $LINE == demo-uiux ]]; then
     line_environment+=$'\n'"      PERODUA_DEMO_PERSONAS: \"1\""
