@@ -58,6 +58,12 @@ gives the host one private and one public address:
   server with a public address needs a "y" (a configuration file gets a
   warning instead).
 
+The Odoo command. `test_deploy_app.py` checks that the command of the Odoo
+service in `compose.yml` is `odoo -c /etc/odoo/odoo.conf -d DB --proxy-mode
+--workers=0 --limit-time-real-cron=900`: one cron pass may run 900 seconds,
+not Odoo's default of 120 (owner decision of 2026-11-08, for the 17:00 Back
+Order POs run).
+
 The page under a path (`PUBLIC_ROOT`, `ENVIRONMENT_LABEL`, `PUBLIC_BASE_URL`).
 The tests run a copy of `deploy-app.sh` with `PUBLIC_ROOT_SUPPORTED` set to 1
 or 0, as a release that does or does not support it. `test_deploy_app.py`
@@ -276,7 +282,8 @@ only `from`. It checks:
   deployment with `check --accept-pending` and `stamp-upgrade` at the end;
 - the `-u` run: `bash -c`, `--name PROJECT-module-upgrade`, the modules and the
   demo flag as `-e` values, `--max-cron-threads=0`, `--stop-after-init`, the
-  migration log handler, no `-i`, the new compose file, and its log in the
+  migration log handler, no `-i`, no `--limit-time-real-cron` (only the App's
+  cron thread gets 900 seconds), the new compose file, and its log in the
   backup folder; no argument holds the password;
 - the cron and mail lines of `verify-upgrade` come before `up`. Between the
   stop of the App and `verify-upgrade` there are only one-off runs, the
@@ -343,7 +350,8 @@ only `from`. It checks:
   the guard of `-u` with `--line demo-uiux` and `--exclude
   perodua_client_stable`; the names of both releases, the fingerprint and
   the number of modules in the output; the new identity with
-  `line=demo-uiux`, the pinned image, the held mail and the README part that
+  `line=demo-uiux`, the pinned image, the Odoo command with
+  `--limit-time-real-cron=900`, the held mail and the README part that
   lists it. The two mail lines stay in the new `app.env` and in the `app.env`
   of the backup (byte for byte), `compose.yml` has the mail of the image and
   no `SMTP_` value, and the mail hold comes after `-u` and before the App

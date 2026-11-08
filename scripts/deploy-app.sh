@@ -2015,6 +2015,12 @@ if [[ $LINE == demo-uiux ]]; then
     [[ -n $SMTP_HOST || -n $IMAGE_MAIL ]] || line_environment+=$'\n'"      PERODUA_MAIL: \"off\""
     line_volumes=$'\n'"      - ./uat_demo.py:/opt/deploy/uat_demo.py:ro"
 fi
+# --limit-time-real-cron=900: one pass of the cron thread on the database may
+# run 900 seconds. Odoo's default is limit_time_real (120 s), and in this
+# threaded server (--workers=0) a longer pass reloads the whole server. The
+# 17:00 Back Order POs run confirms up to about 2,000 lines in one transaction,
+# about 240 s on grey (owner decision of 2026-11-08). The run of -u below has
+# no cron thread and does not get the option.
 cat > "$TEMP_DIR/compose.yml" <<YAML
 services:
   odoo:
@@ -2030,7 +2036,7 @@ services:
       INIT_MODULES: "$INIT_MODULES"
       RESTORED_MODULES: "$RESTORED_MODULES"
       EXCLUDED_MODULE: "$EXCLUDED_MODULE"$line_environment$mail_environment
-    command: ["odoo", "-c", "/etc/odoo/odoo.conf", "-d", "$DB_NAME", "--proxy-mode", "--workers=0"]
+    command: ["odoo", "-c", "/etc/odoo/odoo.conf", "-d", "$DB_NAME", "--proxy-mode", "--workers=0", "--limit-time-real-cron=900"]
     secrets: [$odoo_secrets]
     volumes:
       - filestore:/var/lib/odoo
