@@ -7,18 +7,28 @@ umask 077
 export LC_ALL=C
 unset PGPASSWORD PGPASSFILE PGHOST PGHOSTADDR PGPORT PGUSER PGDATABASE PGOPTIONS \
     PGSERVICE PGSERVICEFILE PGSSLMODE || true
-unset DB_PASSWORD VERIFIER confirmation escaped || true
+unset DB_PASSWORD VERIFIER confirmation escaped cloud_password || true
 
 usage() {
     cat <<'EOF'
 Usage: sudo bash deploy-db.sh [--config FILE] [--password-file FILE]
+                               [--cloud-password-file FILE] [--non-interactive]
+       sudo bash deploy-db.sh --app-ip ADDRESS[/PREFIX] --listen-ip ADDRESS
+                               [--allow-public-listen] [--password-file FILE] ...
+       sudo bash deploy-db.sh --app-here [--password-file FILE] ...
        bash deploy-db.sh --config FILE --check-config
 
 Default configuration: deploy.conf next to this script. If it does not exist,
 the script asks on the terminal for this server's internal IP and the App
 server's IP, and saves the answers there as a fresh UAT (DB_MODE=empty) setup.
+--app-ip, --listen-ip and --allow-public-listen (the App on another server) or
+--app-here (the App on this server) give these answers instead: nothing is
+asked, and an answer that cannot be used stops the run.
 Passwords are prompted on the terminal. --password-file accepts a root-owned
 regular file with no group/other permissions (for controlled automation).
+--cloud-password-file is the same for the password of DOWNLOAD_USER.
+--non-interactive, or KIT_NON_INTERACTIVE=1 in the environment, never asks:
+a value that no option or setting gives stops the run before any change.
 Requires Ubuntu 24.04, PostgreSQL 16 already installed, python3, curl and CA
 certificates. Local BACKUP_FILE deployments do not require curl.
 DB_MODE=restore (default): only PostgreSQL custom-format archives (pg_dump -Fc)
@@ -34,27 +44,73 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 CONFIG="$SCRIPT_DIR/deploy.conf"
 CONFIG_GIVEN=0
 PASSWORD_FILE=''
+CLOUD_PASSWORD_FILE=''
 CHECK_ONLY=0
+NON_INTERACTIVE=0
+# The answers of the guided setup as options: the App server's address, or the
+# App on this server, this server's internal IP and a public one accepted.
+APP_IP='' APP_HERE=0 LISTEN_IP='' ALLOW_PUBLIC=0 GUIDED=0
 while (($#)); do
     case "$1" in
-        --config|--password-file)
+        --config|--password-file|--cloud-password-file|--app-ip|--listen-ip)
             (($# >= 2)) || die "Missing value for $1"
-            if [[ $1 == --config ]]; then CONFIG=$2; CONFIG_GIVEN=1; else PASSWORD_FILE=$2; fi
+            case $1 in
+                --config) CONFIG=$2; CONFIG_GIVEN=1 ;;
+                --password-file) PASSWORD_FILE=$2 ;;
+                --cloud-password-file) CLOUD_PASSWORD_FILE=$2 ;;
+                --app-ip) APP_IP=$2; GUIDED=1; [[ -n $APP_IP ]] || die '--app-ip needs the IPv4 address of the App server.' ;;
+                --listen-ip) LISTEN_IP=$2; [[ -n $LISTEN_IP ]] || die "--listen-ip needs this server's internal IP." ;;
+            esac
             shift 2 ;;
+        --app-here) APP_HERE=1; GUIDED=1; shift ;;
+        --allow-public-listen) ALLOW_PUBLIC=1; shift ;;
         --check-config) CHECK_ONLY=1; shift ;;
+        --non-interactive) NON_INTERACTIVE=1; shift ;;
         --help|-h) usage; exit 0 ;;
         *) usage >&2; die "Unknown argument: $1" ;;
     esac
 done
+# --non-interactive, or KIT_NON_INTERACTIVE=1 in the environment: no question
+# at all (README.md, "Run the kit without a person"). Each answer comes from an
+# option or a setting; a missing one stops the run before it changes anything.
+case ${KIT_NON_INTERACTIVE:-} in
+    ''|0) ;;
+    1) NON_INTERACTIVE=1 ;;
+    *) die 'KIT_NON_INTERACTIVE must be 1 (never ask) or 0 (ask on a terminal).' ;;
+esac
+((NON_INTERACTIVE == 0)) || export KIT_NON_INTERACTIVE=1
+((APP_HERE == 0)) || [[ -z $APP_IP ]] || die 'Give --app-ip (the App on another server) or --app-here (the App on this server), not both.'
+[[ -z $LISTEN_IP && $ALLOW_PUBLIC == 0 ]] || [[ -n $APP_IP ]] \
+    || die '--listen-ip and --allow-public-listen belong to --app-ip: with --app-here, PostgreSQL listens on the address of Docker on this server.'
+if ((GUIDED)) && { ((CONFIG_GIVEN)) || [[ -e $CONFIG || -L $CONFIG ]]; }; then
+    die "--app-ip and --app-here answer the guided setup, which runs only when there is no deploy.conf; $CONFIG is given or exists. Edit it instead. Nothing was changed."
+fi
 command -v python3 >/dev/null || die 'Install python3 (standard library only; no pip packages).'
+
+# The only place that reads an answer from a person: stdin, and only when it is
+# a terminal and the run is not non-interactive. Never /dev/tty, which an agent
+# under ssh -t still has. $3 says how to give the answer without a person.
+read_terminal() {  # [-s hidden] [-k keep spaces] VAR PROMPT HOW
+    local read_options=() read_ifs=$' \t\n'
+    while [[ $1 == -[sk] ]]; do
+        if [[ $1 == -s ]]; then read_options+=(-s); else read_ifs=''; fi
+        shift
+    done
+    ((NON_INTERACTIVE == 0)) && [[ -t 0 ]] || die "$3"
+    IFS=$read_ifs read -r "${read_options[@]}" -p "$2" "$1"
+}
 
 # Guided setup. With no deploy.conf, ask on the terminal for what a fresh UAT
 # system needs, asking again whenever an answer cannot be used, and save it as
 # deploy.conf; everything below reads that file exactly like a hand-written one.
 # An explicit --config is not guided. The App runs on another server or, in
 # Docker, on this one.
-ask() { IFS= read -r -p "$1" ANSWER </dev/tty || die 'Input cancelled.'; ANSWER=${ANSWER//[[:space:]]/}; }
-say() { printf '%s\n' "$@" >/dev/tty; }
+ask() {
+    read_terminal -k ANSWER "$1" 'The guided setup needs a terminal: pass --app-ip and --listen-ip, or --app-here, or write deploy.conf.' \
+        || die 'Input cancelled.'
+    ANSWER=${ANSWER//[[:space:]]/}
+}
+say() { printf '%s\n' "$@" >&2; }
 password_ok() { [[ ${#1} -ge 12 && ${#1} -le 1024 && $1 != *[!\ -\~]* ]]; }
 is_public_ipv4() {
     python3 - "$1" <<'PY' 2>/dev/null
@@ -120,9 +176,35 @@ one_server() {  # sets listen and app for an App on this server, or says why it 
     listen=$bridge
     app=$(docker_networks)
 }
+guided_answers() {  # the answers of the options: sets listen, app and together, or stops
+    if ((APP_HERE)); then
+        one_server || die 'Nothing was saved.'
+        together=1
+        return
+    fi
+    listen=$LISTEN_IP
+    [[ -n $listen ]] \
+        || die "--app-ip needs --listen-ip, the internal IP of this server that the App server connects to (the addresses of this server: ${choices[*]:-none found}). Nothing was saved."
+    [[ " ${gateways[*]} " != *" $listen "* ]] \
+        || die "--listen-ip $listen is a Docker network address that only this server reaches; the App server cannot connect to it. Nothing was saved."
+    is_local_ipv4 "$listen" || die "--listen-ip $listen is not an address of this server. Nothing was saved."
+    if is_public_ipv4 "$listen" && ((ALLOW_PUBLIC == 0)); then
+        die "--listen-ip $listen is a public internet address: PostgreSQL would accept connections on it from anywhere, and only the App server could log in. Give a private network address, or add --allow-public-listen to use it anyway. Nothing was saved."
+    fi
+    app=$APP_IP
+    [[ $app == */* ]] || app+=/32
+    address=${app%/32}
+    if [[ $address == localhost || $address == 127.* ]] || { [[ $app == */32 ]] && is_local_ipv4 "$address"; }; then
+        die "--app-ip $address is this server: for the App on this server too, pass --app-here instead. Nothing was saved."
+    fi
+    is_app_network "$app" || die "--app-ip must be the IPv4 address (or network) that the App server connects from. Nothing was saved."
+}
 guided_setup() {
     local port listen app address default together choices=() private=() gateways=()
-    { : </dev/tty; } 2>/dev/null || die "No configuration at $CONFIG. Copy deploy.conf.example to deploy.conf and edit it, or run on a terminal to be guided."
+    if ((GUIDED == 0)); then
+        ((NON_INTERACTIVE == 0)) && [[ -t 0 ]] \
+            || die "No configuration at $CONFIG. Copy deploy.conf.example to deploy.conf and edit it, or pass --app-ip ADDRESS --listen-ip ADDRESS (the App on another server) or --app-here (the App on this server) for a fresh UAT system, or run on a terminal to be guided."
+    fi
     port=$(pg_conftool 16 main show port 2>/dev/null | awk '{print $NF}') || true
     [[ $port =~ ^[1-9][0-9]{0,4}$ ]] || die 'PostgreSQL 16 is not installed yet. Run: sudo bash install-dependencies.sh --role db'
     # One line per network: read every word, not just the first line.
@@ -134,9 +216,14 @@ guided_setup() {
         is_public_ipv4 "$address" || private+=("$address")
     done
     default=${private[0]:-${choices[0]:-}}
-    say 'No deploy.conf found. Your answers will be saved there.' '' \
+    if ((GUIDED)); then
+        listen='' app='' together=0
+        guided_answers
+        say "No deploy.conf found. The answers of the options will be saved there." ''
+    fi
+    ((GUIDED)) || say 'No deploy.conf found. Your answers will be saved there.' '' \
         '  1) Fresh UAT system (empty database)' '  2) Restore a database backup' ''
-    while :; do
+    while ((GUIDED == 0)); do
         ask 'What do you want to set up? [1]: '
         case ${ANSWER:-1} in
             1) break ;;
@@ -144,7 +231,7 @@ guided_setup() {
             *) say 'Enter 1 or 2.' ;;
         esac
     done
-    while :; do
+    while ((GUIDED == 0)); do
         listen='' app='' together=0
         say '' '  1) The App runs on another server' '  2) The App runs on this server too' ''
         while :; do
@@ -190,23 +277,27 @@ guided_setup() {
                 break
             fi
         done
-        say '' "Fresh UAT database perodua for user odoo on PostgreSQL port $port."
-        if ((together)); then
-            say "The App runs on this server: listen on $listen, Docker's address here, which only this server and its containers reach," \
-                "and accept connections only from Docker's networks ($app). PostgreSQL will start after Docker."
-        else
-            say "Listen on $listen and accept connections only from $app."
-        fi
+        summary
         ask "Save these settings to $CONFIG and continue? [Y/n]: "
         [[ ${ANSWER:-y} != [Yy]* ]] || break
         say 'Answer again (Ctrl-C stops without saving).'
     done
+    ((GUIDED == 0)) || summary
     {
         printf '# Created by deploy-db.sh from your answers. All settings: deploy.conf.example.\n'
         printf '%s\n' DB_MODE=empty DB_NAME=perodua DB_USER=odoo "PG_PORT=$port" "DB_LISTEN_IP=$listen" "APP_CIDR=$app"
     } > "$CONFIG.new"
     mv -f -- "$CONFIG.new" "$CONFIG"
-    printf 'Saved %s.\n\n' "$CONFIG" >/dev/tty
+    printf 'Saved %s.\n\n' "$CONFIG" >&2
+}
+summary() {  # what the answers set up, before they are saved
+    say '' "Fresh UAT database perodua for user odoo on PostgreSQL port $port."
+    if ((together)); then
+        say "The App runs on this server: listen on $listen, Docker's address here, which only this server and its containers reach," \
+            "and accept connections only from Docker's networks ($app). PostgreSQL will start after Docker."
+    else
+        say "Listen on $listen and accept connections only from $app."
+    fi
 }
 if ((CONFIG_GIVEN == 0)) && [[ ! -e $CONFIG && ! -L $CONFIG ]]; then guided_setup; fi
 
@@ -311,8 +402,17 @@ if [[ -n $BACKUP_FILE ]]; then
     [[ -f $BACKUP_FILE ]] || die 'BACKUP_FILE does not exist or is not a regular file.'
     BACKUP_FILE=$(realpath -- "$BACKUP_FILE")
 fi
+[[ -z $CLOUD_PASSWORD_FILE || -n $DOWNLOAD_USER ]] || die '--cloud-password-file is the password of DOWNLOAD_USER, which the configuration does not set.'
 if ((CHECK_ONLY)); then printf 'Configuration valid. No services or databases changed.\n'; exit 0; fi
 
+# A non-interactive run asks nothing: each password comes from its file.
+if ((NON_INTERACTIVE)); then
+    [[ -n $PASSWORD_FILE ]] \
+        || die "A non-interactive run never asks for the database password of $DB_USER: pass --password-file FILE (root-owned, chmod 600). Nothing was changed."
+    if [[ $DB_MODE == restore && -n $BACKUP_URL && -n $DOWNLOAD_USER && -z $CLOUD_PASSWORD_FILE ]]; then
+        die "A non-interactive run never asks for the cloud download password of $DOWNLOAD_USER: pass --cloud-password-file FILE (root-owned, chmod 600). Nothing was changed."
+    fi
+fi
 [[ $EUID -eq 0 ]] || die 'Run with sudo or as root.'
 # shellcheck source=/dev/null
 source /etc/os-release
@@ -364,7 +464,7 @@ PGCONFIG_BACKUP=''
 PGCONFIG_RESTARTED=0
 cleanup() {
     local rc=$?
-    unset DB_PASSWORD VERIFIER
+    unset DB_PASSWORD VERIFIER cloud_password
     [[ -z ${TMP_DIR:-} ]] || rm -rf -- "$TMP_DIR"
     if ((rc)); then
         if ((NETWORK_DIRTY)); then
@@ -440,21 +540,26 @@ if [[ -n $TARGET_OID ]]; then
 fi
 
 PHASE=credentials
+protected_file() {  # $1 a password file, $2 its option: root-owned, no group/other permissions
+    [[ -f $1 && ! -L $1 && $(stat -c %u "$1") == 0 ]] || die "$2 must be a root-owned regular file, not a symlink."
+    (( (8#$(stat -c %a "$1") & 8#077) == 0 )) || die "$2 must have no group/other permissions (use chmod 600)."
+}
 if [[ -n $PASSWORD_FILE ]]; then
-    [[ -f $PASSWORD_FILE && ! -L $PASSWORD_FILE && $(stat -c %u "$PASSWORD_FILE") == 0 ]] || die 'Password file must be a root-owned regular file, not a symlink.'
-    (( (8#$(stat -c %a "$PASSWORD_FILE") & 8#077) == 0 )) || die 'Password file must have no group/other permissions (use chmod 600).'
+    protected_file "$PASSWORD_FILE" 'Password file'
     DB_PASSWORD=$(cat -- "$PASSWORD_FILE")
 else
-    [[ -r /dev/tty ]] || die 'No terminal available; use --password-file with a protected file.'
+    confirmation=''
     while :; do
-        IFS= read -r -s -p "Database password for $DB_USER (12 or more characters): " DB_PASSWORD </dev/tty || die 'Input cancelled.'
-        printf '\n' >/dev/tty
+        read_terminal -s -k DB_PASSWORD "Database password for $DB_USER (12 or more characters): " \
+            'No terminal available; use --password-file with a protected file.' || die 'Input cancelled.'
+        printf '\n' >&2
         if ! password_ok "$DB_PASSWORD"; then
             printf 'Use 12-1024 characters: English letters, digits, spaces and punctuation only. Please try again.\n' >&2
             continue
         fi
-        IFS= read -r -s -p 'Confirm database password: ' confirmation </dev/tty || die 'Input cancelled.'
-        printf '\n' >/dev/tty
+        read_terminal -s -k confirmation 'Confirm database password: ' \
+            'No terminal available; use --password-file with a protected file.' || die 'Input cancelled.'
+        printf '\n' >&2
         [[ $DB_PASSWORD == "$confirmation" ]] && break
         printf 'The two entries are different. Please try again.\n' >&2
     done
@@ -476,11 +581,26 @@ if (( ! DEPLOYED )) && [[ $DB_MODE == restore ]]; then
     else
         curl_args=(--fail --silent --show-error --proto '=https' --tlsv1.2 --connect-timeout 30 --output "$ARCHIVE" --write-out '%{http_code}')
         if [[ -n $DOWNLOAD_USER ]]; then
-            [[ -r /dev/tty ]] || die 'Authenticated download requires a terminal; use BACKUP_FILE for unattended deployment.'
-            curl_args+=(--user "$DOWNLOAD_USER")
-            log 'Enter the cloud download password when curl prompts.'
+            # curl itself never asks: it would read /dev/tty. The password goes
+            # to curl as a configuration on its stdin, never in its arguments.
+            if [[ -n $CLOUD_PASSWORD_FILE ]]; then
+                protected_file "$CLOUD_PASSWORD_FILE" '--cloud-password-file'
+                cloud_password=$(cat -- "$CLOUD_PASSWORD_FILE")
+            else
+                read_terminal -s -k cloud_password "Cloud download password for user $DOWNLOAD_USER (hidden): " \
+                    'Authenticated download requires a terminal; use --cloud-password-file FILE, or BACKUP_FILE for unattended deployment.' \
+                    || die 'Input cancelled.'
+                printf '\n' >&2
+            fi
+            [[ -n $cloud_password && $cloud_password != *[$'\n\r']* ]] || die 'The cloud download password must be one non-empty line.'
+            escaped="$DOWNLOAD_USER:$cloud_password"
+            unset cloud_password
+            escaped=${escaped//\\/\\\\}; escaped=${escaped//\"/\\\"}
+            code=$(printf 'user = "%s"\n' "$escaped" | curl --disable --config - "${curl_args[@]}" --url "$BACKUP_URL")
+            unset escaped
+        else
+            code=$(curl --disable "${curl_args[@]}" --url "$BACKUP_URL")
         fi
-        code=$(curl --disable "${curl_args[@]}" --url "$BACKUP_URL")
         [[ $code == 200 ]] || die 'Download must return HTTP 200; use a direct URL (redirects are not followed).'
     fi
     [[ $(sha256sum "$ARCHIVE" | cut -d ' ' -f 1) == "$BACKUP_SHA256" ]] || die 'Backup SHA-256 mismatch.'
