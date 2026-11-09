@@ -17,6 +17,10 @@ RELEASE=oracle-view-grey-v1.0.5
 IMAGE=perodua-deploy.novutal.com/oracle-view:grey-v1.0.5@sha256:9d3883e827e77b759a7796ea10fc68daa568cbd361b480d231ec4603a9660946
 REGISTRY=${IMAGE%%/*}
 REPOSITORY=${IMAGE%%[:@]*}
+DIGEST=${IMAGE##*@}
+PINNED=$REPOSITORY@$DIGEST   # finds the pinned image by its digest, whatever its tag (install --no-pull)
+STREAM_TAG=$REPOSITORY:${DIGEST/:/-}   # the tag the Mac streams the pin under: one for each digest, never moved
+PLATFORM=linux/amd64      # the platform of the image and of the App server, for the pull on the Mac
 IMAGE_UID=10001           # the image's unprivileged user: it reads the users file
 PROJECT=oracle-view       # the Compose project, its service and the container name
 VOLUME=oracle-view_oracle-view-state   # mapping edits, SQL audit, login device key
@@ -44,7 +48,7 @@ OVB_MEM_LIMIT=1g OVB_PIDS_LIMIT=256 OVB_CPUS=1.5 OVB_RP_SSLMODE=require
 # default of the image applies (300 s). The image reads both (5-3600).
 OPTIONAL=(OVB_LIVE_TIMEOUT OVB_SQL_TIMEOUT)
 OVB_LIVE_TIMEOUT='' OVB_SQL_TIMEOUT=''
-COMMAND='' CONFIG='' NON_INTERACTIVE=0 CONFIRM='' PURGE=0 VERIFIER_FILE='' CHECK_ONLY=0 DROP_STAGING=0
+COMMAND='' CONFIG='' NON_INTERACTIVE=0 NO_PULL=0 CONFIRM='' PURGE=0 VERIFIER_FILE='' CHECK_ONLY=0 DROP_STAGING=0
 TEMP_DIR='' STAGE='' STAGED=0 AUTH_DIR='' VERIFIER=''
 GIVEN=()                  # the options on the command line, checked against the command
 NEW_USERS=()              # "name (role)" of the users this install made
@@ -59,7 +63,7 @@ INITIAL='initial-login.txt'   # the first passwords, root only, never printed
 usage() {
     cat <<HELP
 Usage, on the App server:
-       sudo bash oracle-view.sh install [--config PATH] [--non-interactive] [--dir PATH]
+       sudo bash oracle-view.sh install [--config PATH] [--non-interactive] [--no-pull] [--dir PATH]
        sudo bash oracle-view.sh status [--dir PATH]
        sudo bash oracle-view.sh uninstall [--purge] [--confirm oracle-view] [--dir PATH]
 Usage, on the DB server:
@@ -78,8 +82,19 @@ install    Pulls the pinned image ($RELEASE) from the private registry
            healthy, the last one that did runs again with its settings.
 --config   Literal KEY=VALUE lines (see oracle-view.env.example), never shell code,
            over the saved settings. Without settings the defaults apply.
-status     The image, the settings, the users (no password hashes), the state
-           volume and the health of the container.
+--no-pull  Or OVB_NO_PULL=1 in the environment (sudo env OVB_NO_PULL=1 bash ...).
+           install never pulls, never logs in to the registry and never asks:
+           the pinned image must already be on this server, streamed from the
+           Mac (bash oracle-view-stream.sh SSH_HOST there). install finds it by
+           its digest reference and checks that its registry digest, and on the
+           containerd image store its ID, is the pinned digest; then it starts
+           the image once, with no network. When it is missing, or does not
+           start, install stops before any change and prints the command for
+           the Mac. On the classic image store an image from docker load has no
+           registry digest: install stops there too.
+status     The image, whether the pinned image is on this server, the settings,
+           the users (no password hashes), the state volume and the health of the
+           container.
 uninstall  Removes the container and the files install made in --dir. The state
            volume (mapping edits, SQL audit), the users file and the image stay;
            --purge removes them too. Type the project name to confirm, or pass it
@@ -269,6 +284,48 @@ pull_image() {   # asks for the registry account only when the registry wants on
     printf 'Pulled pinned image: %s\n' "${IMAGE%@*}"
 }
 
+# install --no-pull uses only an image that is on this server. On the containerd image
+# store the ID of an image is the digest of its manifest, checked against the content, and
+# docker load keeps it; on the classic store a loaded image has no registry digest.
+image_store() {   # containerd, classic, or nothing when docker info does not answer
+    local status
+    status=$(docker info --format '{{json .DriverStatus}}' 2> /dev/null) || return 0
+    if [[ $status == *'["driver-type","io.containerd.snapshotter.v1"]'* ]]; then echo containerd; else echo classic; fi
+}
+pinned_here() {   # $1 store; 0: the pinned image is here, 1: no image has its digest, 2: one does, but not as pinned
+    local facts
+    facts=$(docker image inspect --format '{{.Id}}{{range .RepoDigests}} {{.}}{{end}}' "$PINNED" 2> /dev/null) || return 1
+    [[ " $facts " == *" $PINNED "* ]] || return 2
+    [[ $1 != containerd || ${facts%% *} == "$DIGEST" ]] || return 2
+}
+starts() {   # the pinned image starts a process, with no pull and no network: its layers are complete
+    docker run --rm --pull never --network none --read-only --cap-drop ALL --security-opt no-new-privileges:true \
+        --user "$IMAGE_UID:$IMAGE_UID" --entrypoint python "$IMAGE" -c ''
+}
+check_pinned_image() {   # --no-pull, before any change: no pull, no login and no question
+    local store found=0 out
+    store=$(image_store)
+    [[ -n $store ]] || die 'The Docker engine does not answer docker info. Nothing was changed.'
+    pinned_here "$store" || found=$?
+    case $found in
+        0) out=$(starts 2>&1) \
+               || die "The pinned image on this server does not start: $(printf '%s\n' "$out" | tail -n 1). Remove it (sudo docker image rm $PINNED $STREAM_TAG), stream the pinned image again, then run install again. Nothing was changed."
+           printf 'Pinned image on this server (%s image store), not pulled: %s\n' "$store" "$PINNED"
+           return 0 ;;
+        2) die "The image that $PINNED finds on this server does not have the pinned digest as its registry digest (and, on the containerd image store, as its ID). Remove it (sudo docker image rm $PINNED), stream the pinned image again, then run install again. Nothing was changed." ;;
+    esac
+    [[ $store == containerd ]] || die "The pinned image is not on this server, and --no-pull does not pull it: $PINNED. The Docker engine of this server uses the classic image store: there an image from docker load has no registry digest, so install cannot check it against the pinned digest and does not use it. Switch the engine to the containerd image store first (README.md, Oracle Field Browser, Install from a streamed image), then stream the image. Nothing was changed."
+    # docker save of a digest reference writes no image name, and docker load then keeps a
+    # dangling image that the digest reference does not find; a release tag moves to a later
+    # pin: the Mac saves the stream tag, one for each digest.
+    die "$(printf '%s\n' "The pinned image is not on this server, and --no-pull does not pull it: $PINNED" \
+        "Stream it from the Mac (it has the registry login and the containerd image store). There, SSH_HOST is the ssh name of this server (host name $(uname -n)):" \
+        "  bash scripts/oracle-view-stream.sh SSH_HOST" \
+        'or with Docker alone:' \
+        "  docker pull --platform $PLATFORM $IMAGE && docker tag $PINNED $STREAM_TAG && docker save $STREAM_TAG | ssh SSH_HOST 'sudo -n docker load'" \
+        'Then run this install again. Nothing was changed.')"
+}
+
 # ---------------------------------------------------------------- generations
 # A generation (the users file, the first passwords, oracle-view.env, compose.yml)
 # is written to $STAGE, on the deployment's filesystem, checked there, and
@@ -300,7 +357,7 @@ stage_users() {   # the users file, with each missing first user made by make_us
         password=$(new_password)
         ((${#password} >= 20)) || die 'Could not make a random password'
         # The password reaches make_user.py on stdin only: printf is a shell builtin, so no command line holds it.
-        line=$(printf '%s\n' "$password" | docker run --rm -i --network none --read-only --cap-drop ALL \
+        line=$(printf '%s\n' "$password" | docker run --rm -i --pull never --network none --read-only --cap-drop ALL \
             --security-opt no-new-privileges:true --user "$IMAGE_UID:$IMAGE_UID" --entrypoint python "$IMAGE" \
             /opt/oracle-view/app/deploy/make_user.py --role "$role" --password-stdin "$name") \
             || die "make_user.py of the image failed for $name. Nothing was changed."
@@ -487,13 +544,14 @@ cmd_install() {
     check_settings
     check_engine
     claim_project
+    ((NO_PULL == 0)) || check_pinned_image
     install -d -m 0700 "$DEPLOY_DIR"
     is_ours || printf 'DIR=%s\n' "$DEPLOY_DIR" > "$DEPLOY_DIR/$IDENTITY"
     make_stage
     if [[ -n $(ss -ltnH "sport = :$PORT") ]] && ! owns_port; then
         die "Port $PORT is already used by another program on this server"
     fi
-    pull_image
+    ((NO_PULL)) || pull_image
     stage_users
     stage_files "$IMAGE"
     deploy
@@ -526,7 +584,7 @@ cmd_install() {
 timeout_text() { if [[ -n $1 ]]; then printf '%s s' "$1"; else printf '300 s (the default of the image)'; fi; }
 
 cmd_status() {
-    local image users
+    local image users store found=0
     open_deployment
     image=$(sed -n 's/^    image: //p' "$DEPLOY_DIR/compose.yml")
     if [[ $image == "$IMAGE" ]]; then
@@ -535,6 +593,17 @@ cmd_status() {
         printf 'Release:  not the pinned %s: run install to change to it\n' "$RELEASE"
     fi
     printf 'Image:    %s\n' "$image"
+    store=$(image_store)
+    if [[ -z $store ]]; then
+        printf 'Local:    not checked (docker info does not answer)\n'
+    else
+        pinned_here "$store" || found=$?
+        case $found in
+            0) printf 'Local:    the pinned image is on this server (%s image store)\n' "$store" ;;
+            1) printf 'Local:    the pinned image is not on this server: install pulls it, install --no-pull needs it streamed first\n' ;;
+            *) printf 'Local:    the image that %s finds here does not have the pinned digest\n' "$PINNED" ;;
+        esac
+    fi
     printf 'Listens:  127.0.0.1:%s (this server only)\n' "$PORT"
     printf 'Settings: memory %s, %s processes, %s CPUs, TLS to the RP database %s (%s/oracle-view.env)\n' \
         "$OVB_MEM_LIMIT" "$OVB_PIDS_LIMIT" "$OVB_CPUS" "$OVB_RP_SSLMODE" "$DEPLOY_DIR"
@@ -1666,6 +1735,7 @@ while (($#)); do
             GIVEN+=("$1")
             shift 2 ;;
         --non-interactive) NON_INTERACTIVE=1; GIVEN+=("$1"); shift ;;
+        --no-pull) NO_PULL=1; GIVEN+=("$1"); shift ;;
         --purge) PURGE=1; GIVEN+=("$1"); shift ;;
         --check) CHECK_ONLY=1; GIVEN+=("$1"); shift ;;
         --drop-staging) DROP_STAGING=1; GIVEN+=("$1"); shift ;;
@@ -1679,7 +1749,13 @@ allowed() {   # $@: the options of COMMAND
     done
 }
 case $COMMAND in
-    install) allowed --config --non-interactive --dir ;;
+    install)
+        allowed --config --non-interactive --no-pull --dir
+        case ${OVB_NO_PULL:-} in   # --no-pull for a run that cannot add an option
+            ''|0) ;;
+            1) NO_PULL=1 ;;
+            *) usage_error "OVB_NO_PULL must be 1 or 0: $OVB_NO_PULL" ;;
+        esac ;;
     status) allowed --dir ;;
     uninstall) allowed --purge --confirm --dir ;;
     role)
