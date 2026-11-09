@@ -3541,6 +3541,7 @@ MAC_TAG = ["tag", PINNED, STREAM_TAG]
 MAC_SAVE = ["save", STREAM_TAG]
 MAC_RAW = ["buildx", "imagetools", "inspect", "--raw", PINNED]
 MAC_ENTRIES = ["buildx", "imagetools", "inspect", "--format", ENTRIES, PINNED]
+MAC_REGISTRY_KIND = ["buildx", "imagetools", "inspect", "--format", "{{.Manifest.MediaType}}", PINNED]  # pin not here
 # docker of the Mac: the IDs that the pin and the stream tag name ("" when missing); docker save of the stream tag
 # writes an archive with that name; buildx imagetools inspect gives the index in the registry (its bytes, which
 # FAKE_SHASUM gives the pinned digest, and its entries).
@@ -3586,6 +3587,12 @@ elif args == ["save", STREAM_TAG]:
         err, status = mac["save_error"] + "\n", 1
     else:
         out = f"archive of {STREAM_TAG} -> {mac['tag']}\n"
+elif args == ["buildx", "imagetools", "inspect", "--format", "{{.Manifest.MediaType}}", PINNED]:
+    # The media type of the pin in the registry (the same as on this computer once pulled), with the login of the Mac.
+    if mac["logged_in"]:
+        out = mac["kind"] + "\n"
+    else:
+        err, status = "ERROR: failed to authorize: failed to fetch oauth token: 401 Unauthorized\n", 1
 elif args == ["buildx", "imagetools", "inspect", "--raw", PINNED]:
     out = f"raw index {mac['pinned'] or mac['pull_id']}\n"
 elif args == ["buildx", "imagetools", "inspect", "--format", ENTRIES, PINNED]:
@@ -3765,7 +3772,7 @@ class OracleViewStreamTest(unittest.TestCase):
         result = self.stream("grey")
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         self.assertIn(f"Pulling the pinned image on this computer: {IMAGE}\n", result.stdout)
-        self.assertEqual(self.docker(), [MAC_INFO, MAC_PINNED, MAC_TAGGED, MAC_PULL, MAC_PINNED, MAC_KIND, MAC_TAG,
+        self.assertEqual(self.docker(), [MAC_INFO, MAC_PINNED, MAC_REGISTRY_KIND, MAC_TAGGED, MAC_PULL, MAC_PINNED, MAC_TAG,
                                          MAC_SAVE])
         self.assertEqual(self.calls("ssh")[3]["stdin"], ARCHIVE)
         # A pull that brings another ID stops before the tag and the stream.
@@ -3777,12 +3784,15 @@ class OracleViewStreamTest(unittest.TestCase):
                       f"(ID: {other}). Nothing was streamed.\n", result.stderr)
         self.assertNotIn(MAC_TAG, self.docker())
         self.assertNothingStreamed()
-        # Without the registry login of this computer, the pull fails and nothing reaches the server.
+        # Without the registry login of this computer, the registry gives no media type and nothing reaches the server.
         self.set_state(mac={"pinned": "", "logged_in": False, "pull_id": DIGEST})
         result = self.stream("grey")
         self.assertEqual(result.returncode, 1)
-        self.assertIn("ERROR: The pull failed on this computer (above). When the registry wants a login, run docker "
-                      "login perodua-deploy.novutal.com on this computer first.\n", result.stderr)
+        self.assertIn(f"ERROR: docker buildx imagetools inspect {PINNED} failed on this computer (above): the media type "
+                      "of a pin that is not on this computer comes from the registry. When the registry wants a login, run "
+                      "docker login perodua-deploy.novutal.com on this computer first. Nothing was streamed.\n", result.stderr)
+        self.assertEqual(self.server(), [])
+        self.assertNotIn(MAC_PULL, self.docker())
         self.assertNothingStreamed()
 
     def test_a_stream_tag_of_another_image_is_refused(self):
@@ -3810,7 +3820,8 @@ class OracleViewStreamTest(unittest.TestCase):
                       result.stdout)
         self.assertIn(f"Streaming {STREAM_TAG} to grey...\nLoaded image: {STREAM_TAG}\nOn grey: {PINNED}, ID {DIGEST}\n",
                       result.stdout)
-        # An index that holds another platform is refused before the server, also when the pull brings it now.
+        # An index that holds another platform is refused before the server, also when it is not here (read from the
+        # registry, before the pull).
         message = (f"ERROR: The pinned index {PINNED} holds: linux/amd64, linux/arm64, unknown/unknown "
                    "attestation-manifest. This script streams an index only when its one image is linux/amd64 and each "
                    "other entry is an attestation manifest (unknown/unknown): docker save writes the whole index, and the "
@@ -3820,11 +3831,12 @@ class OracleViewStreamTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn(message, result.stderr)
         self.assertEqual(self.server(), [])
-        self.set_state(mac={"pinned": ""})  # pulled now
+        self.set_state(mac={"pinned": ""})  # not here
         result = self.stream("grey")
         self.assertEqual(result.returncode, 1)
         self.assertIn(message, result.stderr)
-        self.assertNotIn(MAC_TAG, self.docker())
+        self.assertEqual(self.docker(), [MAC_INFO, MAC_PINNED, MAC_REGISTRY_KIND, MAC_RAW, MAC_ENTRIES])
+        self.assertEqual(self.server(), [])
         self.assertNothingStreamed()
 
     def test_errors_of_docker_on_this_computer_stop_it(self):
@@ -3897,7 +3909,7 @@ class OracleViewStreamTest(unittest.TestCase):
                                         f"  docker tag {PINNED} {STREAM_TAG}\n"
                                         f"  docker save {STREAM_TAG} | ssh grey 'sudo -n docker load'\n"
                                         f"  the check of {PINNED} on grey\n")
-        self.assertEqual(self.docker(), [MAC_INFO, MAC_PINNED, MAC_TAGGED])
+        self.assertEqual(self.docker(), [MAC_INFO, MAC_PINNED, MAC_REGISTRY_KIND, MAC_TAGGED])
         self.assertEqual(self.server(), [SERVER_VERSION, SERVER_INFO, SERVER_INSPECT])
         self.set_state(mac={"pinned": DIGEST, "tag": DIGEST})
         result = self.stream("--dry-run", "grey")

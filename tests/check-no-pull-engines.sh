@@ -18,11 +18,15 @@
 # stream-image.sh runs on this computer with an ssh that runs each command in the engine
 # of the server (docker exec, in /root); the --no-pull runs run in the engines. The test
 # images have no Odoo, API or adapter: a run that passes the image check fails later, and
-# a check reads only its image step. It prints PASS or FAIL for each check and exits 1
+# a check reads only its image step. service.sh reset with KIT_NO_PULL=1 runs on a
+# compose project of the test images (a container of image a and its volume): with an image
+# of the line missing, its settings check stops it before any change; with both, it passes
+# the check and stops at the confirmation. It prints PASS or FAIL for each check and exits 1
 # when one fails. Every Docker resource is named kit-no-pull-check-* and removed at the
 # end, with its volumes.
 # Needs: docker:29-dind and registry:2 on this computer or from Docker Hub, docker buildx
 # on this computer (it builds the index pins; its build cache keeps their small layers),
+# python3 on this computer (the break of a link),
 # and apk downloads in the engines (bash, coreutils, util-linux, iproute2, findutils,
 # diffutils, curl, rsync).
 set -Eeuo pipefail
@@ -33,7 +37,7 @@ NAME=kit-no-pull-check
 REG=$NAME-registry CTD=$NAME-ctd CLASSIC=$NAME-classic
 PORT=5055 REPO=localhost:5055/kit-no-pull-check
 FACTS='{{.Id}}{{range .RepoDigests}} {{.}}{{end}}'
-LAB=$(mktemp -d "${TMPDIR:-/tmp}/kit-no-pull-check.XXXXXX")
+LAB=''
 PASSED=0 FAILED=0 PIN_A='' PIN_B='' PIN_C='' PIN_I='' PIN_M=''
 
 cleanup() {
@@ -45,12 +49,15 @@ cleanup() {
     for ref in "$PIN_A" "$PIN_B" "$PIN_C" "$PIN_I" "$PIN_M"; do
         [[ -z $ref ]] || docker image rm "${ref%:*@*}@${ref##*@}" > /dev/null 2>&1 || true
     done
-    rm -rf -- "$LAB"
+    [[ -z $LAB ]] || rm -rf -- "$LAB"
 }
-trap cleanup EXIT
 stop() { printf 'ERROR: %s\n' "$*" >&2; exit 2; }
 pass() { PASSED=$((PASSED + 1)); printf 'PASS %s\n' "$*"; }
-fail() { FAILED=$((FAILED + 1)); printf 'FAIL %s\n' "$*"; }
+fail() {   # with the end of the output of the last command, for the cause
+    FAILED=$((FAILED + 1))
+    printf 'FAIL %s\n' "$*"
+    printf '%s\n' "${OUT:-}" | tail -n 12 | sed 's/^/    | /'
+}
 has() { [[ $1 == *"$2"* ]]; }   # has TEXT PART
 lacks() { [[ $1 != *"$2"* ]]; }
 absent() { ! docker exec "$1" test -e "$2"; }   # absent ENGINE PATH
@@ -82,9 +89,12 @@ wait_engine() {
 }
 
 # ---------------------------------------------------------------- the lab
+# Before the trap: a second run stops here and removes nothing of the run that made them.
 for name in "$REG" "$CTD" "$CLASSIC"; do
     ! docker inspect "$name" > /dev/null 2>&1 || stop "$name already exists; remove it first"
 done
+trap cleanup EXIT
+LAB=$(mktemp -d "${TMPDIR:-/tmp}/kit-no-pull-check.XXXXXX")
 [[ $(docker info --format '{{json .DriverStatus}}') == *io.containerd.snapshotter.v1* ]] \
     || stop 'Docker on this computer must use the containerd image store'
 mkdir -p "$LAB/bin" "$LAB/tmp" "$LAB/kit" "$LAB/lab"
@@ -165,22 +175,29 @@ repin() {   # FILE KEY=VALUE...: the one line ^KEY= of FILE gets VALUE (a commen
 repin "$LAB/kit/scripts/iss-api.sh" "IMAGE=$PIN_A"
 repin "$LAB/kit/scripts/rp-adapter.sh" "IMAGE=$PIN_B"
 repin "$LAB/kit/scripts/deploy-app.sh" "ODOO_IMAGE=$PIN_A" "WEB_IMAGE=$PIN_B" "DEMO_ODOO_IMAGE=$PIN_B" "DEMO_WEB_IMAGE=$PIN_A"
-mkdir -p "$LAB/kit-index"
+mkdir -p "$LAB/kit-index" "$LAB/kit-reset"
 cp -R "$LAB/kit/scripts" "$LAB/kit-index/"
 repin "$LAB/kit-index/scripts/iss-api.sh" "IMAGE=$PIN_I"
+cp -R "$LAB/kit/scripts" "$LAB/kit-reset/"
+repin "$LAB/kit-reset/scripts/deploy-app.sh" "WEB_IMAGE=$PIN_C"   # c reaches the server only in the --file part
 printf 'made-up-password\n' > "$LAB/lab/db-password"
 printf 'DB_HOST=db.example.internal\nDB_SERVICE=ORCLPDB1\nDB_USER=APIUSR\nDB_PASSWORD_FILE=/lab/db-password\n' > "$LAB/lab/iss.conf"
+# The index pin installs in a directory of its own, with a Compose project of its own: /tmp/iss has perodua-iss-api.
+printf 'PROJECT_NAME=perodua-iss-api-index\nHTTP_PORT=8001\n' | cat "$LAB/lab/iss.conf" - > "$LAB/lab/iss-index.conf"
 printf 'DB_HOST=10.1.119.26\nDB_SERVICE=ENTPP2\nDB_USER=RP_GATEWAY\nDB_PASSWORD_FILE=/lab/db-password\n' > "$LAB/lab/rp.conf"
 printf 'DB_HOST=192.0.2.20\nDB_PASSWORD_FILE=/lab/db-password\nBIND_IP=127.0.0.1\nHTTP_PORT=18110\nPROJECT_NAME=kit-no-pull-check\n' \
     > "$LAB/lab/app.env"
 for engine in "$CTD" "$CLASSIC"; do
-    docker exec "$engine" mkdir -p /kit /kit-index
+    docker exec "$engine" mkdir -p /kit /kit-index /kit-reset
     docker cp "$LAB/kit/scripts" "$engine:/kit/" > /dev/null
     docker cp "$LAB/kit-index/scripts" "$engine:/kit-index/" > /dev/null
+    docker cp "$LAB/kit-reset/scripts" "$engine:/kit-reset/" > /dev/null
     docker cp "$LAB/lab" "$engine:/" > /dev/null
 done
 # ssh OPTIONS [-n] HOST COMMAND... of the helper: COMMAND in the engine of HOST, in /root. With
-# LAB_BREAK_AFTER=BYTES, the data of an rsync stops after BYTES: a link that breaks.
+# LAB_BREAK_AFTER=BYTES, the data of an rsync stops after BYTES: a link that breaks. The rsync of
+# macOS (openrsync) gives ssh a non-blocking socket, on which head -c stops at once with "Error
+# reading stdin": python3 makes it blocking and copies the BYTES.
 cat > "$LAB/bin/ssh" <<SSH
 #!/bin/bash
 if [ "\$1" = -G ]; then host=\${!#}; printf 'user root\nhostname %s\nport 22\n' "\${host#*@}"; exit 0; fi
@@ -199,7 +216,15 @@ case \$host in
     *) echo "ssh: Could not resolve hostname \$host" >&2; exit 255 ;;
 esac
 if [ -n "\${LAB_BREAK_AFTER:-}" ] && [ "\${1:-}" = rsync ]; then
-    head -c "\$LAB_BREAK_AFTER" | docker exec -i -w /root "\$engine" sh -c "\$*"
+    python3 -c 'import os, sys
+os.set_blocking(0, True)
+left = int(sys.argv[1])
+while left > 0:
+    data = os.read(0, min(65536, left))
+    if not data:
+        break
+    os.write(1, data)
+    left -= len(data)' "\$LAB_BREAK_AFTER" | docker exec -i -w /root "\$engine" sh -c "\$*"
     exit 255
 fi
 if [ \$n = 1 ]; then exec docker exec -w /root "\$engine" sh -c "\$*" < /dev/null; fi
@@ -301,6 +326,29 @@ else
     fail 'stream-image.sh: an image on the server gets nothing'
 fi
 
+# ---------------------------------------------------------------- service.sh reset with KIT_NO_PULL=1
+# A deployment of the kit copy kit-reset (the images a and c): its App container (image a, busybox sleep) and its
+# attachments volume run in the containerd engine; c is not there yet.
+RESET_PROJECT=$NAME-reset
+docker exec "$CTD" mkdir -p /tmp/reset-app
+printf 'release=client-stable-uiux-v0.0.1\nrevision=%s\nproject=%s\nhost=192.0.2.20\nport=5432\ndatabase=perodua\nuser=odoo\n' \
+    "$(printf '0%.0s' $(seq 40))" "$RESET_PROJECT" | docker exec -i "$CTD" sh -c 'cat > /tmp/reset-app/.deployment-identity'
+printf 'services:\n  odoo:\n    image: %s\n    entrypoint: ["busybox", "sleep", "3600"]\n    volumes:\n      - filestore:/var/lib/odoo\nvolumes:\n  filestore: {}\n' \
+    "$PIN_A" | docker exec -i "$CTD" sh -c 'cat > /tmp/reset-app/compose.yml'
+docker exec "$CTD" sh -c "sed 's/^PROJECT_NAME=.*/PROJECT_NAME=$RESET_PROJECT/' /lab/app.env > /tmp/reset-app/app.env"
+run "$CTD" docker compose --project-name "$RESET_PROJECT" --file /tmp/reset-app/compose.yml up --pull never --detach
+reset_state() {   # the identity, the running container and the volume of the reset deployment
+    docker exec "$CTD" sh -c "cat /tmp/reset-app/.deployment-identity; docker ps -q --filter label=com.docker.compose.project=$RESET_PROJECT --filter status=running | wc -l; docker volume ls -q --filter name=${RESET_PROJECT}_filestore"
+}
+RESET_BEFORE=$(reset_state)
+run "$CTD" env KIT_NO_PULL=1 bash /kit-reset/scripts/service.sh --role app --dir /tmp/reset-app reset --confirm perodua
+if ((CODE == 1)) && has "$OUT" "--no-pull does not pull it: $(pinned "$PIN_C")" && has "$OUT" 'or does not find its pinned images on this server (KIT_NO_PULL=1), for the reason above. Nothing was changed.' \
+        && lacks "$OUT" 'Reset the App deployment' && [[ $(reset_state) == "$RESET_BEFORE" && $RESET_BEFORE == *$'\n1\n'"${RESET_PROJECT}_filestore" ]]; then
+    pass 'service.sh reset, KIT_NO_PULL=1 and an image of the line missing: stops in the settings check, nothing stopped or deleted'
+else
+    fail 'service.sh reset, KIT_NO_PULL=1 and an image of the line missing: stops in the settings check, nothing stopped or deleted'
+fi
+
 # ---------------------------------------------------------------- the classic store
 run "$CLASSIC" bash /kit/scripts/iss-api.sh install --no-pull --non-interactive --config /lab/iss.conf --dir /tmp/iss
 if ((CODE == 1)) && has "$OUT" "uses the classic image store" && absent "$CLASSIC" /tmp/iss; then
@@ -347,7 +395,7 @@ if ((CODE == 0)) && has "$OUT" "Resuming from the kept archive" && has "$OUT" "S
 else
     fail 'stream-image.sh --file, the next run: resumes from the kept archive, the same SHA-256, the check'
 fi
-if [[ -z $(ls "$LAB/tmp/stream-image-archives") && -z $(docker exec "$CTD" ls /root/stream-image) ]]; then
+if [[ -z $(ls "$LAB/tmp/stream-image-archives/lab-ctd_22") && -z $(docker exec "$CTD" ls /root/stream-image) ]]; then
     pass 'stream-image.sh --file: no archive left on either side'
 else
     fail 'stream-image.sh --file: no archive left on either side'
@@ -360,9 +408,35 @@ else
     fail 'the image of --file starts on the server'
 fi
 
+# c is on the server now: the settings check of the reset passes, and the reset stops at the confirmation (no-pull
+# never asks), with nothing stopped or deleted.
+since=$(docker exec "$CTD" date +%s)
+run "$CTD" env KIT_NO_PULL=1 bash /kit-reset/scripts/service.sh --role app --dir /tmp/reset-app reset
+after=$(reset_state) pulls=$(pulls_since "$CTD" "$since")
+if ((CODE == 1)) && has "$OUT" 'Reset the App deployment' && has "$OUT" 'pass --confirm perodua. Nothing was changed.' \
+        && [[ $after == "$RESET_BEFORE" && $pulls == 0 ]]; then
+    pass 'service.sh reset, KIT_NO_PULL=1 and both images there: the check passes, no question, nothing changed, no pull'
+else
+    OUT="$OUT"$'\n'"state before: $RESET_BEFORE"$'\n'"state after: $after"$'\n'"pulls: $pulls"
+    fail 'service.sh reset, KIT_NO_PULL=1 and both images there: the check passes, no question, nothing changed, no pull'
+fi
+
 # ---------------------------------------------------------------- index pins
+# A --file run that breaks keeps the archive of the index pin here and its part there; the stream without --file
+# then removes both (an archive holds the secrets of its image).
+LAB_BREAK_AFTER=150000 helper --file lab-ctd --image "$PIN_I"
+if ((CODE == 1)) && [[ -n $(ls "$LAB/tmp/stream-image-archives/lab-ctd_22") && -n $(docker exec "$CTD" ls /root/stream-image) ]]; then
+    pass 'stream-image.sh --file of the index pin, the link breaks: the archive here and the part there stay'
+else
+    fail 'stream-image.sh --file of the index pin, the link breaks: the archive here and the part there stay'
+fi
 # docker save without --platform writes the index itself: the server finds the pinned digest.
 helper lab-ctd --image "$PIN_I"
+if has "$OUT" 'Removed the archive that an earlier --file run kept here' && [[ -z $(ls "$LAB/tmp/stream-image-archives/lab-ctd_22") && -z $(docker exec "$CTD" ls /root/stream-image) ]]; then
+    pass 'stream-image.sh: after the stream, no archive of the earlier --file run on either side'
+else
+    fail 'stream-image.sh: after the stream, no archive of the earlier --file run on either side'
+fi
 if ((CODE == 0)) && has "$OUT" "The pinned image is an index of one linux/amd64 image and its attestation manifests: $(pinned "$PIN_I")" \
         && [[ $(facts "$CTD" "$(pinned "$PIN_I")") == "${PIN_I##*@} $(pinned "$PIN_I")"* ]]; then
     pass 'stream-image.sh, an index of linux/amd64 and its attestation: the pinned digest as ID and registry digest on the server'
@@ -382,19 +456,25 @@ else
     fail 'the index pin starts on the server with --pull never (its linux/amd64 image)'
 fi
 since=$(docker exec "$CTD" date +%s)
-run "$CTD" bash /kit-index/scripts/iss-api.sh install --no-pull --non-interactive --config /lab/iss.conf --dir /tmp/iss-index
+run "$CTD" bash /kit-index/scripts/iss-api.sh install --no-pull --non-interactive --config /lab/iss-index.conf --dir /tmp/iss-index
 if has "$OUT" "Pinned image on this server (containerd image store), not pulled: $(pinned "$PIN_I")" \
         && [[ $(pulls_since "$CTD" "$since") == 0 ]]; then
     pass 'iss-api.sh install --no-pull with an index pin: checked, started and used, not pulled'
 else
     fail 'iss-api.sh install --no-pull with an index pin: checked, started and used, not pulled'
 fi
+helper --dry-run lab-ctd --image "$PIN_M"
+if ((CODE == 1)) && has "$OUT" "The pinned index $(pinned "$PIN_M") holds: linux/amd64, linux/arm64,"; then
+    pass 'stream-image.sh --dry-run, an index with another platform that is not on this computer: refused (from the registry)'
+else
+    fail 'stream-image.sh --dry-run, an index with another platform that is not on this computer: refused (from the registry)'
+fi
 helper lab-ctd --image "$PIN_M"
 if ((CODE == 1)) && has "$OUT" "The pinned index $(pinned "$PIN_M") holds: linux/amd64, linux/arm64," \
-        && [[ -z $(facts "$CTD" "$(pinned "$PIN_M")") ]]; then
-    pass 'stream-image.sh, an index with another platform: refused after the pull, nothing loaded'
+        && [[ -z $(facts "$CTD" "$(pinned "$PIN_M")") ]] && ! docker image inspect "$(pinned "$PIN_M")" > /dev/null 2>&1; then
+    pass 'stream-image.sh, an index with another platform: refused before the pull, nothing pulled or loaded'
 else
-    fail 'stream-image.sh, an index with another platform: refused after the pull, nothing loaded'
+    fail 'stream-image.sh, an index with another platform: refused before the pull, nothing pulled or loaded'
 fi
 
 printf '%s passed, %s failed\n' "$PASSED" "$FAILED"

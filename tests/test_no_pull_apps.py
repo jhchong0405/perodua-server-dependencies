@@ -25,8 +25,10 @@ import tempfile
 import unittest
 
 import test_deploy_app_uat as uat_tests
+import test_deploy_app_upgrade as upgrade_tests
 import test_iss_api as iss_tests
 import test_rp_adapter as rp_tests
+import test_service_app as service_tests
 from test_non_interactive import QUESTIONS, code_text, logical_lines, on_terminal, without_variable
 
 
@@ -307,7 +309,7 @@ class NoPullCodeTest(unittest.TestCase):
                 found += 1
                 self.assertIn("docker run --rm --pull never --network none ", raw_logical_line(raw, number), where)
         self.assertEqual(found, 25)  # 24 Compose calls and the start of an image
-        self.assertIn("if ((NO_PULL)); then NON_INTERACTIVE=1 PULL_NEVER=(--pull never); fi\n", raw)
+        self.assertIn("if ((NO_PULL)); then NON_INTERACTIVE=1 PULL_NEVER=(--pull never) DEPLOY_COMMAND=", raw)
         # iss-api.sh: up and the start never pull; rp-adapter.sh: the adapter and the start never pull.
         for path, expected in ((ISS, ["up() { compose up --detach --wait --wait-timeout 120 --remove-orphans --pull never \"$@\"; }",
                                       "    docker run --rm --pull never --network none --read-only --cap-drop ALL --security-opt no-new-privileges:true \\"]),
@@ -359,6 +361,20 @@ class NoPullCodeTest(unittest.TestCase):
                 self.assertIn("\nSTREAM_TAG=$REPOSITORY:${DIGEST/:/-} ", text)
         self.assertIn("    REPOSITORY=${1%:*@*} DIGEST=${1##*@}\n    PINNED=$REPOSITORY@$DIGEST STREAM_TAG=$REPOSITORY:${DIGEST/:/-}\n",
                       APP.read_text())
+
+    def test_the_printed_deploy_app_steps_keep_the_no_pull_mode(self):
+        # Each deploy-app.sh step that a run prints for a person goes through DEPLOY_COMMAND or init_again: a no-pull
+        # run never prints a step that pulls (and asks for the registry password on a terminal). --mail asks
+        # questions, so it never runs with no-pull.
+        app = APP.read_text()
+        self.assertEqual(re.findall(r"sudo bash deploy-app\.sh --(?!mail\b)\S*", app),
+                         ["sudo bash deploy-app.sh --dir"])  # the go-back step of a run without no-pull only
+        self.assertIn("    if ((${NO_PULL:-0} == 0)); then\n"
+                      "        printf '   Then, from a scripts folder of %s: sudo bash deploy-app.sh --dir %s\\n'", app)
+        self.assertEqual(re.findall(r"Rerun with --init-db.*", app), ["Rerun with --init-db'; fi"])
+        self.assertEqual(len(re.findall(r"\$\(init_again\)", app)), 4)
+        self.assertIn("if ((NO_PULL)); then NON_INTERACTIVE=1 PULL_NEVER=(--pull never) "
+                      "DEPLOY_COMMAND='sudo env KIT_NO_PULL=1 bash deploy-app.sh'; fi\n", app)
 
     def test_the_usage_names_the_option(self):
         for path, line in ((ISS, "install [--config PATH] [--non-interactive] [--no-pull] [--dir PATH]"),
@@ -418,17 +434,6 @@ class NoPullOptionTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("--mail asks the outgoing email questions, and --no-pull (or KIT_NO_PULL=1) never asks.", result.stderr)
         self.assertEqual(list(self.tmp.iterdir()), [])
-
-    def test_check_config_takes_the_variable(self):
-        # service.sh reset runs deploy-app.sh --check-config: the variable of its environment reaches it.
-        password = self.tmp / "db-password"
-        password.write_text("fixture-password\n")
-        config = self.tmp / "app.env"
-        config.write_text(f"DB_HOST=192.0.2.20\nDB_PASSWORD_FILE={password}\nBIND_IP=127.0.0.1\n")
-        result = self.run_script(APP, "--config", config, "--dir", self.tmp / "app", "--check-config", KIT_NO_PULL="1")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("Configuration valid", result.stdout)
-        self.assertFalse((self.tmp / "app").exists())
 
 
 # ─────────────────────────────────────────────────────────────── iss-api.sh
@@ -886,6 +891,78 @@ class DeployAppNoPullTest(NoPullFake, unittest.TestCase):
                 for words in self.container_starts():
                     self.assertNotIn("--pull", words)
 
+    def check_config(self, **env):  # as service.sh reset runs it, with the environment of the reset
+        self.no_pull_log.unlink(missing_ok=True)
+        return subprocess.run(["bash", str(self.script), "--config", str(self.config), "--dir", str(self.dir), "--init-db",
+                               "--non-interactive", "--check-config"], env=dict(self.env, **env),
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+
+    def test_check_config_with_the_variable_checks_both_images(self):
+        # service.sh reset runs deploy-app.sh --check-config before it deletes anything, and passes KIT_NO_PULL on: the
+        # check finds both pinned images, as the deployment after the reset needs them.
+        odoo, web = self.LINES["client-stable-uiux"]
+        for present, gone in (([odoo], [web]), ([web], [odoo]), ([], [odoo, web])):
+            with self.subTest(missing=[pinned(image) for image in gone]):
+                self.on_server(*present)
+                result = self.check_config(KIT_NO_PULL="1")
+                self.assertEqual(result.returncode, 1)
+                for image in gone:
+                    self.assertIn(f"The pinned image is not on this server, and --no-pull does not pull it: {pinned(image)}\n",
+                                  result.stderr)
+                self.assertIn("  bash scripts/stream-image.sh SSH_HOST deploy-app.sh --line client-stable-uiux\n", result.stderr)
+                self.assertNotIn("Configuration valid", result.stdout)
+                self.assertFalse(self.dir.exists())
+                self.assertEqual(self.pulls_and_logins(), [])
+        self.on_server(odoo, web)
+        result = self.check_config(KIT_NO_PULL="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Configuration valid", result.stdout)
+        self.assertChecksBeforeAnyChange([odoo, web])
+        self.assertIn(["compose", "version"], self.args())
+        self.assertFalse(self.dir.exists())
+        # The image that the digest finds must be the pinned one, it must start, and Compose must have run --pull.
+        self.server(images={pinned(odoo): facts(odoo), pinned(web): f"{OTHER} {pinned(web)}"})
+        self.assertIn(f"Error: The image that {pinned(web)} finds on this server does not have the pinned digest",
+                      self.check_config(KIT_NO_PULL="1").stderr)
+        self.on_server(odoo, web, start_errors={pinned(web): "docker: failed to extract layer: unexpected EOF"})
+        self.assertIn(f"Error: The pinned image {pinned(web)} on this server does not start",
+                      self.check_config(KIT_NO_PULL="1").stderr)
+        self.on_server(odoo, web, start_errors={}, compose_version="Docker Compose version v2.32.1")
+        result = self.check_config(KIT_NO_PULL="1")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Error: --no-pull starts every container with --pull never", result.stderr)
+        self.assertFalse(self.dir.exists())
+        # Without the variable the check reads no image, as before.
+        self.server(images={}, compose_version="")
+        for env in ({}, {"KIT_NO_PULL": "0"}):
+            with self.subTest(env=env):
+                result = self.check_config(**env)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.args(), [])
+
+    def test_a_failed_replace_starts_the_other_app_again_with_no_pull(self):
+        # replace_stopped: the App of the other directory starts again with --pull never, and nothing pulls.
+        old = self.tmp / "old-app"
+        old.mkdir()
+        (old / ".deployment-identity").write_text(
+            f"release=client-stable-uiux-v1.2.2\nrevision={'e' * 40}\nproject=perodua-client-uiux\nhost=192.0.2.20\n"
+            "port=5432\ndatabase=perodua_client\nuser=odoo\n")
+        (old / "compose.yml").write_text("# the compose file of the old deployment\n")
+        line = self.line("demo-uiux")
+        self.on_server(*self.LINES["demo-uiux"])
+        result = self.deploy("--no-pull", *line, "--replace", str(old), FAKE_REPLACE_RUNNING="0123abcd", FAKE_HTTP_EXIT="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(f"Starting the App of client-stable-uiux-v1.2.2 in {old} again...\n"
+                      "The App of client-stable-uiux-v1.2.2 runs again, with its own database and attachments.\n",
+                      result.stderr)
+        old_up = [args for args in self.args() if args[:3] == ["compose", "--project-name", "perodua-client-uiux"]
+                  and args[5:6] == ["up"]]
+        self.assertEqual([args[5:] for args in old_up],
+                         [["up", "--pull", "never", "--detach", "--no-recreate", "--wait", "--wait-timeout", "600"]])
+        for words in self.container_starts():
+            self.assertEqual(words[:2], ["--pull", "never"], words)
+        self.assertEqual(self.pulls_and_logins(), [])
+
     def test_no_pull_never_asks_on_a_terminal(self):
         for args, env in ((["--no-pull"], {}), ([], {"KIT_NO_PULL": "1"})):
             with self.subTest(args=args, env=env):
@@ -896,6 +973,206 @@ class DeployAppNoPullTest(NoPullFake, unittest.TestCase):
                 for question in QUESTIONS + ("Database server IP",):
                     self.assertNotIn(question, output)
                 self.assertFalse(self.dir.exists())
+
+
+# ─────────────────────────────────────────────────────────────── service.sh reset with KIT_NO_PULL=1
+# The fake Docker of test_service_app.py, which also takes the compose run of the reset with --pull never.
+SERVICE_DOCKER = service_tests.FAKE_DOCKER.replace(
+    "action = args[5:] if compose else None\n",
+    "action = args[5:] if compose else None\n"
+    "if action and action[1:3] == ['--pull', 'never']:  # KIT_NO_PULL=1: recorded as it came, then answered as without\n"
+    "    action = action[:1] + action[3:]\n")
+assert SERVICE_DOCKER != service_tests.FAKE_DOCKER
+# The deploy-app.sh fixture of test_service_app.py, which also records KIT_NO_PULL.
+SERVICE_DEPLOY_APP = service_tests.FAKE_DEPLOY_APP.replace('"$*" >> "$FAKE_DEPLOY_LOG"',
+                                                           '"$* KIT_NO_PULL=${KIT_NO_PULL:-}" >> "$FAKE_DEPLOY_LOG"')
+assert SERVICE_DEPLOY_APP != service_tests.FAKE_DEPLOY_APP
+
+
+@needs_root_on_linux
+class ServiceResetNoPullTest(NoPullFake, unittest.TestCase):
+    """service.sh reset with KIT_NO_PULL=1, with the real deploy-app.sh next to it: its settings check finds both
+    pinned images before the reset stops or deletes anything; the reset never asks, and the container that empties
+    the database never pulls."""
+    IMAGES = (pin(APP, "ODOO_IMAGE"), pin(APP, "WEB_IMAGE"))
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix="perodua-no-pull-reset-")
+        self.addCleanup(temp.cleanup)
+        self.tmp = Path(temp.name)
+        self.bundle = self.tmp / "bundle"
+        self.bundle.mkdir()
+        for name in ("service.sh", "reset_database.py", "deploy-app.sh", "uat_guard.py", "uat_admins.py"):
+            shutil.copy(SCRIPTS / name, self.bundle / name)
+        self.app = self.tmp / "app"
+        self.app.mkdir()
+        extra = self.install_fake(SERVICE_DOCKER, self.app)
+        (self.tmp / "inner" / "lockstate.py").write_text(service_tests.LOCK_STATE)
+        password = self.tmp / "db-password"
+        password.write_text("fixture-password\n")
+        password.chmod(0o600)
+        self.identity = (f"release=client-stable-uiux-v1.0.2\nrevision={'f' * 40}\nproject={service_tests.PROJECT}\n"
+                         "host=192.0.2.20\nport=5432\ndatabase=perodua\nuser=odoo\n")
+        (self.app / ".deployment-identity").write_text(self.identity)
+        (self.app / "compose.yml").write_text("services: {}\n")
+        (self.app / "app.env").write_text(f"DB_HOST=192.0.2.20\nPROJECT_NAME={service_tests.PROJECT}\n"
+                                          f"DB_PASSWORD_FILE={password}\nBIND_IP=127.0.0.1\n")
+        (self.app / ".deploy.lock").touch()
+        self.state, self.calls, self.deploys = self.tmp / "state.json", self.tmp / "docker.jsonl", self.tmp / "deploy.log"
+        self.state.write_text(json.dumps({
+            "project": service_tests.PROJECT, "preflight": "READY 12", "up_status": 0, "wipe_status": 0,
+            "containers": {"odoo-1": [service_tests.PROJECT, [service_tests.FILESTORE]]},
+            "volumes": {service_tests.FILESTORE: "named"}}))
+        self.server(compose_version="Docker Compose version v2.40.3")
+        self.env = dict(without_variable(os.environ), PATH=f"{self.bin}:{os.environ['PATH']}",
+                        FAKE_LOCK=str(self.app / ".deploy.lock"), FAKE_LOCKSTATE=str(self.tmp / "inner" / "lockstate.py"),
+                        FAKE_DOCKER_LOG=str(self.calls), FAKE_DOCKER_STATE=str(self.state),
+                        FAKE_DEPLOY_LOG=str(self.deploys), **extra)
+        self.env.pop("KIT_NO_PULL", None)
+
+    def reset(self, *args, **env):
+        self.no_pull_log.unlink(missing_ok=True)
+        self.calls.unlink(missing_ok=True)
+        return subprocess.run(["bash", str(self.bundle / "service.sh"), "--role", "app", "--dir", str(self.app), "reset",
+                               *args], env=dict(self.env, **env), stdin=subprocess.DEVNULL, capture_output=True,
+                              text=True, timeout=60)
+
+    def reset_steps(self):  # the calls that reached the Docker of the reset itself: none before the confirmation
+        return [json.loads(line)["args"] for line in self.calls.read_text().splitlines()] if self.calls.exists() else []
+
+    def assertNothingChanged(self):
+        self.assertEqual(self.reset_steps(), [])
+        self.assertEqual((self.app / ".deployment-identity").read_text(), self.identity)
+        self.assertEqual(json.loads(self.state.read_text())["volumes"], {service_tests.FILESTORE: "named"})
+        self.assertEqual(self.pulls_and_logins(), [])
+
+    def test_a_missing_image_stops_the_reset_before_anything_is_deleted(self):
+        odoo, web = self.IMAGES
+        for present, gone in (([odoo], [web]), ([web], [odoo]), ([], [odoo, web])):
+            with self.subTest(missing=[pinned(image) for image in gone]):
+                self.on_server(*present)
+                result = self.reset("--confirm", "perodua", KIT_NO_PULL="1")
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                for image in gone:
+                    self.assertIn(f"The pinned image is not on this server, and --no-pull does not pull it: {pinned(image)}\n",
+                                  result.stderr)
+                self.assertIn(f"ERROR: deploy-app.sh of {pin(APP, 'RELEASE')} refuses {self.app}/app.env, or does not find "
+                              "its pinned images on this server (KIT_NO_PULL=1), for the reason above. Nothing was "
+                              "changed.\n", result.stderr)
+                self.assertNotIn("Reset the App deployment", result.stdout)  # before the plan, the stop and the wipe
+                self.assertNothingChanged()
+        # Another value of the variable stops the reset at once.
+        result = self.reset("--confirm", "perodua", KIT_NO_PULL="yes")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("ERROR: KIT_NO_PULL must be 1 (never pull: use the images streamed from the Mac) or 0 (pull as "
+                      "before). Nothing was changed.\n", result.stderr)
+        self.assertEqual(self.args(), [])
+        self.assertNothingChanged()
+
+    def test_with_both_images_the_check_passes_and_the_reset_never_asks(self):
+        self.on_server(*self.IMAGES)
+        result = self.reset(KIT_NO_PULL="1")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(f'Reset the App deployment "{service_tests.PROJECT}" in {self.app}:\n', result.stdout)
+        self.assertIn("ERROR: A non-interactive run, or a run without a terminal, asks nothing: pass --confirm perodua. "
+                      "Nothing was changed.\n", result.stderr)
+        for image in self.IMAGES:
+            self.assertIn(start(image), self.args())
+        self.assertNothingChanged()
+        code, output = on_terminal(["bash", self.bundle / "service.sh", "--role", "app", "--dir", self.app, "reset"],
+                                   dict(self.env, KIT_NO_PULL="1"))
+        self.assertEqual(code, 1, output)
+        self.assertIn("pass --confirm perodua. Nothing was changed.", output)
+        self.assertNotIn("Type perodua to confirm", output)
+        self.assertNothingChanged()
+
+    def test_the_container_that_empties_the_database_never_pulls(self):
+        # The deploy-app.sh fixture next to service.sh: the deployment after the reset is tested on its own.
+        (self.bundle / "deploy-app.sh").write_text(SERVICE_DEPLOY_APP)
+        result = self.reset("--confirm", "perodua", KIT_NO_PULL="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        steps = self.reset_steps()
+        self.assertIn(["compose", "--project-name", service_tests.PROJECT, "--file", f"{self.app}/compose.yml", "run",
+                       "--pull", "never", "--rm", "--no-deps", "-T", "odoo", "python3", "-"], steps)
+        self.assertEqual([args for args in steps if args[:1] == ["compose"] and args[5:6] == ["run"]
+                          and args[6:8] != ["--pull", "never"]], [])
+        # Both deploy-app.sh runs are non-interactive, and the variable reaches them.
+        self.assertEqual(self.deploys.read_text().splitlines(),
+                         [f"held --dir {self.app} --init-db --non-interactive --check-config KIT_NO_PULL=1",
+                          f"free --dir {self.app} --init-db --non-interactive KIT_NO_PULL=1"])
+        self.assertEqual(self.pulls_and_logins(), [])
+        # Without the variable the reset is the one of before: no --pull, and the run is not made non-interactive.
+        (self.app / ".deployment-identity").write_text(self.identity)
+        self.deploys.unlink()
+        self.assertEqual(self.reset("--confirm", "perodua").returncode, 0)
+        self.assertIn(["compose", "--project-name", service_tests.PROJECT, "--file", f"{self.app}/compose.yml", "run",
+                       "--rm", "--no-deps", "-T", "odoo", "python3", "-"], self.reset_steps())
+        self.assertEqual(self.deploys.read_text().splitlines(),
+                         [f"held --dir {self.app} --init-db --check-config KIT_NO_PULL=",
+                          f"free --dir {self.app} --init-db KIT_NO_PULL="])
+
+
+# ─────────────────────────────────────────────────────────────── a failed --upgrade with no-pull
+@unittest.skipUnless(LINUX, "needs Linux (GNU tools and bash 4 or later)")
+class DeployAppUpgradeNoPullTest(NoPullFake, upgrade_tests.UpgradeHarness, unittest.TestCase):
+    """upgrade_stopped with --no-pull, on the fake Docker of test_deploy_app_upgrade.py: the old App starts again with
+    --pull never, and each deploy-app.sh step that the run prints keeps the no-pull mode."""
+    IMAGES = (pin(APP, "ODOO_IMAGE"), pin(APP, "WEB_IMAGE"))
+
+    def setUp(self):
+        upgrade_tests.UpgradeHarness.setUp(self)
+        self.tmp = self.base
+        self.env.update(self.install_fake(upgrade_tests.FAKE_DOCKER, self.deploy_dir))
+        self.env.pop("KIT_NO_PULL", None)
+        self.on_server(*self.IMAGES)
+
+    def assertNeverPulls(self):
+        self.assertEqual(self.pulls_and_logins(), [])
+        for call in self.calls():
+            args = call["args"]
+            if args[:1] == ["compose"]:
+                action = args[5 + 2 * len(call["overrides"]):]
+                if action[:1] in (["run"], ["up"]):
+                    self.assertEqual(action[1:3], ["--pull", "never"], args)
+
+    def test_a_failure_before_the_switch_starts_the_old_app_again_with_no_pull(self):
+        result = self.run_script("--no-pull", dump_exit=1)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(f"The upgrade stopped before the switch: {self.deploy_dir} still runs {upgrade_tests.OLD_RELEASE}",
+                      result.stdout)
+        self.assertIn(f"The App of {upgrade_tests.OLD_RELEASE} runs again.", result.stdout)
+        restart = [call["args"] for call in self.calls() if call["args"][5:6] == ["up"]]
+        self.assertEqual([args[3:] for args in restart],
+                         [["--file", f"{self.deploy_dir}/compose.yml", "up", "--pull", "never", "--detach", "--no-recreate",
+                           "--wait", "--wait-timeout", "600"]])
+        self.assertNeverPulls()
+
+    def test_a_failure_after_the_switch_prints_the_steps_in_the_no_pull_mode(self):
+        old = upgrade_tests.OLD_RELEASE
+        result = self.run_script("--no-pull", http_exit=1)
+        self.assertNotEqual(result.returncode, 0)
+        backup = self.backups()[-1]
+        self.assertIn(f"To finish the upgrade: solve the problem above, then run sudo env KIT_NO_PULL=1 bash deploy-app.sh "
+                      f"--dir {self.deploy_dir} from this scripts folder, without --upgrade.\n", result.stdout)
+        go_back = (f"   Then, from a scripts folder of {old}: sudo env KIT_NO_PULL=1 bash deploy-app.sh --dir {self.deploy_dir}\n"
+                   "   That scripts folder must come from a kit version with --no-pull: an older deploy-app.sh pulls the "
+                   f"images, and the registry asks for its password. The images of {old} must be on this server: when they "
+                   "are not, stream them from the Mac first (bash scripts/stream-image.sh SSH_HOST deploy-app.sh --line "
+                   f"client-stable-uiux, in a kit folder that pins {old}).\n")
+        self.assertIn(go_back, result.stdout)
+        self.assertIn(go_back, (backup / "restore.txt").read_text())  # step 5 of restore.txt
+        self.assertNotIn(f"sudo bash deploy-app.sh --dir {self.deploy_dir}", result.stdout)
+        self.assertNeverPulls()
+        # Without --no-pull the steps are the ones of before.
+        self.deployed(upgrade_tests.OLD_RELEASE, upgrade_tests.OLD_REVISION)
+        shutil.rmtree(self.deploy_dir / "backups")
+        self.server(forbid_pull=False)
+        result = self.run_script(http_exit=1)
+        self.assertIn(f"run sudo bash deploy-app.sh --dir {self.deploy_dir} from this scripts folder, without --upgrade",
+                      result.stdout)
+        self.assertIn(f"   Then, from a scripts folder of {old}: sudo bash deploy-app.sh --dir {self.deploy_dir}\n",
+                      result.stdout)
+        self.assertNotIn("KIT_NO_PULL", result.stdout)
 
 
 # ─────────────────────────────────────────────────────────────── stream-image.sh on the Mac
@@ -909,6 +1186,9 @@ SERVER_INSPECT = f"sudo -n docker image inspect --format '{FACTS}' "
 SERVER_LOAD = "sudo -n docker load"
 SERVER_MKDIR = "mkdir -p -m 0700 stream-image && chmod 0700 stream-image"
 SERVER_TOOLS = "command -v rsync && command -v sha256sum"
+SERVER_ROOT = "sudo -n docker info --format '{{.DockerRootDir}}'"
+SERVER_DF = "df -Pk stream-image /var/lib/docker"
+MEDIA_TYPE = "{{.Manifest.MediaType}}"  # docker buildx imagetools inspect --format: the media type of a pin in the registry
 MANIFEST = "application/vnd.oci.image.manifest.v1+json"
 INDEX = "application/vnd.oci.image.index.v1+json"
 # docker buildx imagetools inspect --format of the helper: one line for each entry of an index.
@@ -945,6 +1225,12 @@ def archive_name(image):
     return re.sub(r"[^A-Za-z0-9._-]", "_", parts(image)[3]) + ".tar"
 
 
+def deploy_step(host, line):  # the next step of stream-image.sh for deploy-app.sh, with the mark of owner rule C1
+    return (f"Next, on {host}, but not on the grey App while owner rule C1 holds (README.md, \"Install from streamed "
+            f"images\"): sudo bash deploy-app.sh --no-pull --non-interactive --line {line} (with the --config and --dir "
+            "of the deployment)")
+
+
 FAKE_MAC_DOCKER = r'''#!/usr/bin/env python3
 import json, os, sys
 args = sys.argv[1:]
@@ -977,10 +1263,16 @@ elif args[:3] == ["image", "inspect", "--format"] and len(args) == 5 and args[3]
         out = mac["tags"][args[4]] + "\n"
     else:
         out, err, status = missing(args[4])
+elif args[:3] == ["image", "inspect", "--format"] and len(args) == 5 and args[3] == "{{.Size}}":
+    if args[4] in mac["tags"]:
+        out = str(mac["size"]) + "\n"
+    else:
+        out, err, status = missing(args[4])
 elif args[:3] == ["image", "inspect", "--format"] and len(args) == 5 and args[3] == "{{json .Descriptor}}":
     if args[4] in mac["images"]:
         image = mac["images"][args[4]]
-        out = json.dumps({"mediaType": image["kind"], "digest": image["id"], "size": 1234}) + "\n"
+        out = json.dumps({"mediaType": image["kind"], "digest": image["id"], "size": 1234},
+                         separators=(",", ":")) + "\n"  # as Docker 29 prints it: no space
     else:
         out, err, status = missing(args[4])
 elif args[:2] == ["pull", "--platform"] and len(args) == 4:
@@ -989,6 +1281,12 @@ elif args[:2] == ["pull", "--platform"] and len(args) == 4:
         mac["images"][reference(args[3])] = {"id": mac["pull_ids"].get(args[3], args[3].split("@")[1]), "kind": kind}
     else:
         err, status = "Error response from daemon: unauthorized: authentication required\n", 1
+elif args[:5] == ["buildx", "imagetools", "inspect", "--format", "{{.Manifest.MediaType}}"] and len(args) == 6:
+    # The media type of a pin in the registry: an index of mac["registry"], else mac["pull_kind"] (one manifest).
+    if not mac["logged_in"]:
+        err, status = "ERROR: failed to authorize: failed to fetch oauth token: 401 Unauthorized\n", 1
+    else:
+        out = (INDEX if args[5] in mac["registry"] else mac["pull_kind"]) + "\n"
 elif args[:3] == ["buildx", "imagetools", "inspect"] and (len(args) == 5 and args[3] == "--raw"
                                                           or len(args) == 6 and args[3:5] == ["--format", ENTRIES]):
     # The index in the registry: its bytes (FAKE_SHASUM gives them the digest they name) or its entries.
@@ -1034,8 +1332,8 @@ sys.exit(status)
 FAKE_SSH = r'''#!/usr/bin/env python3
 import hashlib, json, os, re, sys
 OPTIONS = ''' + repr(SSH_OPTIONS) + r'''
-VERSION, INFO, INSPECT, LOAD, MKDIR, TOOLS = ''' + repr((SERVER_VERSION, SERVER_INFO, SERVER_INSPECT, SERVER_LOAD,
-                                                        SERVER_MKDIR, SERVER_TOOLS)) + r'''
+VERSION, INFO, INSPECT, LOAD, MKDIR, TOOLS, ROOT, DF = ''' + repr((SERVER_VERSION, SERVER_INFO, SERVER_INSPECT, SERVER_LOAD,
+                                                                  SERVER_MKDIR, SERVER_TOOLS, SERVER_ROOT, SERVER_DF)) + r'''
 args = sys.argv[1:]
 with open(os.environ["FAKE_STREAM_STATE"]) as f:
     state = json.load(f)
@@ -1093,6 +1391,12 @@ elif command == LOAD:
 elif command == MKDIR:
     os.makedirs(os.path.join(home, "stream-image"), mode=0o700, exist_ok=True)
     os.chmod(os.path.join(home, "stream-image"), 0o700)
+elif command == ROOT:
+    out = "/var/lib/docker\n"
+elif command == DF:
+    # df -Pk of ~/stream-image and of the Docker root folder: the free KiB and the mount point of each
+    out = "Filesystem 1024-blocks Used Available Capacity Mounted on\n" + "".join(
+        f"/dev/fake 100000000 1 {free} 1% {mount}\n" for free, mount in server["df"])
 elif command == TOOLS:
     if server["tools"]:
         out = "/usr/bin/rsync\n/usr/bin/sha256sum\n"
@@ -1175,6 +1479,18 @@ else:
 '''
 
 
+# df -Pk FOLDER of the Mac: the free KiB of the state.
+FAKE_DF = r'''#!/usr/bin/env python3
+import json, os, sys
+args = sys.argv[1:]
+if len(args) != 2 or args[0] != "-Pk":
+    sys.exit(f"fake df: unexpected arguments {args}")
+with open(os.environ["FAKE_STREAM_STATE"]) as f:
+    free = json.load(f)["mac"]["free_kb"]
+print(f"Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/disk3s5 900000000 1 {free} 1% /System/Volumes/Data")
+'''
+
+
 class StreamImageTest(unittest.TestCase):
     """stream-image.sh, run on the Mac, against fakes of docker, ssh, rsync and shasum."""
 
@@ -1187,22 +1503,24 @@ class StreamImageTest(unittest.TestCase):
         self.home.mkdir()
         bin_dir = self.tmp / "bin"
         bin_dir.mkdir()
-        for name, text in (("docker", FAKE_MAC_DOCKER), ("ssh", FAKE_SSH), ("rsync", FAKE_RSYNC), ("shasum", FAKE_SHASUM)):
+        for name, text in (("docker", FAKE_MAC_DOCKER), ("ssh", FAKE_SSH), ("rsync", FAKE_RSYNC), ("shasum", FAKE_SHASUM),
+                           ("df", FAKE_DF)):
             (bin_dir / name).write_text(text)
             (bin_dir / name).chmod(0o755)
         self.env = dict(without_variable(os.environ), PATH=f"{bin_dir}:{os.environ['PATH']}", TMPDIR=str(self.tmp),
                         FAKE_STREAM_STATE=str(self.state), FAKE_STREAM_LOG=str(self.log))
-        self.archives = self.tmp / "stream-image-archives"
+        self.archives = self.tmp / "stream-image-archives" / "grey_22"  # one folder for each server
         self.state.write_text(json.dumps({
             "mac": {"store": "containerd", "logged_in": True, "pull_ids": {}, "pull_kind": MANIFEST, "tag_error": "",
-                    "save_error": "", "tags": {},
+                    "save_error": "", "tags": {}, "size": 3412592484, "free_kb": 50000000,
                     "images": {pinned(image): {"id": parts(image)[1], "kind": INDEX if image in INDEX_PINS else MANIFEST}
                                for image in ALL_PINS},
                     "registry": {pinned(image): {"digest": parts(image)[1], "entries": [AMD64, ATTESTATION]}
                                  for image in INDEX_PINS}},
             "server": {"reachable": True, "sudo": True, "store": "containerd", "images": {}, "info_error": "",
                        "load_error": "", "load_output": "", "dangling": False, "names": {"grey-alias": "grey"},
-                       "home": str(self.home), "tools": True, "rsync_breaks": 0, "rsync_corrupt": False}}))
+                       "home": str(self.home), "tools": True, "rsync_breaks": 0, "rsync_corrupt": False,
+                       "df": [[20000000, "/"], [20000000, "/"]]}}))
 
     def set_state(self, mac=None, server=None):
         state = json.loads(self.state.read_text())
@@ -1241,21 +1559,19 @@ class StreamImageTest(unittest.TestCase):
 
     def test_each_source_streams_the_pins_that_its_script_holds(self):
         for args, images, steps in (
-                (["iss-api.sh"], KIT_PINS["iss-api.sh"], ["sudo bash iss-api.sh install --no-pull --non-interactive"]),
-                (["rp-adapter.sh"], KIT_PINS["rp-adapter.sh"], ["sudo bash rp-adapter.sh install --no-pull --non-interactive"]),
-                (["oracle-view.sh"], KIT_PINS["oracle-view.sh"], ["sudo bash oracle-view.sh install --no-pull --non-interactive"]),
-                (["deploy-app.sh"], KIT_PINS["client-stable-uiux"],
-                 ["sudo bash deploy-app.sh --no-pull --non-interactive --line client-stable-uiux (with the --config and "
-                  "--dir of the deployment)"]),
-                (["deploy-app.sh", "--line", "demo-uiux"], KIT_PINS["demo-uiux"],
-                 ["sudo bash deploy-app.sh --no-pull --non-interactive --line demo-uiux (with the --config and --dir of "
-                  "the deployment)"]),
+                (["iss-api.sh"], KIT_PINS["iss-api.sh"], ["Next, on grey: sudo bash iss-api.sh install --no-pull --non-interactive"]),
+                (["rp-adapter.sh"], KIT_PINS["rp-adapter.sh"],
+                 ["Next, on grey: sudo bash rp-adapter.sh install --no-pull --non-interactive"]),
+                (["oracle-view.sh"], KIT_PINS["oracle-view.sh"],
+                 ["Next, on grey: sudo bash oracle-view.sh install --no-pull --non-interactive"]),
+                # Owner rule C1: the step of deploy-app.sh carries its mark, before the command.
+                (["deploy-app.sh"], KIT_PINS["client-stable-uiux"], [deploy_step("grey", "client-stable-uiux")]),
+                (["deploy-app.sh", "--line", "demo-uiux"], KIT_PINS["demo-uiux"], [deploy_step("grey", "demo-uiux")]),
                 (["deploy-app.sh", "--line", "demo-uiux", "iss-api.sh", "rp-adapter.sh", "iss-api.sh"],
                  KIT_PINS["demo-uiux"] + KIT_PINS["iss-api.sh"] + KIT_PINS["rp-adapter.sh"],
-                 ["sudo bash deploy-app.sh --no-pull --non-interactive --line demo-uiux (with the --config and --dir of "
-                  "the deployment)", "sudo bash iss-api.sh install --no-pull --non-interactive",
-                  "sudo bash rp-adapter.sh install --no-pull --non-interactive",
-                  "sudo bash iss-api.sh install --no-pull --non-interactive"])):
+                 [deploy_step("grey", "demo-uiux"), "Next, on grey: sudo bash iss-api.sh install --no-pull --non-interactive",
+                  "Next, on grey: sudo bash rp-adapter.sh install --no-pull --non-interactive",
+                  "Next, on grey: sudo bash iss-api.sh install --no-pull --non-interactive"])):
             with self.subTest(args=args):
                 self.set_state(mac={"tags": {}}, server={"images": {}})
                 result = self.stream("grey", *args)
@@ -1266,7 +1582,7 @@ class StreamImageTest(unittest.TestCase):
                 for image in images:
                     self.assertIn(f"Streaming {parts(image)[3]} to grey...\nLoaded image: {parts(image)[3]}\n"
                                   f"On grey: {pinned(image)}, ID {parts(image)[1]}\n", result.stdout)
-                self.assertTrue(result.stdout.endswith("".join(f"Next, on grey: {step}\n" for step in steps)), result.stdout)
+                self.assertTrue(result.stdout.endswith("".join(f"{step}\n" for step in steps)), result.stdout)
                 loads = [call for call in self.calls("ssh") if call["command"] == SERVER_LOAD]
                 self.assertEqual([call["stdin"] for call in loads], [archive(image) for image in images])
                 self.assertEqual(self.locks(), [])
@@ -1309,6 +1625,10 @@ class StreamImageTest(unittest.TestCase):
         self.set_state(mac={"images": {}})
         result = self.stream("grey", *args)
         self.assertEqual(result.returncode, 0, result.stderr)
+        # The media type of a pin that is not here comes from the registry, for each pin before the server.
+        kinds = [n for n, call in enumerate(self.docker()) if call[:5] == ["buildx", "imagetools", "inspect", "--format", MEDIA_TYPE]]
+        self.assertEqual([self.docker()[n][5] for n in kinds], [pinned(image) for image in REBUILD])
+        self.assertLess(max(kinds), min(n for n, call in enumerate(self.docker()) if call[:1] == ["pull"]))
         self.assertEqual([call for call in self.docker() if call[:1] == ["pull"]],
                          [["pull", "--platform", "linux/amd64", image] for image in REBUILD])
         self.assertEqual(self.saves(), [parts(image)[3] for image in REBUILD])
@@ -1328,8 +1648,12 @@ class StreamImageTest(unittest.TestCase):
         self.set_state(mac={"images": {}, "pull_ids": {}, "logged_in": False})
         result = self.stream("grey", "--image", REBUILD[2])
         self.assertEqual(result.returncode, 1)
-        self.assertIn("ERROR: The pull failed on this computer (above). When the registry wants a login, run docker "
-                      "login perodua-deploy.novutal.com on this computer first.\n", result.stderr)
+        self.assertIn(f"ERROR: docker buildx imagetools inspect {pinned(REBUILD[2])} failed on this computer (above): the "
+                      "media type of a pin that is not on this computer comes from the registry. When the registry wants a "
+                      "login, run docker login perodua-deploy.novutal.com on this computer first. Nothing was streamed.\n",
+                      result.stderr)
+        self.assertEqual(self.server(), [])
+        self.assertNotIn("pull", [call[0] for call in self.docker()])
         self.assertNothingStreamed()
 
     def test_usage(self):
@@ -1377,7 +1701,9 @@ class StreamImageTest(unittest.TestCase):
         self.set_state(mac={"images": {}})
         result = self.stream("--dry-run", "grey", "rp-adapter.sh")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout, f"Not on this computer: {reference}\n"
+        self.assertEqual(result.stdout, "The pinned image is an index of one linux/amd64 image and its attestation "
+                                        f"manifests: {reference}\n"
+                                        f"Not on this computer: {reference}\n"
                                         "Not on grey. Dry run: nothing was changed. The steps:\n"
                                         f"  docker pull --platform linux/amd64 {image}\n"
                                         f"  docker tag {reference} {tag}\n"
@@ -1386,9 +1712,12 @@ class StreamImageTest(unittest.TestCase):
         self.assertEqual(self.server(), [SERVER_VERSION, SERVER_INFO, SERVER_INSPECT + reference])
         result = self.stream("--dry-run", "--file", "grey", "rp-adapter.sh")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn(f"  rsync --partial ARCHIVE grey:stream-image/{archive_name(image)}, then sha256sum there\n", result.stdout)
-        self.assertIn(f"  ssh grey 'sudo -n docker load -i stream-image/{archive_name(image)}'\n", result.stdout)
-        self.assertEqual(self.server(), [SERVER_VERSION, SERVER_INFO, SERVER_INSPECT + reference, SERVER_TOOLS])
+        self.assertIn(f"  df here (room for the image), then docker save -o ARCHIVE {tag}, shasum -a 256 ARCHIVE (ARCHIVE: "
+                      f"{self.archives}/{archive_name(image)}, kept until the check passes)\n"
+                      "  df on grey (room for the archive and the image), then rsync --partial ARCHIVE "
+                      f"grey:stream-image/{archive_name(image)} and sha256sum there\n"
+                      f"  ssh grey 'sudo -n docker load -i stream-image/{archive_name(image)}'\n", result.stdout)
+        self.assertEqual(self.server(), [SERVER_VERSION, SERVER_INFO, SERVER_INSPECT + reference, SERVER_TOOLS, SERVER_ROOT])
         self.assertNothingStreamed()
         self.assertNotIn(["pull", "--platform", "linux/amd64", image], self.docker())
         self.assertFalse(self.archives.exists())
@@ -1403,9 +1732,14 @@ class StreamImageTest(unittest.TestCase):
         name = archive_name(image)
         self.assertEqual([args for args in self.docker() if args[:1] == ["save"]],
                          [["save", "-o", f"{self.archives}/{name}.part", tag]])
-        self.assertEqual(self.server(), [SERVER_VERSION, SERVER_INFO, SERVER_INSPECT + reference, SERVER_TOOLS, SERVER_MKDIR,
-                                         f"sha256sum stream-image/{name}", f"sudo -n docker load -i stream-image/{name}",
-                                         SERVER_INSPECT + reference, f"rm -f stream-image/{name}"])
+        self.assertEqual(self.server(), [SERVER_VERSION, SERVER_INFO, SERVER_INSPECT + reference, SERVER_TOOLS, SERVER_ROOT,
+                                         SERVER_MKDIR, SERVER_DF, f"sha256sum stream-image/{name}",
+                                         f"sudo -n docker load -i stream-image/{name}", SERVER_INSPECT + reference,
+                                         f"rm -f stream-image/{name}"])
+        # The size of the image here, before the save (df here), and the df of the server before the copy.
+        docker = self.docker()
+        self.assertLess(docker.index(["image", "inspect", "--format", "{{.Size}}", tag]), docker.index(["save", "-o",
+                        f"{self.archives}/{name}.part", tag]))
         self.assertEqual(len(self.calls("rsync")), 1)
         self.assertEqual(self.calls("rsync")[0]["args"][3:], [f"{self.archives}/{name}", f"grey:stream-image/{name}"])
         self.assertTrue(all(call["n"] for call in self.calls("ssh")))  # nothing on the standard input
@@ -1415,6 +1749,7 @@ class StreamImageTest(unittest.TestCase):
         self.assertEqual(self.get_state()["server"]["images"], {reference: facts(image)})
         self.assertEqual(list(self.archives.iterdir()), [])
         self.assertEqual(oct(self.archives.stat().st_mode & 0o777), "0o700")
+        self.assertEqual(oct(self.archives.parent.stat().st_mode & 0o777), "0o700")
         self.assertEqual(list((self.home / "stream-image").iterdir()), [])
         self.assertEqual(oct((self.home / "stream-image").stat().st_mode & 0o777), "0o700")
 
@@ -1448,6 +1783,183 @@ class StreamImageTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("Resuming", result.stdout)
         self.assertEqual(len(self.saves()), 1)
+
+    def test_file_mode_keeps_one_folder_of_archives_for_each_server(self):
+        # A run to another server never removes or overwrites the archive that a broken run to this server kept for its
+        # resume: each server has its own folder, which the lock of the server makes one run's at a time.
+        image = KIT_PINS["client-stable-uiux"][0]
+        name, tag = archive_name(image), parts(image)[3]
+        other = self.tmp / "stream-image-archives" / "grey2_22"
+        self.set_state(server={"rsync_breaks": 1})
+        self.assertEqual(self.stream("--file", "grey", "--image", image).returncode, 1)
+        kept = {path.name: path.read_bytes() for path in self.archives.iterdir()}
+        self.assertEqual(sorted(kept), [name, name + ".sha256"])
+        result = self.stream("--file", "grey2", "--image", image)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([args for args in self.docker() if args[:1] == ["save"]], [["save", "-o", f"{other}/{name}.part", tag]])
+        self.assertEqual(list(other.iterdir()), [])
+        self.assertEqual({path.name: path.read_bytes() for path in self.archives.iterdir()}, kept)
+        # The run to the first server resumes from its kept archive.
+        self.set_state(server={"images": {}})
+        result = self.stream("--file", "grey", "--image", image)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"Resuming from the kept archive {self.archives}/{name}\n", result.stdout)
+        self.assertEqual(self.saves(), [])
+        self.assertEqual(list(self.archives.iterdir()), [])
+        # A folder of the archives that is not a folder of this user stops --file before the server gets anything.
+        shutil.rmtree(other)
+        other.symlink_to(self.tmp)
+        self.set_state(server={"images": {}})
+        result = self.stream("--file", "grey2", "--image", image)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(f"ERROR: {other} is not a folder of this user: remove it, then run again\n", result.stderr)
+        self.assertNothingStreamed()
+
+    def test_file_mode_checks_the_free_space_on_both_sides(self):
+        # Before the save, df here: the size of the image here (more than its archive). Before the copy, df on the
+        # server: the archive and the image after docker load, on one file system or on each of two.
+        image = KIT_PINS["oracle-view.sh"][0]
+        name, tag = archive_name(image), parts(image)[3]
+        need = (3412592484 + 1023) // 1024
+        size = (len(archive(image)) + 1023) // 1024
+        self.set_state(mac={"free_kb": need - 1})
+        result = self.stream("--file", "grey", "oracle-view.sh")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(f"ERROR: --file: this computer has {need - 1} KiB free in {self.archives}, and the archive of {tag} "
+                      f"needs up to {need} KiB (the size of the image here). Free some space, or stream without --file. "
+                      "Nothing was copied.\n", result.stderr)
+        self.assertEqual(self.saves(), [])
+        self.assertEqual(list(self.archives.iterdir()), [])
+        self.assertNothingStreamed()
+        self.set_state(mac={"free_kb": need}, server={"df": [[need + size - 1, "/"], [need + size - 1, "/"]]})
+        result = self.stream("--file", "grey", "oracle-view.sh")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(f"ERROR: --file: grey has {need + size - 1} KiB free on / (~/stream-image and /var/lib/docker), and "
+                      f"the archive ({size} KiB) and the image after docker load ({need} KiB) need {need + size} KiB. Free "
+                      f"some space there, or stream without --file. The archive stays here: {self.archives}/{name}\n",
+                      result.stderr)
+        self.assertEqual(self.server()[-1], SERVER_DF)  # after the save here, before the copy
+        self.assertEqual(self.calls("rsync"), [])
+        self.assertEqual(sorted(path.name for path in self.archives.iterdir()), [name, name + ".sha256"])
+        for df, message in (([[size - 1, "/home"], [need, "/var"]],
+                             f"grey has {size - 1} KiB free on /home (~/stream-image), and the archive needs {size} KiB."),
+                            ([[size, "/home"], [need - 1, "/var"]],
+                             f"grey has {need - 1} KiB free on /var (/var/lib/docker), and the image after docker load "
+                             f"needs {need} KiB.")):
+            with self.subTest(df=df):
+                self.set_state(server={"df": df})
+                result = self.stream("--file", "grey", "oracle-view.sh")
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(f"ERROR: --file: {message} Free some space there, or stream without --file.", result.stderr)
+                self.assertEqual(self.saves(), [])  # the archive kept here
+                self.assertEqual(self.calls("rsync"), [])
+        self.set_state(server={"df": [[size, "/home"], [need, "/var"]]})
+        result = self.stream("--file", "grey", "oracle-view.sh")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"Resuming from the kept archive {self.archives}/{name}\n", result.stdout)
+        self.assertEqual(self.get_state()["server"]["images"], {pinned(image): facts(image)})
+
+    def test_the_archives_of_a_pin_on_the_server_go_on_both_sides(self):
+        # An archive holds the secrets of its image. When the pin is on the server, the archive that an earlier --file
+        # run kept goes, here and there: with --file always, without --file when one is kept here.
+        image = KIT_PINS["iss-api.sh"][0]
+        name, reference = archive_name(image), pinned(image)
+        part = self.home / "stream-image" / name
+        self.set_state(server={"rsync_breaks": 1})
+        self.assertEqual(self.stream("--file", "grey", "iss-api.sh").returncode, 1)
+        self.assertTrue(part.exists())
+        result = self.stream("grey", "iss-api.sh")  # the stream without --file puts the pin there, then both go
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"On grey: {reference}, ID {parts(image)[1]}\n"
+                      f"Removed the archive that an earlier --file run kept here: {self.archives}/{name}\n", result.stdout)
+        self.assertEqual(list(self.archives.iterdir()), [])
+        self.assertFalse(part.exists())
+        self.assertEqual(self.server()[-1], f"rm -f stream-image/{name}")
+        # A dry run names them and removes nothing.
+        (self.archives / name).write_text("kept\n")
+        part.write_text("part\n")
+        result = self.stream("--dry-run", "grey", "iss-api.sh")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"Dry run: nothing was changed. Any archive of {reference} that an earlier --file run kept goes, "
+                      f"here ({self.archives}/{name}) and on grey (stream-image/{name})\n", result.stdout)
+        self.assertTrue((self.archives / name).exists() and part.exists())
+        # --file, with the pin on the server: both go, and nothing is streamed.
+        result = self.stream("--file", "grey", "iss-api.sh")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"Removed the archive that an earlier --file run kept here: {self.archives}/{name}\n", result.stdout)
+        self.assertEqual(list(self.archives.iterdir()), [])
+        self.assertFalse(part.exists())
+        self.assertNothingStreamed()
+        # Without --file and with nothing kept here, the server gets the checks only.
+        result = self.stream("grey", "iss-api.sh")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.server(), [SERVER_VERSION, SERVER_INFO, SERVER_INSPECT + reference])
+
+    def test_a_stop_after_a_stream_names_what_this_run_streamed(self):
+        # "Nothing was streamed" is true only before the first image reached the server; after it, a stop names the
+        # image that it stops at and the images that this run streamed and checked.
+        first, second = REBUILD[0], REBUILD[2]
+        self.set_state(mac={"images": {pinned(first): {"id": parts(first)[1], "kind": MANIFEST}},
+                            "pull_ids": {second: OTHER}})
+        result = self.stream("grey", "--image", first, "--image", second)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(f"ERROR: After the pull, {pinned(second)} on this computer does not have the pinned digest as its ID "
+                      f"(ID: {OTHER}). {pinned(second)} was not streamed.\n"
+                      f"This run streamed and checked on grey before the stop: {pinned(first)}\n", result.stderr)
+        self.assertNotIn("Nothing was streamed", result.stderr)
+        self.assertEqual(self.saves(), [parts(first)[3]])
+        error = "Error response from daemon: write /var/lib/docker: read-only file system"
+        self.set_state(mac={"pull_ids": {}, "tag_error": error, "tags": {parts(first)[3]: parts(first)[1]},
+                            "images": {pinned(first): {"id": parts(first)[1], "kind": MANIFEST}}}, server={"images": {}})
+        result = self.stream("grey", "--image", first, "--image", second)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(f"{error}\nERROR: docker tag {pinned(second)} {parts(second)[3]} failed on this computer (above). "
+                      f"{pinned(second)} was not streamed.\n"
+                      f"This run streamed and checked on grey before the stop: {pinned(first)}\n", result.stderr)
+        # --file: the save of the second image fails.
+        error = "Error response from daemon: unable to create manifests file"
+        self.set_state(mac={"tag_error": "", "save_error": error, "tags": {parts(first)[3]: parts(first)[1]}},
+                       server={"images": {pinned(first): facts(first)}})
+        result = self.stream("--file", "grey", "--image", second)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(f"ERROR: docker save {parts(second)[3]} failed on this computer (above). Nothing was copied.\n",
+                      result.stderr)
+        self.assertEqual(list(self.archives.iterdir()), [])  # no part stays
+
+    def test_a_dry_run_checks_a_pin_that_is_not_here_from_the_registry(self):
+        # The media type of a pin that is not on this computer, and the bytes and the entries of an index, come from the
+        # registry before the server, also in a dry run.
+        image = KIT_PINS["iss-api.sh"][0]
+        reference, digest = pinned(image), parts(image)[1]
+        self.set_state(mac={"images": {}, "registry": {reference: {"digest": digest, "entries": [AMD64, ARM64, ATTESTATION]}}})
+        result = self.stream("--dry-run", "grey", "iss-api.sh")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(f"ERROR: The pinned index {reference} holds: linux/amd64, linux/arm64, unknown/unknown "
+                      "attestation-manifest. This script streams an index only when", result.stderr)
+        self.assertEqual(self.docker(), [["info", "--format", STORE_FORMAT], ["image", "inspect", "--format", "{{.Id}}", reference],
+                                         ["buildx", "imagetools", "inspect", "--format", MEDIA_TYPE, reference],
+                                         ["buildx", "imagetools", "inspect", "--raw", reference],
+                                         ["buildx", "imagetools", "inspect", "--format", ENTRIES, reference]])
+        self.assertEqual(self.server(), [])
+        self.set_state(mac={"registry": {reference: {"digest": OTHER, "entries": [AMD64, ATTESTATION]}}})
+        result = self.stream("--dry-run", "grey", "iss-api.sh")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(f"ERROR: The registry gives another index for {reference} (its digest is {OTHER}). Nothing was "
+                      "streamed.\n", result.stderr)
+        self.set_state(mac={"registry": {}, "pull_kind": "application/vnd.docker.container.image.v1+json"})
+        result = self.stream("--dry-run", "grey", "iss-api.sh")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(f"ERROR: The pinned image {reference} in the registry is application/vnd.docker.container.image.v1+json"
+                      ": this script streams one image manifest, or an index of one linux/amd64 image and its attestation "
+                      "manifests. Nothing was streamed.\n", result.stderr)
+        self.assertEqual(self.server(), [])
+        # A good index that is not here: the dry run reads it and prints the steps.
+        self.set_state(mac={"registry": {reference: {"digest": digest, "entries": [AMD64, ATTESTATION]}}, "pull_kind": MANIFEST})
+        result = self.stream("--dry-run", "grey", "iss-api.sh")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(result.stdout.startswith("The pinned image is an index of one linux/amd64 image and its attestation "
+                                                 f"manifests: {reference}\nNot on this computer: {reference}\n"), result.stdout)
+        self.assertNotIn("pull", [call[0] for call in self.docker()])
 
     def test_file_mode_refuses_another_checksum_and_a_server_without_the_tools(self):
         image = KIT_PINS["iss-api.sh"][0]
@@ -1565,13 +2077,15 @@ class StreamImageTest(unittest.TestCase):
                       "+json: this script streams one image manifest, or an index of one linux/amd64 image and its "
                       "attestation manifests. Nothing was streamed.\n", result.stderr)
         self.assertNotIn(["buildx", "imagetools", "inspect", "--raw", reference], self.docker())
-        # An index that the Mac pulls now is checked after the pull, before the tag; any variant of the platform counts.
+        # An index that is not here is read from the registry (its media type, then its bytes and its entries) before the
+        # server and the pull; any variant of the platform counts.
         self.set_state(mac={"images": {}, "tags": {}})
         result = self.stream("grey", "rp-adapter.sh")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual([args[:2] for args in self.docker() if args[0] in ("pull", "buildx", "tag", "save")],
-                         [["pull", "--platform"], ["buildx", "imagetools"], ["buildx", "imagetools"], ["tag", reference],
-                          ["save", tag]])
+        self.assertEqual([args[:4] for args in self.docker() if args[0] in ("pull", "buildx", "tag", "save")],
+                         [["buildx", "imagetools", "inspect", "--format"], ["buildx", "imagetools", "inspect", "--raw"],
+                          ["buildx", "imagetools", "inspect", "--format"], ["pull", "--platform", "linux/amd64", image],
+                          ["tag", reference, tag], ["save", tag]])
         arm = REBUILD[2]
         self.set_state(mac={"images": {}, "tags": {}, "registry": {pinned(arm): {
             "digest": parts(arm)[1], "entries": [ARM64.replace("linux/arm64", "linux/arm64/v8"), ATTESTATION]}}},
@@ -1639,12 +2153,14 @@ class StreamImageTest(unittest.TestCase):
         self.assertEqual(code.count('"${SSH[@]}"'), 2)
         self.assertIn('rsync --partial -e "${SSH[*]}" "$archive" "$HOST:$REMOTE_DIR/$name"', code)
         allowed = ("sudo -n docker ", "mkdir -p -m 0700 $REMOTE_DIR && chmod 0700 $REMOTE_DIR", "sha256sum $REMOTE_DIR/",
-                   "rm -f $REMOTE_DIR/", "command -v rsync && command -v sha256sum")
+                   "rm -f $REMOTE_DIR/", "command -v rsync && command -v sha256sum", "df -Pk $REMOTE_DIR $DOCKER_ROOT")
         remote = re.findall(r"\bremote ([\"'])(.*?)\1", code)
-        self.assertEqual(len(remote), 9)
+        self.assertEqual(len(remote), 12)
         for _, command in remote:
             self.assertTrue(command.startswith(allowed), command)
         self.assertEqual(re.findall(r'docker save (?:-o "\$archive\.part" )?"\$(\w+)"', code), ["STREAM_TAG", "STREAM_TAG"])
+        # The Docker root folder of the server goes into a command line there only as a plain absolute path.
+        self.assertIn("[[ $DOCKER_ROOT =~ ^/[A-Za-z0-9._/-]*$ ]] || die", code)
         self.assertEqual(len(re.findall(r"(^|[;&|(]|\$\()\s*docker save\b", code, re.M)), 2)
         self.assertNotRegex(code, r"docker save[^\n]*--platform")  # it would save the manifest of the platform, not the pin
         # An index: its bytes from the registry, checked against the pinned digest, and its entries.
