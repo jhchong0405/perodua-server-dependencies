@@ -777,7 +777,7 @@ On grey (v0.55.1, with `IMAGE_MAIL=on` and `MAIL_REDIRECT_TO=off`), in a
 
 | Path | Contents |
 | --- | --- |
-| `scripts/` | `install-dependencies.sh`, `deploy-db.sh`, `deploy-app.sh`, `service.sh`, `uninstall.sh`, the helpers they use (`uat_guard.py`, `uat_admins.py`, `uat_demo.py`, `reset_database.py`), `iss-api.sh` (ISS-Oracle API), `rp-adapter.sh` (RP adapter), `oracle-view.sh` (Oracle Field Browser), `https.sh` (HTTPS with nginx, the certificate from an issuer or Let's Encrypt), `client-check.ps1` (the check of each host name from a Windows PC) and the configuration templates. Your `deploy.conf`, backups and filestore archive also go here. |
+| `scripts/` | `install-dependencies.sh`, `deploy-db.sh`, `deploy-app.sh`, `service.sh`, `uninstall.sh`, the helpers they use (`uat_guard.py`, `uat_admins.py`, `uat_demo.py`, `reset_database.py`), `iss-api.sh` (ISS-Oracle API), `rp-adapter.sh` (RP adapter), `oracle-view.sh` (Oracle Field Browser), `https.sh` (HTTPS with nginx, the certificate from an issuer or Let's Encrypt), `stream-image.sh` (on the Mac: puts pinned images on a server, see [Install from streamed images](#install-from-streamed-images)), `client-check.ps1` (the check of each host name from a Windows PC) and the configuration templates. Your `deploy.conf`, backups and filestore archive also go here. |
 | `docs/` | [DEPLOYMENT.md](docs/DEPLOYMENT.md) (full reference), [RUNBOOK.md](docs/RUNBOOK.md) (self-check after deployment) and [WAF-REDIRECT-LOOP-2026-10-08.md](docs/WAF-REDIRECT-LOOP-2026-10-08.md) (record of a redirect loop behind a WAF) |
 | `tests/` | Automated checks, see [tests/README.md](tests/README.md) |
 
