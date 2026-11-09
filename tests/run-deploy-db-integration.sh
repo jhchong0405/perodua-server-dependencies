@@ -495,8 +495,10 @@ pass 'deploy-app.sh preflight of the module upgrade on PostgreSQL; the lock coun
 
 python3 "$SOURCE_DIR/tests/check-https-download.py" "$SOURCE_DIR/scripts" "$TEST_DIR"
 assert_sql https_restored 'SELECT count(*) FROM public.res_users' 2
+assert_sql https_special 'SELECT count(*) FROM public.res_users' 2
 assert_absent https_refused
-pass 'real HTTPS Basic-auth download prompts securely; wrong cloud password prevents restore'
+assert_absent https_no_file
+pass 'real HTTPS Basic-auth download prompts securely; wrong cloud password prevents restore; --cloud-password-file with special characters; non-interactive without it: refused before the download, not needed for a deployed database'
 
 write_empty_conf password_prompt app_password_prompt
 python3 "$SOURCE_DIR/tests/check-password-prompt.py" "$SOURCE_DIR/scripts" "$TEST_DIR/password_prompt.conf"
@@ -661,6 +663,6 @@ pass 'deployment output does not contain the application password'
 
 # Last: this uninstalls PostgreSQL itself.
 python3 "$SOURCE_DIR/tests/check-uninstall-purge.py" "$SOURCE_DIR/scripts" "$TEST_DIR/password_prompt.conf" password_prompt
-pass 'uninstall --purge: a wrong answer changes nothing; PURGE removes the deployment, PostgreSQL 16 and its data'
+pass 'uninstall --purge: a wrong answer, or a non-interactive run without --confirm-purge, changes nothing; --confirm-purge PURGE removes the deployment, PostgreSQL 16 and its data without a question'
 
 printf '\nALL %s INTEGRATION CHECKS PASSED\nLogs: %s\n' "$PASS_COUNT" "$TEST_DIR"

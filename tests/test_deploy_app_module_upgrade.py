@@ -920,17 +920,47 @@ class OldServiceShTests(ModuleUpgradeFixture, unittest.TestCase):
                          self.without_help_and_reset(OLD_SERVICE.read_text()))
 
     def without_help_and_reset(self, text):
-        """service.sh without the bodies of usage and app_reset.
+        """service.sh without the bodies of usage and app_reset, and without
+        what only reset uses: the confirmation (confirm, and read_terminal or the
+        has_terminal of v1.2.1) and the non-interactive mode (--non-interactive
+        and KIT_NON_INTERACTIVE, README.md "Run the kit without a person").
 
         The service.sh of this kit is the one of v1.2.1 apart from its help
         text and its reset, which reads the release of the line of the
-        directory. Everything else, stop, start, restart and status with it
-        (restore.txt step 1), is the same byte for byte.
+        directory and can run without a person. Everything else, stop, start,
+        restart and status with it (restore.txt step 1), is the same byte for
+        byte.
         """
-        for name in ('usage', 'app_reset'):
+        for name in ('usage', 'app_reset', 'confirm'):
             text, count = re.subn(rf'^{name}\(\) \{{\n.*?^\}}\n', f'{name}() {{ }}\n', text, flags=re.M | re.S)
             self.assertEqual(count, 1, name)
+        # The confirmation of reset reads a person's answer: v1.2.1 from /dev/tty, this kit from stdin.
+        text, old = re.subn(r'^has_terminal\(\) \{.*\n', '', text, flags=re.M)
+        text, new = re.subn(r'^(# [^\n]*\n)*read_terminal\(\) \{[^\n]*\n.*?^\}\n', '', text, flags=re.M | re.S)
+        self.assertEqual(old + new, 1, 'has_terminal or read_terminal')
+        if new:
+            mode = ("# --non-interactive, or KIT_NON_INTERACTIVE=1 in the environment: no question\n"
+                    "# at all (README.md, \"Run the kit without a person\"). Each answer comes from an\n"
+                    "# option or a setting; a missing one stops the run before it changes anything.\n"
+                    "case ${KIT_NON_INTERACTIVE:-} in\n    ''|0) ;;\n    1) NON_INTERACTIVE=1 ;;\n"
+                    "    *) die 'KIT_NON_INTERACTIVE must be 1 (never ask) or 0 (ask on a terminal).' ;;\n"
+                    "esac\n((NON_INTERACTIVE == 0)) || export KIT_NON_INTERACTIVE=1\n")
+            for part in (mode, "        --non-interactive) NON_INTERACTIVE=1; shift ;;\n", " NON_INTERACTIVE=0\n"):
+                self.assertEqual(text.count(part), 1, part)
+                text = text.replace(part, "\n" if part.startswith(" NON") else "")
         return text
+
+    def test_only_reset_asks_for_a_confirmation(self):
+        # What without_help_and_reset leaves out is used by reset only: confirm is called in app_reset, and
+        # read_terminal in confirm.
+        text = (SCRIPTS / 'service.sh').read_text()
+        body = {name: re.search(rf'^{name}\(\) \{{\n.*?^\}}\n', text, flags=re.M | re.S).group(0)
+                for name in ('app_reset', 'confirm')}
+        calls = [line for line in text.splitlines() if re.match(r'^\s+(confirm|read_terminal)\b', line)]
+        self.assertTrue(calls)
+        for line in calls:
+            caller = 'app_reset' if line.split()[0] == 'confirm' else 'confirm'
+            self.assertIn(line + '\n', body[caller], line)
 
     def test_old_service_sh_refuses_a_marked_database(self):
         # Before the switch: the directory's own preflight.py is the old one.

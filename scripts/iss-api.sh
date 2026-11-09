@@ -16,7 +16,7 @@ DEPLOY_DIR=/opt/perodua-iss-api
 SETTINGS=(DB_HOST DB_PORT DB_SERVICE DB_USER API_KEY_HASH PROJECT_NAME BIND_IP HTTP_PORT WORKERS)
 DB_HOST='' DB_PORT=1521 DB_SERVICE='' DB_USER='' DB_PASSWORD_FILE='' API_KEY_HASH=''
 PROJECT_NAME=perodua-iss-api BIND_IP=127.0.0.1 HTTP_PORT=8000 WORKERS=2
-COMMAND='' CONFIG='' NON_INTERACTIVE=0 CONFIRM='' PURGE=0 ASK_KEY=0 FOLLOW=0
+COMMAND='' CONFIG='' NON_INTERACTIVE=0 CONFIRM='' PURGE=0 ASK_KEY=0 KEY_FILE='' FOLLOW=0
 TEMP_DIR='' STAGE='' STAGED=0 AUTH_DIR='' CANDIDATE_KEY='' NEW_KEY=''
 # In the deployment directory, next to the generation it runs (GENERATION):
 GENERATION=(compose.yml iss-api.env secrets/db_password)
@@ -28,7 +28,7 @@ usage() {
 Usage: sudo bash iss-api.sh install [--config PATH] [--non-interactive] [--dir PATH]
        sudo bash iss-api.sh status|start|stop|restart [--dir PATH]
        sudo bash iss-api.sh logs [--follow] [--dir PATH]
-       sudo bash iss-api.sh check [--key] [--dir PATH]
+       sudo bash iss-api.sh check [--key | --key-file FILE] [--dir PATH]
        sudo bash iss-api.sh gen-key [--dir PATH]
        sudo bash iss-api.sh uninstall [--purge] [--confirm PROJECT] [--dir PATH]
 
@@ -49,14 +49,19 @@ install    Pulls the pinned image (iss-oracle-api-v1.0.0) from the private regis
            Without API_KEY_HASH the deployed key stays.
 status, start, stop and restart keep the settings. A stopped API stays stopped
            after a reboot until it is started again.
-logs       The container's log; --follow keeps reading.
-check      Runs the check again; --key asks for an API key to test a query with it.
+logs       The container's log; --follow keeps reading until it is stopped
+           (not in a non-interactive run).
+check      Runs the check again; --key asks for an API key to test a query with it,
+           --key-file FILE takes it from the first line of a file instead.
 gen-key    Issues a new API key for the release that runs; the old key stops
            working at once. It refuses while iss-api.env holds changes that
            install has not applied.
 uninstall  Removes the container and the files install created in --dir, with the
            settings and the database password. --purge also removes the image.
            Type the project name to confirm, or pass it with --confirm.
+--non-interactive, or KIT_NON_INTERACTIVE=1 in the environment: no command
+           asks (README.md, "Run the kit without a person"). install needs
+           --config or iss-api.env, uninstall --confirm, check --key-file.
 Each deployment directory needs its own PROJECT_NAME. Needs Docker with the
 Compose plugin (install-dependencies.sh --role app) and a network path from this
 server to the database port. The database needs the API_REQUEST_LOG table and
@@ -65,6 +70,18 @@ HELP
 }
 
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+# The only place that reads an answer from a person: stdin, and only when it is
+# a terminal and the run is not non-interactive. Never /dev/tty, which an agent
+# under ssh -t still has. $3 says how to give the answer without a person.
+read_terminal() {  # [-s hidden] [-k keep spaces] VAR PROMPT HOW
+    local read_options=() read_ifs=$' \t\n'
+    while [[ $1 == -[sk] ]]; do
+        if [[ $1 == -s ]]; then read_options+=(-s); else read_ifs=''; fi
+        shift
+    done
+    { ((NON_INTERACTIVE == 0)) && [[ -t 0 ]]; } || die "$3"
+    IFS=$read_ifs read -r "${read_options[@]}" -p "$2" "$1"
+}
 show_key() {
     [[ -n $NEW_KEY ]] || return 0
     printf '\nNew API key (shown only this once; store it now and give it only to the calling backend):\n  %s\n' "$NEW_KEY"
@@ -165,9 +182,10 @@ check_settings() {
 }
 
 ask() {   # $1 key, $2 question: asks again until the answer can be used
-    local answer reason
+    local answer='' reason
     while :; do
-        read -r -p "$2${!1:+ [${!1}]}: " answer || die 'Cancelled'
+        read_terminal answer "$2${!1:+ [${!1}]}: " 'No settings yet: run it on a terminal to answer the setup questions, or pass --config' \
+            || die 'Cancelled'
         answer=${answer:-${!1}}
         reason=$(problem "$1" "$answer")
         [[ -n $answer && -z $reason ]] && break
@@ -177,7 +195,7 @@ ask() {   # $1 key, $2 question: asks again until the answer can be used
 }
 
 ask_settings() {
-    local choice
+    local choice=''
     printf 'ISS-Oracle API setup. The answers are saved in %s/iss-api.env.\n' "$DEPLOY_DIR"
     ask DB_HOST 'Oracle database server (host name or IP)'
     ask DB_PORT 'Oracle listener port'
@@ -188,7 +206,7 @@ ask_settings() {
     printf '  2) Every computer that can reach this server (0.0.0.0). Put a firewall in front first:\n'
     printf '     your cloud provider'"'"'s, because ufw does not filter ports that Docker publishes\n'
     while :; do
-        read -r -p 'Choice [1]: ' choice || die 'Cancelled'
+        read_terminal choice 'Choice [1]: ' 'BIND_IP in --config sets who may call the API' || die 'Cancelled'
         case ${choice:-1} in
             1) BIND_IP=127.0.0.1; break ;;
             2) BIND_IP=0.0.0.0; break ;;
@@ -198,6 +216,15 @@ ask_settings() {
     ask HTTP_PORT 'API port on this server'
 }
 
+PASSWORD_WITHOUT_QUESTION='A first install without a terminal, or a non-interactive one, needs DB_PASSWORD_FILE in --config'
+password_ready() {   # before any change: the password that read_password will need can be had without a question
+    if [[ -n $DB_PASSWORD_FILE ]]; then
+        [[ $DB_PASSWORD_FILE == /* && -f $DB_PASSWORD_FILE && -r $DB_PASSWORD_FILE ]] \
+            || die 'DB_PASSWORD_FILE must be an absolute path to a readable file. Nothing was changed.'
+    elif [[ ! -f $DEPLOY_DIR/secrets/db_password ]] && { ((NON_INTERACTIVE)) || [[ ! -t 0 ]]; }; then
+        die "$PASSWORD_WITHOUT_QUESTION. Nothing was changed."
+    fi
+}
 read_password() {   # into the staged secrets/db_password, unless the deployed password stays
     local password=''
     if [[ -n $DB_PASSWORD_FILE ]]; then
@@ -208,10 +235,11 @@ read_password() {   # into the staged secrets/db_password, unless the deployed p
     elif [[ -f $DEPLOY_DIR/secrets/db_password ]]; then
         return 0
     elif ((NON_INTERACTIVE)) || [[ ! -t 0 ]]; then
-        die 'The first install without a terminal needs DB_PASSWORD_FILE in --config'
+        die "$PASSWORD_WITHOUT_QUESTION"
     else
         while [[ -z $password ]]; do
-            IFS= read -r -s -p 'Database password (hidden): ' password || die 'Cancelled'
+            read_terminal -s -k password 'Database password (hidden): ' "$PASSWORD_WITHOUT_QUESTION" \
+                || die 'Cancelled'
             printf '\n'
         done
     fi
@@ -231,7 +259,7 @@ new_key() {   # the service keeps only the SHA-256; the key is shown once it is 
 # ---------------------------------------------------------------- image
 auth_error() { grep -Eiq 'unauthorized|authentication required|denied|forbidden|403|401|no basic auth' "$1"; }
 pull_image() {   # asks for the registry account only when the registry wants one
-    local username token attempts=0 endpoint name='^[A-Za-z0-9][A-Za-z0-9._@-]{0,127}$'
+    local username='' token='' attempts=0 endpoint name='^[A-Za-z0-9][A-Za-z0-9._@-]{0,127}$'
     if docker image inspect "$IMAGE" > /dev/null 2>&1; then
         printf 'Pinned image already on this server: %s\n' "${IMAGE%@*}"
         return 0
@@ -247,10 +275,10 @@ pull_image() {   # asks for the registry account only when the registry wants on
         ((attempts < 3)) || die 'The registry login failed three times'
         [[ -t 0 ]] || die 'The registry login needs a terminal'
         printf 'The registry %s requires a login. Use the deployment account issued for it.\n' "$REGISTRY"
-        read -r -p 'Registry username (blank cancels): ' username || die 'Cancelled'
+        read_terminal username 'Registry username (blank cancels): ' 'The registry login needs a terminal' || die 'Cancelled'
         [[ -n $username ]] || die 'Cancelled'
         [[ $username =~ $name ]] || die 'Invalid registry username'
-        IFS= read -r -s -p 'Registry password (hidden; blank cancels): ' token || die 'Cancelled'
+        read_terminal -s -k token 'Registry password (hidden; blank cancels): ' 'The registry login needs a terminal' || die 'Cancelled'
         printf '\n'
         [[ -n $token ]] || die 'Cancelled'
         if [[ -z $AUTH_DIR ]]; then
@@ -452,7 +480,7 @@ for path, k, want in tests:
     failed += code != want
     print(f"{mark} GET {path}{' with the API key' if k else ''} -> {code} (expected {want}, {ms} ms)")
 if not key:
-    print("     A query with the API key was not tested: sudo bash iss-api.sh check --key")
+    print("     A query with the API key was not tested: sudo bash iss-api.sh check --key (or --key-file FILE)")
 if failed:
     print("Hint: 500 means the API cannot sign in to the database, or API_REQUEST_LOG or a grant is"
           " missing; the ORA- error is in: sudo bash iss-api.sh logs. 401 with a key means a wrong key.")
@@ -491,6 +519,7 @@ cmd_install() {
     fi
     if is_ours; then same_project; fi
     check_settings
+    password_ready
     claim_project
     install -d -m 0700 "$DEPLOY_DIR"
     is_ours || printf 'PROJECT_NAME=%s\nDIR=%s\n' "$PROJECT_NAME" "$DEPLOY_DIR" > "$DEPLOY_DIR/$IDENTITY"
@@ -551,8 +580,8 @@ cmd_uninstall() {
     printf 'This removes the %s container and the files install created in %s, with the settings and the database password%s.\n' \
         "$PROJECT_NAME" "$DEPLOY_DIR" "$( ((PURGE)) && printf ', and the image')"
     if [[ -z $CONFIRM ]]; then
-        [[ -t 0 ]] || die "No terminal to confirm on: pass --confirm $PROJECT_NAME. Nothing was changed."
-        read -r -p "Type the project name ($PROJECT_NAME) to confirm: " CONFIRM || die 'Cancelled'
+        read_terminal CONFIRM "Type the project name ($PROJECT_NAME) to confirm: " \
+            "A non-interactive run, or a run without a terminal, asks nothing: pass --confirm $PROJECT_NAME. Nothing was changed." || die 'Cancelled'
     fi
     [[ $CONFIRM == "$PROJECT_NAME" ]] || die 'Not confirmed. Nothing was changed.'
     claim_project
@@ -587,20 +616,43 @@ while (($#)); do
         --non-interactive) NON_INTERACTIVE=1; shift ;;
         --purge) PURGE=1; shift ;;
         --key) ASK_KEY=1; shift ;;
+        --key-file)
+            (($# >= 2)) || die "Missing value for $1"
+            KEY_FILE=$2; shift 2 ;;
         --follow) FOLLOW=1; shift ;;
         *) die "Unknown argument: $1 (see: bash iss-api.sh --help)" ;;
     esac
 done
-[[ -z $CONFIG && $NON_INTERACTIVE == 0 ]] || [[ $COMMAND == install ]] || die '--config and --non-interactive belong to install'
+[[ -z $CONFIG ]] || [[ $COMMAND == install ]] || die '--config belongs to install'
 [[ -z $CONFIRM && $PURGE == 0 ]] || [[ $COMMAND == uninstall ]] || die '--confirm and --purge belong to uninstall'
-[[ $ASK_KEY == 0 || $COMMAND == check ]] || die '--key belongs to check'
+[[ $ASK_KEY == 0 && -z $KEY_FILE ]] || [[ $COMMAND == check ]] || die '--key and --key-file belong to check'
+[[ $ASK_KEY == 0 || -z $KEY_FILE ]] || die 'Use --key or --key-file, not both'
+# --non-interactive, or KIT_NON_INTERACTIVE=1 in the environment: no question
+# at all (README.md, "Run the kit without a person"). Each answer comes from an
+# option or a setting; a missing one stops the run before it changes anything.
+case ${KIT_NON_INTERACTIVE:-} in
+    ''|0) ;;
+    1) NON_INTERACTIVE=1 ;;
+    *) die 'KIT_NON_INTERACTIVE must be 1 (never ask) or 0 (ask on a terminal).' ;;
+esac
+((NON_INTERACTIVE == 0)) || export KIT_NON_INTERACTIVE=1
+((ASK_KEY == 0 || NON_INTERACTIVE == 0)) || die 'check --key asks for the key, and a non-interactive run never asks: pass --key-file FILE'
+# Read as a regular file only: never a terminal, never a pipe that may not end.
+[[ -z $KEY_FILE ]] || [[ -f $KEY_FILE && -r $KEY_FILE ]] || die "--key-file must be a readable regular file: $KEY_FILE"
 [[ $FOLLOW == 0 || $COMMAND == logs ]] || die '--follow belongs to logs'
+# logs --follow reads until it is stopped: a run without a person must end by itself.
+((FOLLOW == 0 || NON_INTERACTIVE == 0)) || die 'logs --follow runs until it is stopped, and a non-interactive run must end: use logs without --follow'
 [[ $DEPLOY_DIR == /* ]] || die '--dir must be an absolute path'
 [[ ! -L ${DEPLOY_DIR%/} ]] || die '--dir must not be a symbolic link'
 DEPLOY_DIR=$(realpath -m -- "$DEPLOY_DIR")
 [[ $DEPLOY_DIR != / ]] || die '--dir cannot be /'
 STAGE=$DEPLOY_DIR/.stage
 [[ $EUID -eq 0 ]] || die 'Run with sudo or as root.'
+protected_file() {  # $1 a secret file, $2 its option: root-owned, not a symlink, no group/other permissions
+    [[ -f $1 && ! -L $1 && $(stat -c %u "$1") == 0 ]] || die "$2 must be a root-owned regular file, not a symlink: $1"
+    (( (8#$(stat -c %a "$1") & 8#077) == 0 )) || die "$2 must have no group/other permissions (use chmod 600): $1"
+}
+[[ -z $KEY_FILE ]] || protected_file "$KEY_FILE" --key-file
 if ! command -v docker > /dev/null || ! docker compose version > /dev/null 2>&1; then
     die 'Docker with the Compose plugin is required: sudo bash install-dependencies.sh --role app'
 fi
@@ -619,9 +671,12 @@ case $COMMAND in
         open_deployment
         key=''
         if ((ASK_KEY)); then
-            [[ -t 0 ]] || die '--key needs a terminal to ask for the key'
-            read -r -s -p 'API key (hidden): ' key || die 'Cancelled'
+            read_terminal -s key 'API key (hidden): ' '--key needs a terminal to ask for the key: pass --key-file FILE instead' || die 'Cancelled'
             printf '\n'
+        elif [[ -n $KEY_FILE ]]; then
+            key=$(head -n 1 -- "$KEY_FILE")
+            key=${key%$'\r'}   # a file saved on Windows
+            [[ -n $key ]] || die "--key-file $KEY_FILE holds no key on its first line"
         fi
         smoke_test "$key" ;;
     gen-key) cmd_gen_key ;;

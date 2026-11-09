@@ -1723,3 +1723,88 @@ These optional audit tools are standard-library Python and PostgreSQL clients;
 they are not needed for deployment. Never commit the dump, source audit metadata,
 real configuration or passwords to this repository. No-writer assumptions and
 the shared-source-snapshot contract are documented in `snapshot_audit.py`.
+
+## Runs without a person (test_non_interactive.py)
+
+Owner rule 10d: no kit script waits for a person when an agent runs it. The
+agent sets `KIT_NON_INTERACTIVE=1` or passes `--non-interactive`
+([README.md](../README.md#run-the-kit-without-a-person-agents)).
+`test_non_interactive.py` checks it in two ways.
+
+Static checks, on any host:
+
+- No script uses `/dev/tty`: not `[[ -r /dev/tty ]]`, which tests only the file
+  mode, not a read, which reaches an agent under `ssh -t` also when its stdin
+  is `/dev/null`, and not a write.
+- A person's answer is read only in `read_terminal`, one helper with the same
+  text in each script. It refuses in a non-interactive run and when stdin is not
+  a terminal. Each other `read` or `mapfile` (also a bare `read VAR`) takes its
+  input from a file, a string, a process substitution or a pipe. The check
+  reads the shell code without heredocs, comments and quoted text; a quoted
+  text over several lines stays one command.
+- Each server script accepts `--non-interactive`, checks `KIT_NON_INTERACTIVE`
+  (1, 0 or empty), and passes the mode on to a kit script that it starts.
+  `oracle-view-stream.sh` runs on the Mac and asks nothing: it has neither, but
+  the checks of the reads and of the external commands cover it.
+- No external command can ask: no `curl --user`, no `openssl pkey` without
+  `-passin`, no `docker login` without `--password-stdin`, no `apt-get install`
+  without `-y` and `--force-confold`, no `sudo` without `-n`, no `ssh` without
+  `BatchMode=yes` (`ssh -G` only prints the configuration), no container with a
+  terminal (`-it`, `--tty`, `docker run -i` that is not at the end of a pipe, a
+  Compose `run` or `exec` without `-T`), no `input()` or `getpass` in Python and
+  no `Read-Host` in PowerShell.
+- No command reads the standard input of the script by mistake: a Compose `run`
+  or `exec` has a redirection (`</dev/null`) or a pipe, and so do `cat`, `head`,
+  `tail`, `base64`, `sha256sum` and `wc` without a file and `python3 -`; or each
+  call of their function gives one. No `select`.
+- The help of each script names the option and the variable.
+
+Checks on a pseudo-terminal: each script runs on a new pseudo-terminal (stdin,
+stdout, stderr and the controlling terminal, as `ssh -t` gives an agent), and
+nothing is typed. With the variable or the option, the run must end within 20
+seconds and show no question. Each question then takes its option, or the run
+stops before any change with an error that names the option. Without them, a
+person is still asked (one sample per script). The checks use the fakes of the
+other test modules:
+
+| Script | With the variable or the option | A person |
+| --- | --- | --- |
+| `deploy-db.sh` (fakes of `test_deploy_db_guided.py`) | Without `deploy.conf`: refused, names `--app-ip` and `--app-here`. `--app-ip` with `--listen-ip`, and `--app-here`, save `deploy.conf`; an unusable answer stops without a file; the options never replace another `deploy.conf`. No `--password-file`: refused before the guided setup saves anything, and the retry with it uses the `deploy.conf` of the options. As root: `--password-file` and `--cloud-password-file` that are a symlink, readable by others, not owned by root, a CRLF line or a short password are refused before PostgreSQL starts | The guided setup asks, also with `KIT_NON_INTERACTIVE=0` |
+| `service.sh` (`test_service_app.py`) | `reset` without `--confirm`: refused, nothing deleted; the settings check of `deploy-app.sh` gets `--non-interactive`. With `--confirm`: both `deploy-app.sh` runs get `--non-interactive`, and `KIT_NON_INTERACTIVE=1` in their environment (also with the option alone) | Asked to type the database name; `KIT_NON_INTERACTIVE=0` reaches `deploy-app.sh` as it is |
+| `uninstall.sh` (`test_uninstall_app.py`) | No `--confirm`: nothing changes. Other containers stay unless `--delete-old-containers` names their project, or, without a project, their IDs (`-:ID,ID`; a plain `-` is refused); a container it does not name stays, and a run of `rp-adapter.sh` (label `com.perodua.rp-adapter`) is never listed. Their volumes go only with `--delete-old-volumes`. `--role db` without `--confirm` stops before PostgreSQL starts. The option checks, before root | Asked y/N |
+| `deploy-app.sh` (`test_deploy_app.py`, `test_deploy_app_uat.py`, `test_deploy_app_module_upgrade.py`) | No settings: names `DB_HOST`. `--mail`: refused. A registry login: refused, names `docker login`. Leftover attachments: stop, names `--delete-old-attachments VOLUME`; with it, the volume goes without a question; another volume name or no `--init-db`: refused before Docker. With the variable alone: no database password (`DB_PASSWORD_FILE` named), the saved one of an unverified run kept, no SMTP password (`SMTP_PASSWORD_FILE` named), no "Who may open the web page?", and `--upgrade` with a module upgrade refused without `--confirm` | Asked for the database server |
+| `iss-api.sh` (`test_iss_api.py`) | `check --key-file` sends the key to the check on stdin; a key file that is a symlink, readable by others or not owned by root: refused; `check --key`: refused at once. `logs --follow`: refused. `uninstall` without `--confirm`, a first `install` without settings, and one without `DB_PASSWORD_FILE` (no directory made): refused | Asked to type the project name |
+| `rp-adapter.sh` (`test_rp_adapter.py`) | `uninstall` without `--confirm`, a first `install` without settings or without `DB_PASSWORD_FILE` or `API_KEY_FILE` (no directory made), a registry login: refused | Asked to type the directory |
+| `https.sh` (`test_https.py`) | `csr --key` with an encrypted key (PEM or DER): refused, names `--key-pass-file`; openssl never asks, and `openssl pkey -passin pass:` itself ends at once on a terminal. With `--key-pass-file` (also CRLF, or no line end), `key.pem` is the key, unencrypted; another pass phrase, an empty first line, a symlink, a file readable by others or not owned by root: refused. `uninstall` without `--confirm`: refused | Asked for the pass phrase of a PEM or DER key, which is not echoed; an empty pass phrase never reaches openssl; a plaintext key that openssl cannot read asks nothing |
+| `oracle-view.sh` (`test_oracle_view.py`) | `uninstall` and `drop-role` without `--confirm`: refused. `install` with a registry that wants a login: refused, names `docker login`. `--non-interactive` belongs to every command | Asked to type the project name, also with `KIT_NON_INTERACTIVE=0` |
+| every script | Another value of `KIT_NON_INTERACTIVE` (`yes`, `true`, `2`) stops at once | |
+
+The pseudo-terminal checks have the gates of the modules whose fakes they use:
+Linux for `deploy-db.sh` and `deploy-app.sh` (and a non-loopback IPv4 address
+for `deploy-db.sh`, and root for its password-file checks), root on Linux for
+`service.sh`, `iss-api.sh`, `rp-adapter.sh`, `https.sh` and `oracle-view.sh`,
+root on Ubuntu 24.04 for `uninstall.sh`. The test
+image runs all of them. It needs a network (not `--network none`): without one,
+the container has no IPv4 address besides loopback and the `deploy-db.sh`
+checks are skipped. Nothing in the tests connects to the network.
+
+```bash
+docker build -t perodua-deploy-db-test -f tests/Dockerfile tests
+docker run --rm --entrypoint env \
+  --mount "type=bind,source=$PWD,target=/src,readonly" \
+  perodua-deploy-db-test -u KIT_NON_INTERACTIVE \
+  python3 -m unittest discover -s /src/tests -p test_non_interactive.py -v
+```
+
+Run every test of this folder without `KIT_NON_INTERACTIVE` in the environment
+(`env -u KIT_NON_INTERACTIVE`, as above): the other modules check the questions
+of a person, and the variable would refuse them.
+
+`check-https-download.py`, in the database integration checks, also restores
+with `--cloud-password-file` in a non-interactive run on a pseudo-terminal:
+nothing is asked, and curl gets the password with the special characters on
+its stdin, also one with a backslash, a `#`, and spaces and tabs at its start
+and end. Without the file, a non-interactive run stops before the download (no
+request reaches the server) for a database that is not deployed, and a rerun of
+a deployed one needs no file. `check-uninstall-purge.py` ends with a
+non-interactive `--purge --confirm-purge PURGE` that asks nothing.

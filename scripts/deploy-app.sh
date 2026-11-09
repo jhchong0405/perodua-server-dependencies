@@ -144,6 +144,9 @@ IMAGE_MAIL=''
 # IMAGE_MAIL, so the backup of an --upgrade from it keeps app.env as it is.
 NO_IMAGE_MAIL_RELEASES=demo-uiux-grey-v0.55.0
 MAIL=0 TEST_MAIL='' smtp_password=''
+# --delete-old-attachments: the attachments volume that a new UAT database may
+# delete when an earlier deployment of the project left files in it.
+DELETE_ATTACHMENTS=''
 # The settings the configuration file gives a value, and whether that file is an
 # app.env written by hand in the deployment directory before its first run.
 declare -A SET=()
@@ -152,7 +155,7 @@ PREPARED=0
 usage() {
     cat <<'HELP'
 Usage: bash deploy-app.sh [--config PATH] [--dir PATH] [--non-interactive] [--init-db]
-                          [--line LINE] [--replace DIR]
+                          [--line LINE] [--replace DIR] [--delete-old-attachments VOLUME]
        bash deploy-app.sh [--config PATH] [--dir PATH] --check-config
        bash deploy-app.sh --upgrade [--dir PATH] [--backup-dir PATH] [--non-interactive]
                           [--confirm DATABASE] [--drop-retired-data]
@@ -223,6 +226,13 @@ is off.
 another project and another database, such as the client-stable-uiux line on
 the same port. Right before this App starts, the App of DIR stops; nothing of
 DIR is removed. --dir/rollback.sh stops this App and starts that one again.
+--delete-old-attachments VOLUME: with --init-db, a new empty database deletes
+the attachments volume VOLUME (PROJECT_NAME_filestore) that an earlier
+deployment of the project left files in, without the question that asks for
+it. Without it, a run without a terminal stops there.
+--non-interactive, or KIT_NON_INTERACTIVE=1 in the environment, never asks
+(README.md, "Run the kit without a person"): every value comes from --config,
+app.env or an option, and a missing one stops the run.
 HELP
 }
 fail() { printf 'Error: %s\n' "$*" >&2; exit 1; }
@@ -391,9 +401,10 @@ trap 'exit 130' INT TERM
 trap '[[ $BASHPID != "$$" ]] || printf "Deployment failed at line %s.\n" "$LINENO" >&2' ERR
 while (($#)); do
     case $1 in
-        --config|--dir|--backup-dir|--confirm|--send-test-mail|--line|--replace)
+        --config|--dir|--backup-dir|--confirm|--send-test-mail|--line|--replace|--delete-old-attachments)
             (($# >= 2)) || fail "$1 requires a value"
             case $1 in
+                --delete-old-attachments) DELETE_ATTACHMENTS=$2; [[ -n $DELETE_ATTACHMENTS ]] || fail '--delete-old-attachments requires the attachments volume, PROJECT_NAME_filestore' ;;
                 --config) CONFIG=$2 ;;
                 --dir) DEPLOY_DIR=$2 ;;
                 --backup-dir) BACKUP_BASE=$2 ;;
@@ -414,6 +425,17 @@ while (($#)); do
         *) fail "Unknown argument: $1" ;;
     esac
 done
+# --non-interactive, or KIT_NON_INTERACTIVE=1 in the environment: no question
+# at all (README.md, "Run the kit without a person"). Each answer comes from an
+# option or a setting; a missing one stops the run.
+case ${KIT_NON_INTERACTIVE:-} in
+    ''|0) ;;
+    1) NON_INTERACTIVE=1 ;;
+    *) fail 'KIT_NON_INTERACTIVE must be 1 (never ask) or 0 (ask on a terminal)' ;;
+esac
+((NON_INTERACTIVE == 0)) || export KIT_NON_INTERACTIVE=1
+[[ -z $DELETE_ATTACHMENTS ]] || ((INIT_DB && UPGRADE == 0)) \
+    || fail '--delete-old-attachments applies only to --init-db: a new empty database'
 [[ $DEPLOY_DIR == /* && $DEPLOY_DIR != / && $DEPLOY_DIR != *$'\n'* ]] || fail '--dir must be an absolute directory path, not /'
 [[ ! -L $DEPLOY_DIR ]] || fail 'Deployment directory must not be a symbolic link'
 if ((UPGRADE)); then
@@ -537,11 +559,25 @@ if [[ -n $IMAGE_MAIL ]]; then
 fi
 # --check-config never asks: there must be settings to check.
 ((CHECK_ONLY == 0)) || [[ -n $CONFIG ]] || fail "--check-config needs --config or $DEPLOY_DIR/app.env"
+# The only place that reads an answer from a person: stdin, and only when it is
+# a terminal and the run is not non-interactive. Never /dev/tty, which an agent
+# under ssh -t still has. $3 says how to give the answer without a person.
+read_terminal() {  # [-s hidden] [-k keep spaces] VAR PROMPT HOW
+    local read_options=() read_ifs=$' \t\n'
+    while [[ $1 == -[sk] ]]; do
+        if [[ $1 == -s ]]; then read_options+=(-s); else read_ifs=''; fi
+        shift
+    done
+    { ((NON_INTERACTIVE == 0)) && [[ -t 0 ]]; } || fail "$3"
+    IFS=$read_ifs read -r "${read_options[@]}" -p "$2" "$1"
+}
+# The way to give the outgoing email settings without the questions of ask_mail.
+MAIL_WITHOUT_QUESTIONS='The outgoing email questions need a terminal. Without one, write the SMTP_ settings and MAIL_REDIRECT_TO into app.env and run deploy-app.sh --non-interactive'
 prompt() {
-    local name=$1 label=$2 answer
+    local name=$1 label=$2 answer=''
     if ((NON_INTERACTIVE)); then [[ -n ${!name} ]] || fail "$name is required in --config"; return; fi
-    [[ -t 0 ]] || fail 'Interactive deployment requires a terminal; use --config and --non-interactive'
-    read -r -p "$label [${!name}]: " answer || fail 'Input cancelled'
+    read_terminal answer "$label [${!name}]: " 'Interactive deployment requires a terminal; use --config and --non-interactive' \
+        || fail 'Input cancelled'
     [[ -z $answer ]] || printf -v "$name" '%s' "$answer"
     [[ -n ${!name} ]] || fail "$name is required"
 }
@@ -583,12 +619,12 @@ mail_problem() {  # why $2 cannot be the value of the mail setting $1, if it can
     esac
 }
 ask_mail_value() {  # $1 setting, $2 question, $3 what no value means when it may stay empty
-    local name=$1 question=$2 answer problem
+    local name=$1 question=$2 answer='' problem
     # Enter keeps the value shown. - leaves one that may stay empty without a
     # value; so does Enter when none is shown.
     if [[ -n ${3:-} && -n ${!name} ]]; then question+=" (- for $3)"; elif [[ -n ${3:-} ]]; then question+=" (Enter for $3)"; fi
     while :; do
-        read -r -p "$question [${!name}]: " answer || fail 'Input cancelled'
+        read_terminal answer "$question [${!name}]: " "$MAIL_WITHOUT_QUESTIONS" || fail 'Input cancelled'
         if [[ -n ${3:-} && $answer == - ]]; then answer=''; else answer=${answer:-${!name}}; fi
         if [[ -z $answer ]]; then
             [[ -z ${3:-} ]] || break
@@ -617,13 +653,14 @@ mail_summary() {  # the outgoing email settings in one line, without the passwor
     fi
 }
 ask_mail() {  # the outgoing email questions: a first run that chose them, or --mail
-    local answer problem saved='' default encryptions=(starttls ssl none) ports=(587 465 25)
+    local answer='' problem saved='' default encryptions=(starttls ssl none) ports=(587 465 25)
     printf '\nOutgoing email. The answers are saved in %s/app.env, the SMTP password in %s/secrets/smtp_password.\n' "$DEPLOY_DIR" "$DEPLOY_DIR"
     while :; do
-        read -r -p "SMTP server, host name or IP address (- for none) [$SMTP_HOST]: " answer || fail 'Input cancelled'
+        read_terminal answer "SMTP server, host name or IP address (- for none) [$SMTP_HOST]: " "$MAIL_WITHOUT_QUESTIONS" \
+            || fail 'Input cancelled'
         if [[ $answer == - ]]; then answer=''; else answer=${answer:-$SMTP_HOST}; fi
         if [[ -z $answer ]]; then
-            read -r -p 'Switch outgoing email off? [y/N]: ' answer || fail 'Input cancelled'
+            read_terminal answer 'Switch outgoing email off? [y/N]: ' "$MAIL_WITHOUT_QUESTIONS" || fail 'Input cancelled'
             [[ ${answer:-n} == [Yy]* ]] || continue
             for key in "${MAIL_KEYS[@]}"; do printf -v "$key" '%s' ''; done
             smtp_password=''
@@ -641,7 +678,7 @@ ask_mail() {  # the outgoing email questions: a first run that chose them, or --
     printf '  2) SSL/TLS, port 465\n'
     printf '  3) None, port 25: an internal relay only, without sign-in\n'
     while :; do
-        read -r -p "Choose [$default]: " answer || fail 'Input cancelled'
+        read_terminal answer "Choose [$default]: " "$MAIL_WITHOUT_QUESTIONS" || fail 'Input cancelled'
         answer=${answer:-$default}
         [[ $answer != [123] ]] || break
         printf 'Enter a number from 1 to 3.\n'
@@ -663,9 +700,10 @@ ask_mail() {  # the outgoing email questions: a first run that chose them, or --
         if [[ -n $SMTP_PASSWORD_FILE && -r $SMTP_PASSWORD_FILE ]] || [[ -r $DEPLOY_DIR/secrets/smtp_password ]]; then saved=1; fi
         while :; do
             if [[ -n $saved ]]; then
-                IFS= read -r -s -p 'SMTP password (hidden; Enter keeps the saved one): ' smtp_password || fail 'Input cancelled'
+                read_terminal -s -k smtp_password 'SMTP password (hidden; Enter keeps the saved one): ' "$MAIL_WITHOUT_QUESTIONS" \
+                    || fail 'Input cancelled'
             else
-                IFS= read -r -s -p 'SMTP password (hidden): ' smtp_password || fail 'Input cancelled'
+                read_terminal -s -k smtp_password 'SMTP password (hidden): ' "$MAIL_WITHOUT_QUESTIONS" || fail 'Input cancelled'
             fi
             printf '\n'
             [[ -n $smtp_password || -z $saved ]] || break
@@ -680,7 +718,7 @@ ask_mail() {  # the outgoing email questions: a first run that chose them, or --
     ask_mail_value SMTP_FROM 'Sender address of every email'
     ask_mail_value SMTP_FROM_NAME 'Sender name of every email' "the author's name"
     while :; do
-        read -r -p 'Send every email to one test address? [Y/n]: ' answer || fail 'Input cancelled'
+        read_terminal answer 'Send every email to one test address? [Y/n]: ' "$MAIL_WITHOUT_QUESTIONS" || fail 'Input cancelled'
         if [[ ${answer:-y} == [Yy]* ]]; then
             [[ $MAIL_REDIRECT_TO != off ]] || MAIL_REDIRECT_TO=''
             ask_mail_value MAIL_REDIRECT_TO 'Test address that gets every email'
@@ -690,7 +728,8 @@ ask_mail() {  # the outgoing email questions: a first run that chose them, or --
             continue
         fi
         printf 'Then every email goes to its real recipients: users, suppliers and customers.\n'
-        read -r -p 'Type SEND REAL MAIL to confirm: ' answer || fail 'Input cancelled'
+        read_terminal answer 'Type SEND REAL MAIL to confirm: ' 'MAIL_REDIRECT_TO=off in app.env sends every email to its real recipients without this question' \
+            || fail 'Input cancelled'
         if [[ $answer == 'SEND REAL MAIL' ]]; then MAIL_REDIRECT_TO=off; break; fi
         printf 'The confirmation did not match.\n'
     done
@@ -737,7 +776,7 @@ public_addresses() {
     for address in $(server_addresses); do is_private_ipv4 "$address" || printf '%s\n' "$address"; done
 }
 choose_bind_ip() {
-    local private=() public=() options answer default number=1 address
+    local private=() public=() options answer='' default number=1 address
     for address in $(server_addresses); do
         if is_private_ipv4 "$address"; then private+=("$address"); else public+=("$address"); fi
     done
@@ -752,7 +791,8 @@ choose_bind_ip() {
     default=1
     ((${#private[@]} == 0)) || default=2
     while :; do
-        read -r -p "Choose [$default]: " answer || fail 'Input cancelled'
+        read_terminal answer "Choose [$default]: " 'BIND_IP in --config or app.env sets who may open the web page; use --config and --non-interactive' \
+            || fail 'Input cancelled'
         answer=${answer:-$default}
         if [[ ! $answer =~ ^[1-9][0-9]?$ ]] || ((answer > ${#options[@]})); then
             printf 'Enter a number from 1 to %s.\n' "${#options[@]}"
@@ -761,7 +801,8 @@ choose_bind_ip() {
         BIND_IP=${options[answer - 1]}
         [[ $BIND_IP == 0.0.0.0 && ${#public[@]} -gt 0 ]] || break
         printf '%s is a public internet address: anyone on the internet could open the page and sign in with the UAT passwords in the README, unless a cloud firewall (security group) blocks port %s. Docker opens published ports past ufw.\n' "${public[*]}" "$HTTP_PORT"
-        read -r -p 'Open it on every address anyway? [y/N]: ' answer || fail 'Input cancelled'
+        read_terminal answer 'Open it on every address anyway? [y/N]: ' 'BIND_IP=0.0.0.0 in --config or app.env opens it on every address; use --config and --non-interactive' \
+            || fail 'Input cancelled'
         [[ ${answer:-n} != [Yy]* ]] || break
     done
 }
@@ -788,7 +829,8 @@ if [[ -z $CONFIG ]]; then
     ((NON_INTERACTIVE)) || choose_bind_ip
     if ((MAIL_SUPPORTED && NON_INTERACTIVE == 0 && MAIL == 0)); then
         printf '\n'
-        read -r -p 'Configure outgoing email now? [y/N]: ' answer || fail 'Input cancelled'
+        answer=''
+        read_terminal answer 'Configure outgoing email now? [y/N]: ' "$MAIL_WITHOUT_QUESTIONS" || fail 'Input cancelled'
         [[ ${answer:-n} != [Yy]* ]] || MAIL=1
     fi
 elif [[ -z $DB_HOST ]]; then
@@ -811,6 +853,8 @@ for key in DB_NAME DB_USER; do
 done
 [[ $DB_NAME != postgres && $DB_NAME != template0 && $DB_NAME != template1 ]] || fail 'DB_NAME must be an application database'
 [[ $PROJECT_NAME =~ ^[a-z][a-z0-9_-]{0,49}$ ]] || fail 'PROJECT_NAME must be a lowercase Compose project name (max 50 characters)'
+[[ -z $DELETE_ATTACHMENTS || $DELETE_ATTACHMENTS == "${PROJECT_NAME}_filestore" ]] \
+    || fail "--delete-old-attachments must name ${PROJECT_NAME}_filestore, the attachments volume of PROJECT_NAME $PROJECT_NAME"
 for key in DB_PORT HTTP_PORT STARTUP_TIMEOUT INIT_TIMEOUT; do
     [[ ${!key} =~ ^[1-9][0-9]{0,4}$ ]] || fail "$key must be a positive integer"
     ((${!key} <= 65535)) || fail "$key exceeds 65535"
@@ -971,6 +1015,14 @@ docker compose version >/dev/null 2>&1 || fail 'Docker Compose v2 is required'
 docker info >/dev/null 2>&1 || fail 'Cannot reach Docker. Start the engine and check your account permissions'
 engine=$(docker info --format '{{.OSType}}/{{.Architecture}}')
 [[ $engine == linux/x86_64 || $engine == linux/amd64 ]] || fail 'The Docker engine must run Linux amd64 containers'
+# A non-interactive run without a password stops before the directory is made:
+# the password comes from its file or from the secret of an earlier run.
+if ((NON_INTERACTIVE)); then
+    [[ -n $DB_PASSWORD_FILE || -r $DEPLOY_DIR/secrets/db_password ]] \
+        || fail 'DB_PASSWORD_FILE is required for the first non-interactive deployment'
+    [[ -z $SMTP_USER || -n $smtp_password || -n $SMTP_PASSWORD_FILE || -r $DEPLOY_DIR/secrets/smtp_password ]] \
+        || fail 'SMTP_USER needs SMTP_PASSWORD_FILE for a non-interactive deployment'
+fi
 mkdir -p -- "$DEPLOY_DIR"
 DEPLOY_DIR=$(cd -- "$DEPLOY_DIR" && pwd -P)
 [[ $DEPLOY_DIR != / && $DEPLOY_DIR != *$'\n'* ]] || fail 'Unsupported directory path'
@@ -1097,7 +1149,9 @@ if docker volume inspect "$FILESTORE_VOLUME" >/dev/null 2>&1; then LEFTOVER=1; f
 if unverified && [[ -z $DB_PASSWORD_FILE || $DB_PASSWORD_FILE -ef $DEPLOY_DIR/secrets/db_password ]] \
         && ((NON_INTERACTIVE == 0)) && [[ -t 0 && -r $DEPLOY_DIR/secrets/db_password ]]; then
     # The password the earlier first run saved may be the reason it stopped.
-    read -r -s -p 'Database password (hidden; Enter keeps the one entered before): ' password || fail 'Input cancelled'
+    password=''
+    read_terminal -s password 'Database password (hidden; Enter keeps the one entered before): ' \
+        'DB_PASSWORD_FILE is required for the first non-interactive deployment' || fail 'Input cancelled'
     printf '\n'
     [[ -n $password ]] || password=$(<"$DEPLOY_DIR/secrets/db_password")
 elif [[ -n $DB_PASSWORD_FILE ]]; then
@@ -1107,7 +1161,8 @@ elif [[ -r $DEPLOY_DIR/secrets/db_password ]]; then
 else
     ((NON_INTERACTIVE == 0)) || fail 'DB_PASSWORD_FILE is required for the first non-interactive deployment'
     [[ -t 0 ]] || fail 'Password input requires a terminal'
-    read -r -s -p 'Database password (hidden): ' password || fail 'Input cancelled'
+    password=''
+    read_terminal -s password 'Database password (hidden): ' 'Password input requires a terminal' || fail 'Input cancelled'
     printf '\n'
 fi
 problem=$(password_problem "$password")
@@ -1129,7 +1184,7 @@ if [[ -n $SMTP_USER ]]; then
         else
             ((NON_INTERACTIVE == 0)) || fail 'SMTP_USER needs SMTP_PASSWORD_FILE for a non-interactive deployment'
             [[ -t 0 ]] || fail 'SMTP password input requires a terminal'
-            IFS= read -r -s -p 'SMTP password (hidden): ' smtp_password || fail 'Input cancelled'
+            read_terminal -s -k smtp_password 'SMTP password (hidden): ' 'SMTP password input requires a terminal' || fail 'Input cancelled'
             printf '\n'
         fi
     fi
@@ -1155,10 +1210,11 @@ pull_image() {
         ((attempts < 3)) || fail 'Registry authentication failed after three attempts'
         [[ -t 0 ]] || fail 'Registry authentication requires a terminal'
         printf 'The registry %s requires authentication. Use the deployment account issued for it.\n' "$REGISTRY"
-        read -r -p 'Registry username (blank cancels): ' username || fail 'Login cancelled'
+        username='' token=''
+        read_terminal username 'Registry username (blank cancels): ' 'Registry authentication requires a terminal' || fail 'Login cancelled'
         [[ -n $username ]] || fail 'Login cancelled'
         [[ $username =~ ^[A-Za-z0-9][A-Za-z0-9._@-]{0,127}$ ]] || fail 'Invalid registry username'
-        read -r -s -p 'Registry password (hidden; blank cancels): ' token || fail 'Login cancelled'
+        read_terminal -s token 'Registry password (hidden; blank cancels): ' 'Registry authentication requires a terminal' || fail 'Login cancelled'
         printf '\n'
         [[ -n $token ]] || fail 'Login cancelled'
         if [[ -z $AUTH_DIR ]]; then
@@ -2290,7 +2346,9 @@ PLAN
     if ((NON_INTERACTIVE)) || [[ ! -t 0 ]]; then
         fail "A module upgrade needs a confirmation: run on a terminal, or pass --confirm $DB_NAME"
     fi
-    read -r -p "Type $DB_NAME to start the module upgrade: " answer || fail 'Input cancelled'
+    answer=''
+    read_terminal answer "Type $DB_NAME to start the module upgrade: " \
+        "A module upgrade needs a confirmation: run on a terminal, or pass --confirm $DB_NAME" || fail 'Input cancelled'
     [[ $answer == "$DB_NAME" ]] || fail 'The confirmation did not match'
 }
 export_retired_data() {  # the owner agreed (--drop-retired-data): keep a copy next to the backup
@@ -2591,8 +2649,10 @@ mv -f -- "$TEMP_DIR/identity" "$DEPLOY_DIR/.deployment-identity"
 chmod 0600 "$DEPLOY_DIR/app.env"
 compose() { docker compose --project-name "$PROJECT_NAME" --file "$DEPLOY_DIR/compose.yml" "$@"; }
 compose config --quiet
-preflight() { compose run --rm --no-deps -T odoo python3 /opt/deploy/preflight.py "$@"; }
-uat_helper() { compose run --rm --no-deps -T odoo python3 /opt/deploy/uat_guard.py "$@"; }
+# </dev/null: else Compose passes the standard input of this script to the
+# container, a terminal or the rest of a script that ssh gives on stdin.
+preflight() { compose run --rm --no-deps -T odoo python3 /opt/deploy/preflight.py "$@" </dev/null; }
+uat_helper() { compose run --rm --no-deps -T odoo python3 /opt/deploy/uat_guard.py "$@" </dev/null; }
 uat_setup() {
     # Reached only from a fresh initialization or its interrupted resumption,
     # never from an ordinary redeploy, so UAT passwords are not reset later.
@@ -2605,7 +2665,7 @@ uat_setup() {
     # shellcheck disable=SC2016
     timeout --foreground "$INIT_TIMEOUT" docker compose --project-name "$PROJECT_NAME" --file "$DEPLOY_DIR/compose.yml" run --rm --no-deps -T odoo \
         bash -c 'PGPASSWORD="$DB_PASSWORD" exec odoo shell -c /etc/odoo/odoo.conf -d "$DB_NAME" --db_host="$DB_HOST" --db_port="$DB_PORT" --db_user="$DB_USER" < /opt/deploy/uat_admins.py' \
-        > "$DEPLOY_DIR/uat-setup.log" 2>&1 || fail "UAT administrator setup failed; see $DEPLOY_DIR/uat-setup.log. Rerun with --init-db to retry it; modules are not reinstalled"
+        </dev/null > "$DEPLOY_DIR/uat-setup.log" 2>&1 || fail "UAT administrator setup failed; see $DEPLOY_DIR/uat-setup.log. Rerun with --init-db to retry it; modules are not reinstalled"
     grep -F 'UAT admins: ready:' "$DEPLOY_DIR/uat-setup.log" || fail "UAT administrator setup did not confirm completion; see $DEPLOY_DIR/uat-setup.log"
     [[ $LINE != demo-uiux ]] || uat_demo install
     state=$(preflight verify-fresh)
@@ -2721,18 +2781,22 @@ uat_demo_apply() {  # job $1: the passwords of the record $2 into the database, 
 clear_leftover_attachments() {
     # Files an earlier deployment of this project left in the volume belong to
     # that deployment's database, not to a new empty one.
-    local files answer
+    local files answer=''
     files=$(compose run --rm --no-deps -T odoo bash -c 'find /var/lib/odoo/filestore -type f 2>/dev/null | wc -l' </dev/null) \
         || fail "Cannot read the attachments volume $FILESTORE_VOLUME"
     [[ $files =~ ^[0-9]+$ ]] || fail "Cannot read the attachments volume $FILESTORE_VOLUME"
     ((files > 0)) || return 0
     printf 'The attachments volume %s still holds %s files from an earlier deployment of this project. They belong to its database, so a new UAT system cannot use them.\n' "$FILESTORE_VOLUME" "$files"
-    if ((NON_INTERACTIVE)) || [[ ! -t 0 ]]; then
-        fail "Delete the volume (sudo docker volume rm $FILESTORE_VOLUME) or set another PROJECT_NAME, then rerun. The database was not changed"
+    # --delete-old-attachments names this volume (checked with the settings): no question.
+    if [[ -z $DELETE_ATTACHMENTS ]]; then
+        if ((NON_INTERACTIVE)) || [[ ! -t 0 ]]; then
+            fail "Delete the volume (sudo docker volume rm $FILESTORE_VOLUME), or pass --delete-old-attachments $FILESTORE_VOLUME, or set another PROJECT_NAME, then rerun. The database was not changed"
+        fi
+        read_terminal answer "Delete $FILESTORE_VOLUME and continue? [y/N]: " \
+            "Pass --delete-old-attachments $FILESTORE_VOLUME to delete it. The database was not changed" || fail 'Input cancelled'
+        [[ ${answer:-n} == [Yy]* ]] \
+            || fail "Kept $FILESTORE_VOLUME. Delete it (sudo docker volume rm $FILESTORE_VOLUME) or set another PROJECT_NAME, then rerun. The database was not changed"
     fi
-    read -r -p "Delete $FILESTORE_VOLUME and continue? [y/N]: " answer || fail 'Input cancelled'
-    [[ ${answer:-n} == [Yy]* ]] \
-        || fail "Kept $FILESTORE_VOLUME. Delete it (sudo docker volume rm $FILESTORE_VOLUME) or set another PROJECT_NAME, then rerun. The database was not changed"
     docker volume rm "$FILESTORE_VOLUME" >/dev/null || fail "Could not delete $FILESTORE_VOLUME"
     printf 'Deleted %s.\n' "$FILESTORE_VOLUME"
 }
@@ -2776,7 +2840,7 @@ case $state in
         STARTED=1
         timeout --foreground "$INIT_TIMEOUT" docker compose --project-name "$PROJECT_NAME" --file "$DEPLOY_DIR/compose.yml" run --rm --no-deps -T odoo \
             odoo -c /etc/odoo/odoo.conf -d "$DB_NAME" -i "$INIT_MODULES" "$demo_flag" --stop-after-init \
-            > "$DEPLOY_DIR/initialization.log" 2>&1 || fail 'Initialization failed or timed out; inspect initialization.log. Rerun with --init-db: it finishes the setup if every module was installed, and otherwise stops with the recovery steps in docs/DEPLOYMENT.md'
+            </dev/null > "$DEPLOY_DIR/initialization.log" 2>&1 || fail 'Initialization failed or timed out; inspect initialization.log. Rerun with --init-db: it finishes the setup if every module was installed, and otherwise stops with the recovery steps in docs/DEPLOYMENT.md'
         [[ $(preflight mark-pending) == PENDING ]] || fail 'Initialized database failed the fresh UAT checks'
         uat_setup
         FRESH=1 ;;
@@ -2847,7 +2911,7 @@ if missing:
   pass
  print("Database folders in the volume: %s." % (", ".join(folders) or "none"), file=sys.stderr)
  sys.exit(3)
-' || status=$?
+' </dev/null || status=$?
     ((status != 3)) || fail "Filestore incomplete: the attachments volume $FILESTORE_VOLUME does not hold every attachment of database $DB_NAME (above). An App uninstall keeps the volume for the same database; this database's attachments must come from where the database came from (see From a backup in the README). Restore them into the volume, then run deploy-app.sh again"
     ((status == 0)) || fail "Could not check the attachments volume $FILESTORE_VOLUME against database $DB_NAME (above)"
 fi

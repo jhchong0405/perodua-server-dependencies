@@ -19,6 +19,7 @@ SCRIPT_DIR=${SCRIPT_PATH%/*}
 # The subject GICT asks for in its certificate requests; the CN is the first host of the table.
 DEFAULT_SUBJECT='/C=MY/ST=Selangor/L=Rawang/O=Perusahaan Otomobil Kedua Sdn Bhd/OU=GICT'
 COMMAND='' ROUTES='' ROUTES_FILE='' SUBJECT=$DEFAULT_SUBJECT NEW_KEY=0 KEY_FILE='' CONFIRM='' PURGE=0 TEMP_DIR='' RELOADED=0
+KEY_PASS_FILE='' NON_INTERACTIVE=0
 ARGS=() HOSTS=() R_HOST=() R_PATH=() R_PORT=() R_STRIP=() R_HTTP=() R_API=() SAVED=()
 # In STATE_DIR: routes.conf (the table), key.pem (the private key nginx uses),
 # key.new.pem (a new key waiting for its certificate), request.csr, fullchain.pem,
@@ -93,7 +94,8 @@ csr           Makes the private key (RSA 2048, kept in --dir, never sent) and a
               key; --new-key makes a new one, used once its certificate is
               installed; --key FILE takes an existing key, for example one a
               request was already made with (an encrypted key asks for its pass
-              phrase once, as nginx needs the key unencrypted).
+              phrase once, as nginx needs the key unencrypted; --key-pass-file
+              FILE gives it from the first line of a file instead).
 install-cert  Installs the certificate the issuer returned (PEM, DER or PKCS #7,
               with its chain in the same file or in CHAIN). It must belong to this
               server's key, cover every host name of the table, be valid now and
@@ -186,11 +188,27 @@ uninstall     Removes the nginx configuration of this script and reloads nginx,
               and the Let's Encrypt renewal timer. --purge also deletes the key,
               certificate, request and routes, and the Let's Encrypt accounts
               and certificates. Type yes to confirm, or pass --confirm yes.
+--non-interactive, or KIT_NON_INTERACTIVE=1 in the environment: no command
+              asks (README.md, "Run the kit without a person"). uninstall
+              needs --confirm yes, csr --key with an encrypted key needs
+              --key-pass-file.
 HELP
 }
 
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 warn() { printf 'WARNING: %s\n' "$*" >&2; }
+# The only place that reads an answer from a person: stdin, and only when it is
+# a terminal and the run is not non-interactive. Never /dev/tty, which an agent
+# under ssh -t still has. $3 says how to give the answer without a person.
+read_terminal() {  # [-s hidden] [-k keep spaces] VAR PROMPT HOW
+    local read_options=() read_ifs=$' \t\n'
+    while [[ $1 == -[sk] ]]; do
+        if [[ $1 == -s ]]; then read_options+=(-s); else read_ifs=''; fi
+        shift
+    done
+    { ((NON_INTERACTIVE == 0)) && [[ -t 0 ]]; } || die "$3"
+    IFS=$read_ifs read -r "${read_options[@]}" -p "$2" "$1"
+}
 
 # A command saves the files it is about to change; until it keeps them, any exit
 # (an error, a refusal, Ctrl-C) puts them back, and nginx on them if it was reloaded.
@@ -387,8 +405,11 @@ ensure_nginx() {
         || die 'nginx is not installed, and apply installs it with apt-get (Ubuntu), which this server does not have: install nginx so that "nginx" runs from the PATH, then run apply again'
     printf 'Installing nginx with apt-get...\n'
     export DEBIAN_FRONTEND=noninteractive NEEDRESTART_SUSPEND=1   # never restart other services
+    # No dpkg question about a changed configuration file either: keep the one on the server.
+    local keep=(-o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold)
     # 9>&-: a service the package starts must not inherit the lock and hold it
-    if ! { apt-get install -y -q nginx || { apt-get update -q && apt-get install -y -q nginx; }; } > "$TEMP_DIR/apt.log" 2>&1 9>&-; then
+    if ! { apt-get install -y -q "${keep[@]}" nginx || { apt-get update -q && apt-get install -y -q "${keep[@]}" nginx; }; } \
+            > "$TEMP_DIR/apt.log" 2>&1 9>&-; then
         cat "$TEMP_DIR/apt.log" >&2
         die 'Could not install nginx with apt-get (above). A server without internet access needs an apt proxy or a local package mirror'
     fi
@@ -708,15 +729,47 @@ cmd_csr() {
     printf '\nWhen the certificate comes back: sudo bash https.sh install-cert FILE [CHAIN], then sudo bash https.sh apply\n'
 }
 
+unencrypted_key() {   # $1 a private key, written unencrypted to $2; openssl itself never asks
+    local pass=''
+    if [[ -n $KEY_PASS_FILE ]]; then
+        # The first line, read here: openssl -passin file: keeps the carriage return
+        # of a file saved on Windows. The pass phrase goes to openssl on its stdin.
+        IFS= read -r pass < "$KEY_PASS_FILE" || [[ -n $pass ]] || die "--key-pass-file $KEY_PASS_FILE holds no pass phrase on its first line"
+        pass=${pass%$'\r'}
+        [[ -n $pass ]] || die "--key-pass-file $KEY_PASS_FILE holds no pass phrase on its first line"
+        printf '%s\n' "$pass" | openssl pkey -in "$1" -passin stdin -out "$2"
+        return
+    fi
+    openssl pkey -in "$1" -passin pass: -out "$2" 2> /dev/null && return 0
+    # An encrypted key (PEM, or DER that has no header to show it): its pass phrase from a
+    # person on the terminal (stdin), never from /dev/tty, where openssl would ask an
+    # agent's ssh -t too. A plaintext PEM key that openssl cannot read needs no pass phrase.
+    if grep -Eqs -e '-----BEGIN ([A-Z0-9]+ )*PRIVATE KEY-----' -- "$1" \
+        && ! grep -Eqs -e '-----BEGIN ENCRYPTED PRIVATE KEY-----|Proc-Type: 4,ENCRYPTED' -- "$1"; then
+        return 1
+    fi
+    ((NON_INTERACTIVE == 0)) && [[ -t 0 ]] || return 1
+    read_terminal -s -k pass "Pass phrase of $1 (hidden): " '--key-pass-file FILE gives the pass phrase' || return 1
+    printf '\n' >&2
+    if [[ -z $pass ]]; then
+        printf 'An empty pass phrase was typed: openssl did not run.\n' >&2
+        return 1
+    fi
+    printf '%s\n' "$pass" | openssl pkey -in "$1" -passin stdin -out "$2"
+}
+
 make_request() {   # request.csr for every host name of the table; REQUEST_KEY: the key it was made with
     local key san
     mkdir -p -- "$STATE_DIR"
     key=$STATE_DIR/key.pem
     if [[ -n $KEY_FILE ]]; then   # a key made elsewhere, for example one a request was already made with
-        # written again unencrypted, as nginx reads it: openssl asks for the pass phrase of an encrypted key
-        if ! openssl pkey -in "$KEY_FILE" -out "$key.tmp"; then
+        # written again unencrypted, as nginx reads it
+        if ! unencrypted_key "$KEY_FILE" "$key.tmp"; then
             rm -f -- "$key.tmp"
-            die "$KEY_FILE is not a private key this script can read (an encrypted one needs its pass phrase on a terminal)"
+            if [[ -n $KEY_PASS_FILE ]]; then
+                die "$KEY_FILE is not a private key this script can read, or --key-pass-file $KEY_PASS_FILE holds another pass phrase"
+            fi
+            die "$KEY_FILE is not a private key this script can read (an encrypted one needs its pass phrase on a terminal, or --key-pass-file FILE)"
         fi
         if [[ $(pub_of key "$key.tmp") == "$(pub_of key "$key")" ]]; then
             rm -f -- "$key.tmp"   # the key in use already
@@ -2177,8 +2230,7 @@ cmd_uninstall() {
         "$( ((PURGE)) && printf ', and deletes the key, certificate, request and routes in %s%s' "$STATE_DIR" \
             "$([[ ! -d $STATE_DIR/letsencrypt ]] || printf ", and the Let's Encrypt accounts and certificates")")"
     if [[ -z $CONFIRM ]]; then
-        [[ -t 0 ]] || die 'No terminal to confirm on: pass --confirm yes. Nothing was changed.'
-        read -r -p 'Type yes to confirm: ' CONFIRM || die 'Cancelled'
+        read_terminal CONFIRM 'Type yes to confirm: ' 'A non-interactive run, or a run without a terminal, asks nothing: pass --confirm yes. Nothing was changed.' || die 'Cancelled'
     fi
     [[ $CONFIRM == yes ]] || die 'Not confirmed. Nothing was changed.'
     if [[ -f $NGINX_CONF ]]; then
@@ -2217,7 +2269,7 @@ shift
 case $COMMAND in -h|--help|help) usage; exit 0 ;; esac
 while (($#)); do
     case $1 in
-        --routes|--dir|--nginx-conf|--subject|--key|--confirm|--server|--acme-dns|--dns-resolvers|--email|--extra-root|--acme-ca|--unit-dir|--lib-dir|--front|--access-log|--error-log)
+        --routes|--dir|--nginx-conf|--subject|--key|--key-pass-file|--confirm|--server|--acme-dns|--dns-resolvers|--email|--extra-root|--acme-ca|--unit-dir|--lib-dir|--front|--access-log|--error-log)
             (($# >= 2)) || die "Missing value for $1"
             case $1 in
                 --routes) ROUTES=$2 ;;
@@ -2225,6 +2277,7 @@ while (($#)); do
                 --nginx-conf) NGINX_CONF=$2 ;;
                 --subject) SUBJECT=$2 ;;
                 --key) KEY_FILE=$2 ;;
+                --key-pass-file) KEY_PASS_FILE=$2 ;;
                 --confirm) CONFIRM=$2 ;;
                 --server) GIVEN[server]=$2 ;;
                 --acme-dns) GIVEN[acmedns]=$2 ;;
@@ -2245,12 +2298,14 @@ while (($#)); do
         --accept-tos) ACCEPT_TOS=1; shift ;;
         --manual) MANUAL=1; shift ;;
         --no-dns-check) NO_DNS_CHECK=1; shift ;;
+        --non-interactive) NON_INTERACTIVE=1; shift ;;
         -*) die "Unknown option: $1 (see: bash https.sh --help)" ;;
         *) ARGS+=("$1"); shift ;;
     esac
 done
 [[ $COMMAND == csr ]] || [[ $NEW_KEY == 0 && -z $KEY_FILE && $SUBJECT == "$DEFAULT_SUBJECT" ]] || die '--new-key, --key and --subject belong to csr'
 [[ $NEW_KEY == 0 || -z $KEY_FILE ]] || die 'Use --new-key or --key, not both'
+[[ -z $KEY_PASS_FILE || -n $KEY_FILE ]] || die '--key-pass-file is the pass phrase of --key FILE: give both'
 [[ $COMMAND == uninstall ]] || [[ $PURGE == 0 && -z $CONFIRM ]] || die '--purge and --confirm belong to uninstall'
 [[ $COMMAND == letsencrypt ]] || [[ ${#GIVEN[@]} == 0 && $RENEW == 0 && $ACCEPT_TOS == 0 && $MANUAL == 0 && $NO_DNS_CHECK == 0 ]] \
     || die '--renew, --manual, --no-dns-check, --accept-tos, --email, --server, --acme-dns, --dns-resolvers, --extra-root and --acme-ca belong to letsencrypt'
@@ -2266,7 +2321,22 @@ STATE_DIR=$(realpath -m -- "$STATE_DIR")
 [[ $UNIT_DIR == /* && $LIB_DIR == /* ]] || die '--unit-dir and --lib-dir must be absolute paths'
 UNIT_DIR=$(realpath -m -- "$UNIT_DIR") LIB_DIR=$(realpath -m -- "$LIB_DIR")
 [[ -z $KEY_FILE ]] || [[ -f $KEY_FILE ]] || die "No such file: $KEY_FILE"
+[[ -z $KEY_PASS_FILE ]] || [[ -f $KEY_PASS_FILE && -r $KEY_PASS_FILE ]] || die "--key-pass-file must be a readable regular file: $KEY_PASS_FILE"
+# --non-interactive, or KIT_NON_INTERACTIVE=1 in the environment: no question
+# at all (README.md, "Run the kit without a person"). Each answer comes from an
+# option or a setting; a missing one stops the run before it changes anything.
+case ${KIT_NON_INTERACTIVE:-} in
+    ''|0) ;;
+    1) NON_INTERACTIVE=1 ;;
+    *) die 'KIT_NON_INTERACTIVE must be 1 (never ask) or 0 (ask on a terminal).' ;;
+esac
+((NON_INTERACTIVE == 0)) || export KIT_NON_INTERACTIVE=1
 [[ $EUID -eq 0 ]] || die 'Run with sudo or as root.'
+protected_file() {  # $1 a secret file, $2 its option: root-owned, not a symlink, no group/other permissions
+    [[ -f $1 && ! -L $1 && $(stat -c %u "$1") == 0 ]] || die "$2 must be a root-owned regular file, not a symlink: $1"
+    (( (8#$(stat -c %a "$1") & 8#077) == 0 )) || die "$2 must have no group/other permissions (use chmod 600): $1"
+}
+[[ -z $KEY_PASS_FILE ]] || protected_file "$KEY_PASS_FILE" --key-pass-file
 command -v openssl > /dev/null || die 'openssl is required'
 TEMP_DIR=$(mktemp -d)
 

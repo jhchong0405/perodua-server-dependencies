@@ -1866,7 +1866,8 @@ class OracleViewRoleTest(unittest.TestCase):
                 self.assertEqual(self.scripts(), [])
         result = self.run_script("drop-role", "--drop-staging")  # the choice is not the confirmation
         self.assertEqual(result.returncode, 1)
-        self.assertIn("No terminal to confirm on: pass --confirm oracle_view_rp. Nothing was changed.", result.stderr)
+        self.assertIn("A non-interactive run, or a run without a terminal, asks nothing: pass --confirm oracle_view_rp. "
+                      "Nothing was changed.", result.stderr)
         self.assertEqual(self.scripts(), [])
         result = self.run_script("drop-role", "--confirm", "oracle_view_rp", "--drop-staging", "--pg-port", "5433")
         self.assertEqual(result.returncode, 0, result.stderr)

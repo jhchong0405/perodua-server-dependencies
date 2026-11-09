@@ -3,7 +3,9 @@ set -Eeuo pipefail
 export LC_ALL=C
 
 usage() {
-    printf 'Usage: sudo bash %s --role app|db\n' "${0##*/}"
+    printf 'Usage: sudo bash %s --role app|db [--non-interactive]\n' "${0##*/}"
+    printf 'It never asks: apt-get runs with -y and keeps a changed configuration file.\n'
+    printf -- '--non-interactive and KIT_NON_INTERACTIVE=1 are accepted, as by every kit script.\n'
 }
 
 fail() {
@@ -15,9 +17,23 @@ if [[ $# -eq 1 && ( $1 == --help || $1 == -h ) ]]; then
     usage
     exit 0
 fi
-[[ $# -eq 2 && $1 == --role ]] || { usage >&2; exit 1; }
-role=$2
+role=''
+while (($#)); do
+    case $1 in
+        --role) (($# >= 2)) || { usage >&2; exit 1; }; role=$2; shift 2 ;;
+        # This script asks nothing: the option is accepted, as by every kit script.
+        --non-interactive) shift ;;
+        *) usage >&2; exit 1 ;;
+    esac
+done
+[[ -n $role ]] || { usage >&2; exit 1; }
 [[ $role == app || $role == db ]] || fail 'Choose --role app or --role db.'
+# KIT_NON_INTERACTIVE (README.md, "Run the kit without a person"): checked as
+# every kit script checks it; this script never asks either way.
+case ${KIT_NON_INTERACTIVE:-} in
+    ''|0|1) ;;
+    *) fail 'KIT_NON_INTERACTIVE must be 1 (never ask) or 0 (ask on a terminal).' ;;
+esac
 [[ $EUID -eq 0 ]] || fail 'Run with sudo or as root.'
 [[ -r /etc/os-release ]] || fail 'Cannot identify the operating system.'
 # shellcheck source=/dev/null
@@ -28,14 +44,16 @@ source /etc/os-release
 # Only the main shell reports. A command that fails inside $( ) or <( ) is either
 # checked where its result is used or leaves the installation going.
 trap '[[ $BASHPID != "$$" ]] || printf "Installation failed at line %s.\n" "$LINENO" >&2' ERR
-export DEBIAN_FRONTEND=noninteractive
+# No question from apt, dpkg or ucf: a changed configuration file stays as it is.
+export DEBIAN_FRONTEND=noninteractive UCF_FORCE_CONFFOLD=1
 
 update_packages() {
     apt-get update -o APT::Update::Error-Mode=any
 }
 
 install_packages() {
-    apt-get install -y --no-install-recommends --no-upgrade --no-remove "$@"
+    apt-get install -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold \
+        --no-install-recommends --no-upgrade --no-remove "$@"
 }
 
 if [[ $role == app ]]; then

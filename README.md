@@ -948,6 +948,100 @@ sudo bash deploy-app.sh
 
 Sign in with the web login from the backup.
 
+## Run the kit without a person (agents)
+
+An agent, or another run that no person watches, gives each answer as an
+option or a setting. Then no kit script waits for a question.
+
+Set one of these two in each run:
+
+- `KIT_NON_INTERACTIVE=1` in the environment. `sudo` removes the environment:
+  put the variable after `sudo env`, as in
+  `sudo env KIT_NON_INTERACTIVE=1 bash uninstall.sh --role app --confirm perodua-client-uiux`.
+- `--non-interactive` on the command line of the script.
+
+With either one, a script never reads the terminal: not stdin and not
+`/dev/tty`, also when `ssh -t` gives it a pseudo-terminal. If no option or
+setting gives an answer, the run stops, and the error names the option. Most
+of these stops come before the run changes anything. These come later, after
+steps that a rerun uses again; the deployment, its database and its data stay
+as they were:
+
+- A registry login (`deploy-app.sh`, `iss-api.sh`, `rp-adapter.sh`, and
+  `oracle-view.sh install` without `--no-pull`): at the pull. The deployment
+  directory is made by then, and for `iss-api.sh`, `rp-adapter.sh` and
+  `oracle-view.sh` also its identity file.
+- `deploy-db.sh` with `DOWNLOAD_USER` and no `--cloud-password-file`, for a
+  database that is not deployed yet: after PostgreSQL is started and the state
+  directory of the deployment is made. For a deployed database the file is not
+  needed: nothing is downloaded again.
+- `deploy-app.sh --upgrade` without `--confirm` for a module upgrade: after
+  the pull of the new release and its checks. The App runs the old release.
+- `deploy-app.sh --init-db` with an attachments volume that an earlier
+  deployment left: after the checks of the database, before the volume or the
+  database changes.
+
+A script that starts another kit script passes the mode on: `service.sh reset`
+runs `deploy-app.sh --non-interactive` with `KIT_NON_INTERACTIVE=1`.
+`KIT_NON_INTERACTIVE` is `1` (never ask) or `0` or empty (ask on a terminal);
+another value stops the run at once.
+
+Without them, a script asks only when its stdin is a terminal. A script cannot
+tell the `ssh -t` session of a person from the session of an agent: both are
+pseudo-terminals. Thus an agent always sets the variable or the option.
+
+| Script | Question | Option or setting that answers it |
+| --- | --- | --- |
+| `deploy-db.sh` | Guided setup without `deploy.conf`: what to set up, where the App runs, this server's internal IP, a public IP, the App server's IP, save | `--app-ip ADDRESS[/PREFIX] --listen-ip ADDRESS` (the App on another server; `--allow-public-listen` accepts a public `--listen-ip`) or `--app-here` (the App on this server). They always set up a fresh UAT system (`DB_MODE=empty`) and save `deploy.conf`. A rerun with the same options uses the `deploy.conf` that they saved; another `deploy.conf` stops the run. For a restore, write `deploy.conf` (`deploy.conf.example`) |
+| `deploy-db.sh` | Database password | `--password-file FILE` (root-owned, `chmod 600`) |
+| `deploy-db.sh` | Cloud download password of `DOWNLOAD_USER` | `--cloud-password-file FILE` (root-owned, `chmod 600`). curl gets it on its stdin and never asks |
+| `service.sh` | `reset`: type the database name | `--confirm DATABASE` |
+| `uninstall.sh` | Type the database or project name | `--confirm NAME` |
+| `uninstall.sh` | `--role db --purge`: type PURGE | `--confirm-purge PURGE` |
+| `uninstall.sh` | Other containers with "perodua": delete them? | `--delete-old-containers PROJECT`, once for each Compose project. For the containers without one, `--delete-old-containers -:ID,ID` with the IDs that a run without the option lists (a plain `-` is refused: a container that starts later, such as the cron run of `rp-adapter.sh export`, must never match). A project or a container that it does not name stays. A run of `rp-adapter.sh` (label `com.perodua.rp-adapter`) is never listed |
+| `uninstall.sh` | Also delete their volumes? | `--delete-old-volumes`. Without it the volumes stay |
+| `deploy-app.sh` | Database settings, web port, who may open the page, outgoing email | `--config FILE` or `app.env` (`DB_HOST`, `BIND_IP`, the `SMTP_` settings, `MAIL_REDIRECT_TO`). `--mail` asks, and stops at once |
+| `deploy-app.sh` | Database password, SMTP password | `DB_PASSWORD_FILE`, `SMTP_PASSWORD_FILE`, or the saved secrets of an earlier run |
+| `deploy-app.sh` | Registry login | `docker login perodua-deploy.novutal.com` on the server first; there is no option |
+| `deploy-app.sh` | `--upgrade` with a module upgrade: type the database name | `--confirm DATABASE` |
+| `deploy-app.sh` | `--init-db`: delete the attachments volume that an earlier deployment of the project left files in | `--delete-old-attachments PROJECT_NAME_filestore`. Without it, the run stops before the volume or the database changes |
+| `iss-api.sh` | First install: the settings and the database password | `--config FILE` with `DB_PASSWORD_FILE`, or the saved `iss-api.env` |
+| `iss-api.sh` | Registry login | `docker login` first |
+| `iss-api.sh` | `uninstall`: type the project name | `--confirm PROJECT` |
+| `iss-api.sh` | `check --key`: the API key | `check --key-file FILE` (the key on the first line) |
+| `rp-adapter.sh` | First install: the settings and the secrets | `--config FILE` with `DB_PASSWORD_FILE` (and `API_KEY_FILE` with `API_URL`), or the saved `rp-adapter.env` |
+| `rp-adapter.sh` | Registry login | `docker login` first |
+| `rp-adapter.sh` | `uninstall`: type the directory | `--confirm DIR` |
+| `https.sh` | `csr --key` with an encrypted key: its pass phrase | `--key-pass-file FILE` (the pass phrase on the first line). openssl never asks |
+| `https.sh` | `uninstall`: type yes | `--confirm yes` |
+| `install-dependencies.sh` | None | apt-get runs with `-y`, `DEBIAN_FRONTEND=noninteractive`, and keeps a changed configuration file (`--force-confdef --force-confold`) |
+| `oracle-view.sh` | `install`: registry login | `--no-pull` after a stream from the Mac, or `docker login` first |
+| `oracle-view.sh` | `uninstall`: type the project name | `--confirm oracle-view` |
+| `oracle-view.sh` | `drop-role`: type the role name | `--confirm oracle_view_rp` (and `--drop-staging` when `ovb_stage` holds tables) |
+
+`oracle-view-stream.sh` runs on the Mac and asks nothing: ssh runs in batch
+mode and sudo with `-n`. It has no `--non-interactive`.
+
+`iss-api.sh logs --follow` asks nothing, but it runs until it is stopped: a
+non-interactive run refuses it. An agent uses `logs` without `--follow`.
+
+A secret file of an option (`deploy-db.sh --password-file` and
+`--cloud-password-file`, `https.sh --key-pass-file`, `iss-api.sh check
+--key-file`) must be a root-owned regular file, not a symlink, with no group or
+other permissions (`chmod 600`). The scripts check it before any change. A file
+saved on Windows (a carriage return at the end of the line) works for
+`--key-pass-file` and `--key-file`; `--cloud-password-file` refuses it.
+
+For example, a fresh UAT system on two servers:
+
+```bash
+# DB server (10.0.0.10), for the App server 10.0.0.20:
+sudo env KIT_NON_INTERACTIVE=1 bash deploy-db.sh --app-ip 10.0.0.20 --listen-ip 10.0.0.10 \
+  --password-file /root/db.password
+# App server: app.env holds DB_HOST=10.0.0.10, BIND_IP and DB_PASSWORD_FILE=/root/db.password
+sudo env KIT_NON_INTERACTIVE=1 bash deploy-app.sh --config /root/app.env --init-db
+```
+
 ## Operations
 
 Back up the database on the DB server and the filestore volume on the App server.
@@ -2798,9 +2892,10 @@ Do the steps in this order.
 | `pg_hba.conf` line (DB server), if you added one | `sudo cp -p HBA_FILE.before-oracle-view HBA_FILE`, then `sudo -u postgres psql -X -d postgres -c 'SELECT pg_reload_conf()'` |
 | Registry | Delete the tag `oracle-view:grey-v1.0.5` and the tags of earlier releases when nobody needs them: each image holds the secrets |
 
-`uninstall` and `drop-role` without a terminal need `--confirm oracle-view` and
-`--confirm oracle_view_rp`. `--drop-staging` is not a confirmation: `drop-role`
-needs both when `ovb_stage` holds tables.
+`uninstall` and `drop-role` without a terminal, or in a non-interactive run
+(`--non-interactive` or `KIT_NON_INTERACTIVE=1`), need `--confirm oracle-view`
+and `--confirm oracle_view_rp`. `--drop-staging` is not a confirmation:
+`drop-role` needs both when `ovb_stage` holds tables.
 
 ### Risks of the owner decisions
 
