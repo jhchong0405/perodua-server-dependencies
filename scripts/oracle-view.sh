@@ -309,7 +309,7 @@ check_pinned_image() {   # --no-pull, before any change: no pull, no login and n
     pinned_here "$store" || found=$?
     case $found in
         0) out=$(starts 2>&1) \
-               || die "The pinned image on this server does not start: $(printf '%s\n' "$out" | tail -n 1). Remove it (sudo docker image rm $PINNED $STREAM_TAG), stream the pinned image again, then run install again. Nothing was changed."
+               || die "The pinned image on this server does not start: $(printf '%s\n' "$out" | tail -n 1). Remove it (sudo docker image rm $PINNED), stream the pinned image again, then run install again. Nothing was changed."
            printf 'Pinned image on this server (%s image store), not pulled: %s\n' "$store" "$PINNED"
            return 0 ;;
         2) die "The image that $PINNED finds on this server does not have the pinned digest as its registry digest (and, on the containerd image store, as its ID). Remove it (sudo docker image rm $PINNED), stream the pinned image again, then run install again. Nothing was changed." ;;
