@@ -996,6 +996,7 @@ pseudo-terminals. Thus an agent always sets the variable or the option.
 | `deploy-db.sh` | Database password | `--password-file FILE` (root-owned, `chmod 600`) |
 | `deploy-db.sh` | Cloud download password of `DOWNLOAD_USER` | `--cloud-password-file FILE` (root-owned, `chmod 600`). curl gets it on its stdin and never asks |
 | `service.sh` | `reset`: type the database name | `--confirm DATABASE` |
+| `service.sh` | `reset`: registry login (an image of the line that is missing) | `KIT_NO_PULL=1` with the images streamed from the Mac ([Install from streamed images](#install-from-streamed-images)): the reset then also checks them before it deletes anything, and never asks |
 | `uninstall.sh` | Type the database or project name | `--confirm NAME` |
 | `uninstall.sh` | `--role db --purge`: type PURGE | `--confirm-purge PURGE` |
 | `uninstall.sh` | Other containers with "perodua": delete them? | `--delete-old-containers PROJECT`, once for each Compose project. For the containers without one, `--delete-old-containers -:ID,ID` with the IDs that a run without the option lists (a plain `-` is refused: a container that starts later, such as the cron run of `rp-adapter.sh export`, must never match). A project or a container that it does not name stays. A run of `rp-adapter.sh` (label `com.perodua.rp-adapter`) is never listed |
@@ -1070,16 +1071,24 @@ removes the environment: put the variable after `sudo env`, as in
 `oracle-view.sh` reads `KIT_NO_PULL` too, and also its own `OVB_NO_PULL`: when
 both have a value, the values must be the same (else a usage error).
 
+Owner rule C1: while the grey App runs on an Oracle DB, nobody runs
+`deploy-app.sh`, `service.sh`, `rollback.sh`, `restore.txt` or
+`grey-oracle-sync-wayback.sh` there (see [Install from a streamed
+image](#install-from-a-streamed-image)). So the `deploy-app.sh` examples below
+name another App server, `app-server`, and the next step that the helper prints
+for `deploy-app.sh` says that it is not for the grey App while the rule holds.
+
 1. On the Mac, in this repository, with Docker Desktop on the containerd image
    store, an ssh key that logs in to the server without a question, and
    `sudo -n docker` (no password) for that user on the server:
 
    ```bash
-   bash scripts/stream-image.sh --dry-run grey deploy-app.sh --line demo-uiux
-   bash scripts/stream-image.sh grey deploy-app.sh --line demo-uiux iss-api.sh rp-adapter.sh
+   bash scripts/stream-image.sh --dry-run app-server deploy-app.sh --line demo-uiux
+   bash scripts/stream-image.sh app-server deploy-app.sh --line demo-uiux
+   bash scripts/stream-image.sh grey iss-api.sh rp-adapter.sh
    ```
 
-   `grey` is the ssh name of the server. Each SOURCE is a kit script next to
+   `app-server` and `grey` are ssh names of servers. Each SOURCE is a kit script next to
    the helper: `deploy-app.sh` (with `--line client-stable-uiux` or `--line
    demo-uiux`; without it, the default line of `deploy-app.sh`), `iss-api.sh`,
    `rp-adapter.sh` or `oracle-view.sh`. The helper reads the pins from these
@@ -1100,24 +1109,39 @@ both have a value, the values must be the same (else a usage error).
    stops when a stream tag names another image on the Mac, when an index is not
    of the form below, and when `docker load` on the server prints `Error
    unpacking`. An image that the server has already gets nothing. It checks
-   every image on the Mac before it connects to the server, and it streams
-   nothing when the server uses the classic image store and an image is missing
-   there. `--dry-run` does the checks and prints the steps: it pulls, tags,
-   saves, copies and loads nothing. ssh runs in batch mode (also `-T -a -x`, no
+   every image on the Mac before it connects to the server: the media type of
+   a pin comes from the Mac, or from the registry when the pin is not on the Mac
+   yet. It streams nothing when the server uses the classic image store and an
+   image is missing there. `--dry-run` does the same checks (also those that
+   read the registry) and prints the steps: it pulls, tags, saves, copies,
+   loads and removes nothing. ssh runs in batch mode (also `-T -a -x`, no
    forwarding, no local command, `-n` on each check) and sudo with `-n`, so the
    helper never asks. It runs one stream at a time for each server: the host
-   name and port that `ssh -G` gives for the ssh name.
+   name and port that `ssh -G` gives for the ssh name. When a run stops after
+   it streamed an image, its message names the image that it stopped at and the
+   images that it streamed and checked before.
 
    `--file` is for a big image over a link that can break (the Odoo image is
    3.42 GB). For each image, the helper saves the stream tag to an archive on
-   the Mac (in `$TMPDIR/stream-image-archives`, under the name of the stream
-   tag) and records its `shasum -a 256`. It copies the archive with `rsync
-   --partial` (the same ssh options) to the folder `~/stream-image` (0700) of
-   the ssh user on the server, and `sha256sum` there must give the same value.
-   Then it runs `sudo -n docker load -i` on that archive and the same check.
-   Only when the check passes does it remove the archive on both sides. A run
-   after a break resumes from the archive that it kept on the Mac, and rsync
-   uses the part on the server. The server needs `rsync` and `sha256sum`.
+   the Mac (in `$TMPDIR/stream-image-archives/HOST_PORT`, a folder for each
+   server, under the name of the stream tag) and records its `shasum -a 256`.
+   It copies the archive with `rsync --partial` (the same ssh options) to the
+   folder `~/stream-image` (0700) of the ssh user on the server, and
+   `sha256sum` there must give the same value. Then it runs `sudo -n docker
+   load -i` on that archive and the same check. Only when the check passes does
+   it remove the archive on both sides. A run after a break resumes from the
+   archive that it kept on the Mac, and rsync uses the part on the server. The
+   folder of each server is one run's at a time (the lock of the server), so a
+   run to another server never removes or overwrites the archive of a broken
+   run. Before the save, `df -Pk` on the Mac must show room for the image (its
+   size on the Mac, which is more than its archive); before the copy, `df -Pk`
+   on the server must show room for the archive and the image after the load
+   (on the file systems of `~/stream-image` and of the Docker root folder that
+   `docker info` gives). An archive holds the secrets of its image (such as
+   the mail and Oracle settings of an Odoo image): for a pin that the server
+   has, a `--file` run removes the archive that an earlier `--file` run kept,
+   on both sides, and a run without `--file` does so when the Mac kept one. The
+   server needs `rsync` and `sha256sum`.
 
    With Docker alone, the stream of one image is these commands; each
    `--no-pull` run prints them with the values of its pins:
@@ -1128,10 +1152,12 @@ both have a value, the values must be the same (else a usage error).
    docker save REPOSITORY:sha256-HEX | ssh grey 'sudo -n docker load'
    ```
 
-2. On the server, with the options of the run:
+2. On each server, with the options of the run:
 
    ```bash
+   # app-server, not the grey App while owner rule C1 holds:
    sudo bash deploy-app.sh --no-pull --non-interactive --line demo-uiux --config /root/app.env --dir /opt/perodua-app-demo
+   # grey:
    sudo bash iss-api.sh install --no-pull --non-interactive
    sudo bash rp-adapter.sh install --no-pull --non-interactive
    ```
@@ -1157,10 +1183,24 @@ result of the check of the digest in their `Local:` line.
   failed `--upgrade` or `--replace`. `docker compose run` has `--pull` from
   Docker Compose 2.32.2: with an older Compose the run stops before any change.
   `KIT_NO_PULL=1` also gives `--release-queued-mail` and `--send-test-mail`
-  `--pull never` (the option `--no-pull` belongs to a deployment only). The
-  variable also reaches the `deploy-app.sh` that `service.sh reset` runs:
-  `sudo env KIT_NO_PULL=1 bash service.sh --role app reset --confirm DATABASE`.
+  `--pull never` (the option `--no-pull` belongs to a deployment only). Each
+  `deploy-app.sh` step that a no-pull run prints (to finish a stopped
+  `--upgrade`, to run `--init-db` again, to release the held mail) is `sudo env
+  KIT_NO_PULL=1 bash deploy-app.sh ...`: the plain command pulls, and the
+  registry asks for its password. The way back to the release before a no-pull
+  `--upgrade` (also step 5 of its `restore.txt`) says that the images of that
+  release must be on the server (streamed from the Mac when they are not), and
+  that its scripts folder must come from a kit version with `--no-pull`.
   `--mail` asks questions, so it stops with `--no-pull`.
+- `service.sh reset` with `KIT_NO_PULL=1` (`sudo env KIT_NO_PULL=1 bash
+  service.sh --role app reset --confirm DATABASE`; not on the grey App while
+  owner rule C1 holds): its settings check, `deploy-app.sh --check-config` with
+  the variable, also checks both pinned images of the line as above, before
+  the reset stops the App or deletes anything. When an image is missing, the
+  reset stops there and changes nothing. The reset never asks (as
+  `--non-interactive`: it needs `--confirm`), the container that empties the
+  database starts with `--pull never`, and the `deploy-app.sh --init-db` after
+  it runs with the variable.
 - `iss-api.sh`: `start`, `restart` and `gen-key` never pull (`up --pull never`).
 - `rp-adapter.sh`: `KIT_NO_PULL=1` also covers `health`, `survey`, `export`,
   `api-health` and `run`: each checks the image the same way before it runs the
@@ -1179,9 +1219,10 @@ annotation `vnd.docker.reference.type: attestation-manifest`). BuildKit pushes
 that index for a build with provenance, and the pull on the Mac for
 `linux/amd64` brings the image and its attestation manifest. The helper reads
 the entries from the registry with the login of the Mac (`docker buildx
-imagetools inspect`, also in a dry run), and checks that the index there has
-the pinned digest. It stops before the stream for any other index, because
-`docker save` needs every entry of an index on the Mac.
+imagetools inspect`, also in a dry run, and before the pull when the pin is not
+on the Mac), and checks that the index there has the pinned digest. It stops
+before the server for any other index, because `docker save` needs every entry
+of an index on the Mac.
 
 `docker save` of the stream tag has no `--platform`. Without it, the archive
 holds the index itself: on the server (containerd image store) `docker image
@@ -1206,8 +1247,10 @@ adapter `v0.8.0-oracle2` (`9df3d38f...`) are each one manifest.
 These paths of the kit still pull an image that is missing. No `--no-pull` run
 starts them:
 
-- `service.sh --role app start` and the checks of `service.sh reset` (Compose
-  pulls a missing image; it never asks).
+- `service.sh --role app start` and `restart` (Compose pulls a missing image;
+  it never asks), and `service.sh reset` without `KIT_NO_PULL=1`. These
+  commands stay as in v1.2.1, so that `restore.txt` can run them from the
+  scripts folder of either release.
 - The `rollback.sh` that `deploy-app.sh --replace` writes, and the steps in the
   `restore.txt` of `deploy-app.sh --upgrade`.
 - `https.sh`: lego and acme.sh from Docker Hub, when they are not on the server.
