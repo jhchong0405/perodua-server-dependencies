@@ -106,6 +106,9 @@ CONFIG='' NON_INTERACTIVE=0 INIT_DB=0 CHECK_ONLY=0 TEMP_DIR='' AUTH_DIR='' START
 # --no-pull (NO_PULL_OPTION) or KIT_NO_PULL=1: only the pinned images on this
 # server, and --pull never on every container that a run of Compose starts.
 NO_PULL=0 NO_PULL_OPTION=0 PULL_NEVER=()
+# The deploy-app.sh command of a step that a run prints. With no-pull the same mode: a
+# plain sudo bash deploy-app.sh pulls, and the registry asks for its password.
+DEPLOY_COMMAND='sudo bash deploy-app.sh'
 # --upgrade: the release the directory runs before, the backup of its data,
 # whether its App was running, and how far the upgrade got (see cleanup).
 UPGRADE=0 BACKUP_BASE='' BACKUP_DIR='' OLD_RELEASE='' OLD_REVISION='' WAS_RUNNING=0 UPGRADE_STATE='' BACKUP_APP_ENV_TRIMMED=0
@@ -251,7 +254,10 @@ missing, or does not start, it stops and prints the command for the Mac. On
 the classic image store an image from docker load has no registry digest: it
 stops there too. Every container it starts gets --pull never, which needs
 Docker Compose 2.32.2 or later (README.md, "Install from streamed images").
-KIT_NO_PULL=1 also gives --release-queued-mail and --send-test-mail --pull never.
+KIT_NO_PULL=1 also gives --release-queued-mail and --send-test-mail --pull never,
+and makes --check-config (which service.sh reset runs before it deletes
+anything) check both pinned images too. Each deploy-app.sh step that a no-pull
+run prints is sudo env KIT_NO_PULL=1 bash deploy-app.sh ...
 HELP
 }
 fail() { printf 'Error: %s\n' "$*" >&2; exit 1; }
@@ -390,7 +396,7 @@ upgrade_stopped() {  # what a failed --upgrade leaves, and the way back
                 else
                     printf '  - The App is stopped.\n' >&2
                 fi
-                printf 'To finish the upgrade: solve the problem above, then run sudo bash deploy-app.sh --dir %q from this scripts folder, without --upgrade. It runs no module upgrade again.\n' "$DEPLOY_DIR" >&2
+                printf 'To finish the upgrade: solve the problem above, then run %s --dir %q from this scripts folder, without --upgrade. It runs no module upgrade again.\n' "$DEPLOY_COMMAND" "$DEPLOY_DIR" >&2
                 printf '%s cannot run on this database. The only way back is the backup: %s. Use it only before users write data with %s (the point of no return): all data written after the backup is lost.\n' "$OLD_RELEASE" "$restore" "$RELEASE" >&2
                 return
             fi
@@ -403,7 +409,7 @@ upgrade_stopped() {  # what a failed --upgrade leaves, and the way back
                 printf '  - The App is stopped. The containers of %s were not removed or changed.\n' "$OLD_RELEASE" >&2
                 printf '  - The database holds the data of the backup. Only report.url and web.base.url may have been written again, with the values from app.env.\n' >&2
             fi
-            printf 'To finish the upgrade: solve the problem above, then run sudo bash deploy-app.sh --dir %q from this scripts folder, without --upgrade.\n' "$DEPLOY_DIR" >&2
+            printf 'To finish the upgrade: solve the problem above, then run %s --dir %q from this scripts folder, without --upgrade.\n' "$DEPLOY_COMMAND" "$DEPLOY_DIR" >&2
             printf 'To go back to %s: put back its identity and settings, then deploy it without --upgrade:\n' "$OLD_RELEASE" >&2
             go_back_steps >&2
             printf 'To also put the data back as it was before the upgrade: follow %s/restore.txt instead (its step 5 is the above).\n' "$BACKUP_DIR" >&2 ;;
@@ -456,7 +462,10 @@ case ${KIT_NO_PULL:-} in
     1) NO_PULL=1 ;;
     *) fail 'KIT_NO_PULL must be 1 (never pull: use the images streamed from the Mac) or 0 (pull as before)' ;;
 esac
-if ((NO_PULL)); then NON_INTERACTIVE=1 PULL_NEVER=(--pull never); fi
+if ((NO_PULL)); then NON_INTERACTIVE=1 PULL_NEVER=(--pull never) DEPLOY_COMMAND='sudo env KIT_NO_PULL=1 bash deploy-app.sh'; fi
+init_again() {  # the step that runs --init-db again; with no-pull, the whole command, in that mode
+    if ((NO_PULL)); then printf 'Run %s --dir %q --init-db again' "$DEPLOY_COMMAND" "$DEPLOY_DIR"; else printf 'Rerun with --init-db'; fi
+}
 # --non-interactive, or KIT_NON_INTERACTIVE=1 in the environment: no question
 # at all (README.md, "Run the kit without a person"). Each answer comes from an
 # option or a setting; a missing one stops the run.
@@ -1022,47 +1031,9 @@ check_password_file() {  # $1 the *_FILE setting, $2 the saved secret, $3 the pa
     unset password
     [[ -z $problem ]] || fail "$problem ($password_source)"
 }
-# service.sh reset runs this before it deletes anything, so that settings this
-# release refuses stop the reset while the data is still there. The directory
-# identity is not compared: the reset binds the directory to this release.
-if ((CHECK_ONLY)); then
-    # A real run reads the passwords only after the checks above. Read them
-    # here too, from the same files, so that a reset does not delete the data
-    # and then refuse a password.
-    check_password_file "$DB_PASSWORD_FILE" "$DEPLOY_DIR/secrets/db_password" 'Database password'
-    [[ -z $SMTP_USER ]] || check_password_file "$SMTP_PASSWORD_FILE" "$DEPLOY_DIR/secrets/smtp_password" 'SMTP password'
-    printf 'Configuration valid for %s. Nothing was changed.\n' "$RELEASE"
-    exit 0
-fi
-if [[ -n $REPLACE_DIR ]]; then
-    # The deployment that this one takes the place of keeps all it has: its
-    # directory, its containers, its database and its attachments. So it must
-    # be another Compose project and another database.
-    REPLACE_PROJECT=$(sed -n 's/^project=//p' "$REPLACE_DIR/.deployment-identity")
-    REPLACE_RELEASE=$(sed -n 's/^release=//p' "$REPLACE_DIR/.deployment-identity")
-    replace_database=$(sed -n -e 's/^host=//p' -e 's/^port=//p' -e 's/^database=//p' "$REPLACE_DIR/.deployment-identity" | paste -sd ' ' -)
-    [[ $REPLACE_PROJECT =~ ^[a-z][a-z0-9_-]{0,49}$ && $REPLACE_RELEASE =~ ^[a-z0-9.-]+$ && $replace_database =~ ^[^\ ]+\ [^\ ]+\ [^\ ]+$ ]] \
-        || fail "Unreadable $REPLACE_DIR/.deployment-identity"
-    [[ $REPLACE_PROJECT != "$PROJECT_NAME" ]] \
-        || fail "--replace: $REPLACE_DIR uses the Compose project $PROJECT_NAME as well. Give this deployment a PROJECT_NAME of its own, such as perodua-demo-uiux"
-    [[ $replace_database != "$DB_HOST $DB_PORT $DB_NAME" ]] \
-        || fail "--replace keeps database $DB_NAME of $REPLACE_DIR as it is, and this deployment names the same one. Create a new empty database on the DB server (deploy-db.sh DB_MODE=empty with another DB_NAME) and set that DB_NAME"
-fi
-command -v docker >/dev/null || fail 'Docker is missing. First run install-dependencies.sh --role app on Ubuntu 24.04'
-docker compose version >/dev/null 2>&1 || fail 'Docker Compose v2 is required'
-docker info >/dev/null 2>&1 || fail 'Cannot reach Docker. Start the engine and check your account permissions'
-engine=$(docker info --format '{{.OSType}}/{{.Architecture}}')
-[[ $engine == linux/x86_64 || $engine == linux/amd64 ]] || fail 'The Docker engine must run Linux amd64 containers'
-# A non-interactive run without a password stops before the directory is made:
-# the password comes from its file or from the secret of an earlier run.
-if ((NON_INTERACTIVE)); then
-    [[ -n $DB_PASSWORD_FILE || -r $DEPLOY_DIR/secrets/db_password ]] \
-        || fail 'DB_PASSWORD_FILE is required for the first non-interactive deployment'
-    [[ -z $SMTP_USER || -n $smtp_password || -n $SMTP_PASSWORD_FILE || -r $DEPLOY_DIR/secrets/smtp_password ]] \
-        || fail 'SMTP_USER needs SMTP_PASSWORD_FILE for a non-interactive deployment'
-fi
-# --no-pull uses only the pinned images on this server, checked here, before the first
-# change. On the containerd image store the ID of an image is the digest of its manifest
+# --no-pull uses only the pinned images on this server, checked before the first change
+# (and by --check-config, which service.sh reset runs before it deletes the data). On
+# the containerd image store the ID of an image is the digest of its manifest
 # (or of its index), checked against the content, and docker load keeps it; on the classic
 # store a loaded image has no registry digest.
 pin_parts() {  # $1 a pin: REPOSITORY (a registry port stays), DIGEST, PINNED and STREAM_TAG
@@ -1124,6 +1095,53 @@ check_pinned_images() {  # --no-pull, before any change: both images of the line
         'or with Docker alone:' "${commands[@]}" \
         'Then run this command again. Nothing was changed')"
 }
+# service.sh reset runs this before it deletes anything, so that settings this
+# release refuses stop the reset while the data is still there. The directory
+# identity is not compared: the reset binds the directory to this release.
+if ((CHECK_ONLY)); then
+    # A real run reads the passwords only after the checks above. Read them
+    # here too, from the same files, so that a reset does not delete the data
+    # and then refuse a password.
+    check_password_file "$DB_PASSWORD_FILE" "$DEPLOY_DIR/secrets/db_password" 'Database password'
+    [[ -z $SMTP_USER ]] || check_password_file "$SMTP_PASSWORD_FILE" "$DEPLOY_DIR/secrets/smtp_password" 'SMTP password'
+    # KIT_NO_PULL=1 (service.sh reset passes its environment on): the deployment after the
+    # reset uses only the pinned images on this server, so they are checked here too,
+    # before the reset deletes the data.
+    if ((NO_PULL)); then
+        command -v docker >/dev/null || fail 'Docker is missing. First run install-dependencies.sh --role app on Ubuntu 24.04'
+        check_compose_pull
+        check_pinned_images
+    fi
+    printf 'Configuration valid for %s. Nothing was changed.\n' "$RELEASE"
+    exit 0
+fi
+if [[ -n $REPLACE_DIR ]]; then
+    # The deployment that this one takes the place of keeps all it has: its
+    # directory, its containers, its database and its attachments. So it must
+    # be another Compose project and another database.
+    REPLACE_PROJECT=$(sed -n 's/^project=//p' "$REPLACE_DIR/.deployment-identity")
+    REPLACE_RELEASE=$(sed -n 's/^release=//p' "$REPLACE_DIR/.deployment-identity")
+    replace_database=$(sed -n -e 's/^host=//p' -e 's/^port=//p' -e 's/^database=//p' "$REPLACE_DIR/.deployment-identity" | paste -sd ' ' -)
+    [[ $REPLACE_PROJECT =~ ^[a-z][a-z0-9_-]{0,49}$ && $REPLACE_RELEASE =~ ^[a-z0-9.-]+$ && $replace_database =~ ^[^\ ]+\ [^\ ]+\ [^\ ]+$ ]] \
+        || fail "Unreadable $REPLACE_DIR/.deployment-identity"
+    [[ $REPLACE_PROJECT != "$PROJECT_NAME" ]] \
+        || fail "--replace: $REPLACE_DIR uses the Compose project $PROJECT_NAME as well. Give this deployment a PROJECT_NAME of its own, such as perodua-demo-uiux"
+    [[ $replace_database != "$DB_HOST $DB_PORT $DB_NAME" ]] \
+        || fail "--replace keeps database $DB_NAME of $REPLACE_DIR as it is, and this deployment names the same one. Create a new empty database on the DB server (deploy-db.sh DB_MODE=empty with another DB_NAME) and set that DB_NAME"
+fi
+command -v docker >/dev/null || fail 'Docker is missing. First run install-dependencies.sh --role app on Ubuntu 24.04'
+docker compose version >/dev/null 2>&1 || fail 'Docker Compose v2 is required'
+docker info >/dev/null 2>&1 || fail 'Cannot reach Docker. Start the engine and check your account permissions'
+engine=$(docker info --format '{{.OSType}}/{{.Architecture}}')
+[[ $engine == linux/x86_64 || $engine == linux/amd64 ]] || fail 'The Docker engine must run Linux amd64 containers'
+# A non-interactive run without a password stops before the directory is made:
+# the password comes from its file or from the secret of an earlier run.
+if ((NON_INTERACTIVE)); then
+    [[ -n $DB_PASSWORD_FILE || -r $DEPLOY_DIR/secrets/db_password ]] \
+        || fail 'DB_PASSWORD_FILE is required for the first non-interactive deployment'
+    [[ -z $SMTP_USER || -n $smtp_password || -n $SMTP_PASSWORD_FILE || -r $DEPLOY_DIR/secrets/smtp_password ]] \
+        || fail 'SMTP_USER needs SMTP_PASSWORD_FILE for a non-interactive deployment'
+fi
 if ((NO_PULL)); then
     check_compose_pull
     ((RELEASE_MAIL)) || [[ -n $TEST_MAIL ]] || check_pinned_images
@@ -1183,7 +1201,9 @@ if [[ -e $DEPLOY_DIR/.deployment-identity ]]; then
         if unverified && [[ $(grep -x 'project=.*' "$TEMP_DIR/identity") == "$(grep -x 'project=.*' "$DEPLOY_DIR/.deployment-identity")" ]]; then
             printf 'The earlier first run in %s stopped before it used its database, so its settings may still change: using the ones of this run.\n' "$DEPLOY_DIR"
         elif same_but_release "$DEPLOY_DIR/.deployment-identity"; then
-            fail "$DEPLOY_DIR runs $(sed -n 's/^release=//p' "$DEPLOY_DIR/.deployment-identity"). To move it to $RELEASE and keep its data, run deploy-app.sh --upgrade --dir $DEPLOY_DIR (see docs/DEPLOYMENT.md); otherwise use a separate deployment directory"
+            upgrade_command=deploy-app.sh
+            ((NO_PULL == 0)) || upgrade_command=$DEPLOY_COMMAND
+            fail "$DEPLOY_DIR runs $(sed -n 's/^release=//p' "$DEPLOY_DIR/.deployment-identity"). To move it to $RELEASE and keep its data, run $upgrade_command --upgrade --dir $DEPLOY_DIR (see docs/DEPLOYMENT.md); otherwise use a separate deployment directory"
         else
             fail 'Directory belongs to a different database, project, or release. Use a separate deployment directory'
         fi
@@ -2701,7 +2721,14 @@ go_back_steps() {  # back to OLD_RELEASE, from any of its scripts folders
     [[ ! -f $BACKUP_DIR/app.env ]] || printf '   sudo cp -p %s/app.env %s/app.env\n' "$backup" "$dir"
     ((${BACKUP_APP_ENV_TRIMMED:-0} == 0)) \
         || printf '   (This app.env has no IMAGE_MAIL and no MAIL_REDIRECT_TO: %s refuses them, and its mail stays off.)\n' "$OLD_RELEASE"
-    printf '   Then, from a scripts folder of %s: sudo bash deploy-app.sh --dir %s\n' "$OLD_RELEASE" "$dir"
+    if ((${NO_PULL:-0} == 0)); then
+        printf '   Then, from a scripts folder of %s: sudo bash deploy-app.sh --dir %s\n' "$OLD_RELEASE" "$dir"
+        return 0
+    fi
+    # This run used no-pull: the way back needs no pull either.
+    printf '   Then, from a scripts folder of %s: sudo env KIT_NO_PULL=1 bash deploy-app.sh --dir %s\n' "$OLD_RELEASE" "$dir"
+    printf '   That scripts folder must come from a kit version with --no-pull: an older deploy-app.sh pulls the images, and the registry asks for its password. The images of %s must be on this server: when they are not, stream them from the Mac first (bash scripts/stream-image.sh SSH_HOST deploy-app.sh --line %s, in a kit folder that pins %s).\n' \
+        "$OLD_RELEASE" "$LINE" "$OLD_RELEASE"
 }
 if ((UPGRADE)); then
     upgrade_check_database
@@ -2772,7 +2799,7 @@ uat_setup() {
     # shellcheck disable=SC2016
     timeout --foreground "$INIT_TIMEOUT" docker compose --project-name "$PROJECT_NAME" --file "$DEPLOY_DIR/compose.yml" run "${PULL_NEVER[@]}" --rm --no-deps -T odoo \
         bash -c 'PGPASSWORD="$DB_PASSWORD" exec odoo shell -c /etc/odoo/odoo.conf -d "$DB_NAME" --db_host="$DB_HOST" --db_port="$DB_PORT" --db_user="$DB_USER" < /opt/deploy/uat_admins.py' \
-        </dev/null > "$DEPLOY_DIR/uat-setup.log" 2>&1 || fail "UAT administrator setup failed; see $DEPLOY_DIR/uat-setup.log. Rerun with --init-db to retry it; modules are not reinstalled"
+        </dev/null > "$DEPLOY_DIR/uat-setup.log" 2>&1 || fail "UAT administrator setup failed; see $DEPLOY_DIR/uat-setup.log. $(init_again) to retry it; modules are not reinstalled"
     grep -F 'UAT admins: ready:' "$DEPLOY_DIR/uat-setup.log" || fail "UAT administrator setup did not confirm completion; see $DEPLOY_DIR/uat-setup.log"
     [[ $LINE != demo-uiux ]] || uat_demo install
     state=$(preflight verify-fresh)
@@ -2792,7 +2819,9 @@ uat_demo() {
     # stop between the commit and the list, it is the only record of them.
     local mode=$1 pending=$DEPLOY_DIR/seeded-accounts.pending
     if [[ $mode == install ]]; then
-        UAT_DEMO_RERUN='Rerun with --init-db to retry it; modules are not reinstalled'
+        UAT_DEMO_RERUN="$(init_again) to retry it; modules are not reinstalled"
+    elif ((NO_PULL)); then
+        UAT_DEMO_RERUN="Run $DEPLOY_COMMAND --dir $(printf '%q' "$DEPLOY_DIR") again to retry it"
     else
         UAT_DEMO_RERUN='Run deploy-app.sh again to retry it'
     fi
@@ -2947,12 +2976,12 @@ case $state in
         STARTED=1
         timeout --foreground "$INIT_TIMEOUT" docker compose --project-name "$PROJECT_NAME" --file "$DEPLOY_DIR/compose.yml" run "${PULL_NEVER[@]}" --rm --no-deps -T odoo \
             odoo -c /etc/odoo/odoo.conf -d "$DB_NAME" -i "$INIT_MODULES" "$demo_flag" --stop-after-init \
-            </dev/null > "$DEPLOY_DIR/initialization.log" 2>&1 || fail 'Initialization failed or timed out; inspect initialization.log. Rerun with --init-db: it finishes the setup if every module was installed, and otherwise stops with the recovery steps in docs/DEPLOYMENT.md'
+            </dev/null > "$DEPLOY_DIR/initialization.log" 2>&1 || fail "Initialization failed or timed out; inspect initialization.log. $(init_again): it finishes the setup if every module was installed, and otherwise stops with the recovery steps in docs/DEPLOYMENT.md"
         [[ $(preflight mark-pending) == PENDING ]] || fail 'Initialized database failed the fresh UAT checks'
         uat_setup
         FRESH=1 ;;
     SETUP_PENDING|SETUP_UNMARKED)
-        ((INIT_DB)) || fail 'A fresh UAT initialization installed its modules but stopped before its administrators were set up. Rerun with --init-db to finish it; modules are not reinstalled'
+        ((INIT_DB)) || fail "A fresh UAT initialization installed its modules but stopped before its administrators were set up. $(init_again) to finish it; modules are not reinstalled"
         printf 'Finishing the interrupted UAT setup of %s; modules are not reinstalled.\n' "$DB_NAME"
         bind_directory
         STARTED=1
@@ -3205,8 +3234,8 @@ if ((PENDING_STAMP)); then
     else
         held_steps="README.md, \"Upgrade an App server to ${RELEASE##*-}\", step 13 lists it with psql on the DB server"
     fi
-    printf 'Review the held mail: %s (in Odoo: Settings > Technical > Emails, status Delivery Failed). Then send it with: sudo bash deploy-app.sh --release-queued-mail --dir %q\n' \
-        "$held_steps" "$DEPLOY_DIR"
+    printf 'Review the held mail: %s (in Odoo: Settings > Technical > Emails, status Delivery Failed). Then send it with: %s --release-queued-mail --dir %q\n' \
+        "$held_steps" "$DEPLOY_COMMAND" "$DEPLOY_DIR"
     [[ -z $SEEDED ]] || ((SEEDED == 0)) \
         || printf 'Seeded accounts: %s more, each with a new random password, in %s/seeded-accounts.txt (root only).\n' "$SEEDED" "$DEPLOY_DIR"
 fi
@@ -3225,7 +3254,7 @@ printf 'Compose: %s/compose.yml\nFilestore volume: %s_filestore\n' "$DEPLOY_DIR"
 if [[ -n $SMTP_HOST || -n $IMAGE_MAIL ]]; then
     printf 'Outgoing email: %s.\n' "$(mail_summary)"
     printf 'When these settings change, Odoo holds the mail that waited in the queue: review it in Settings > Technical > Emails (status Delivery Failed), then Retry or Cancel it.\n'
-    printf 'Send a test email with: sudo bash deploy-app.sh --send-test-mail ADDRESS --dir %q\n' "$DEPLOY_DIR"
+    printf 'Send a test email with: %s --send-test-mail ADDRESS --dir %q\n' "$DEPLOY_COMMAND" "$DEPLOY_DIR"
 elif ((MAIL_SUPPORTED)); then
     printf 'Outgoing email: off. Configure it with: sudo bash deploy-app.sh --mail --dir %q\n' "$DEPLOY_DIR"
 fi

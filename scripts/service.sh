@@ -36,6 +36,14 @@ The plan is shown next: type the database name to confirm, or pass it with
 reset then needs --confirm, and runs deploy-app.sh with --non-interactive,
 its settings check too, so that a password it would ask for stops the reset
 before anything is deleted.
+
+KIT_NO_PULL=1 in the environment (sudo env KIT_NO_PULL=1 bash service.sh
+--role app reset --confirm DATABASE): reset uses only the pinned images on
+this server, streamed from the Mac (README.md, "Install from streamed images").
+It never asks (as --non-interactive), the settings check of deploy-app.sh
+also checks both pinned images before anything is deleted, and the container
+that empties the database starts with --pull never. stop, start, restart and
+status do not read it.
 EOF
 }
 
@@ -135,6 +143,14 @@ app_start() {
 
 app_reset() {
     local helper release revision current status=0 listed ids=() mounted anonymous=() anon error LINE block deploy_options
+    local pull=() refused=''
+    # KIT_NO_PULL=1: no container of the reset pulls, and nothing asks (README.md, "Install
+    # from streamed images"). deploy-app.sh reads the variable too, in both of its runs.
+    case ${KIT_NO_PULL:-} in
+        ''|0) ;;
+        1) pull=(--pull never) NON_INTERACTIVE=1 refused=', or does not find its pinned images on this server (KIT_NO_PULL=1),' ;;
+        *) die 'KIT_NO_PULL must be 1 (never pull: use the images streamed from the Mac) or 0 (pull as before). Nothing was changed.' ;;
+    esac
     for helper in deploy-app.sh reset_database.py; do
         [[ -f $SCRIPT_DIR/$helper ]] || die "$helper is missing next to service.sh; run it from the complete release directory."
     done
@@ -159,10 +175,11 @@ app_reset() {
     # Its reasons and warnings go to stderr; its "valid" line is not needed here.
     # A non-interactive reset runs both deploy-app.sh steps non-interactive:
     # the check then also refuses a password that the deployment would ask for.
+    # With KIT_NO_PULL=1 the check also finds both pinned images on this server.
     deploy_options=(--dir "$DEPLOY_DIR" --init-db)
     ((NON_INTERACTIVE == 0)) || deploy_options+=(--non-interactive)
     bash "$SCRIPT_DIR/deploy-app.sh" "${deploy_options[@]}" --check-config </dev/null >/dev/null \
-        || die "deploy-app.sh of $release refuses $DEPLOY_DIR/app.env for the reason above. Nothing was changed."
+        || die "deploy-app.sh of $release refuses $DEPLOY_DIR/app.env$refused for the reason above. Nothing was changed."
 
     printf 'Reset the App deployment "%s" in %s:\n' "$PROJECT" "$DEPLOY_DIR"
     printf '  - stop the App and delete all data in database %s on %s (the database, its login and password stay)\n' "$DB_NAME" "$DB_HOST"
@@ -189,7 +206,7 @@ app_reset() {
     fi
 
     compose stop
-    compose run --rm --no-deps -T odoo python3 - < "$SCRIPT_DIR/reset_database.py" || status=$?
+    compose run "${pull[@]}" --rm --no-deps -T odoo python3 - < "$SCRIPT_DIR/reset_database.py" || status=$?
     ((status != 3)) || die 'Nothing was deleted. The App is stopped; start it again with: sudo bash service.sh --role app start'
     ((status == 0)) || die 'The database is only partly emptied. Solve the problem shown above, then run the reset again.'
     printf 'Database %s is empty.\n' "$DB_NAME"
