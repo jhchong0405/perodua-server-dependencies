@@ -81,8 +81,9 @@ server_has_pin() {   # $1 store of the server; the check of install --no-pull: f
     [[ $1 != containerd || ${facts%% *} == "$DIGEST" ]]
 }
 one_manifest() {   # docker save needs all the content of the image: of an index, a pull for one platform brings a part
-    local kind
-    kind=$(docker image inspect --format '{{.Descriptor.MediaType}}' "$PINNED" 2> /dev/null) || kind=''
+    local descriptor kind='' form='"mediaType":"([^"]+)"'
+    descriptor=$(docker image inspect --format '{{json .Descriptor}}' "$PINNED" 2> /dev/null) || descriptor=''
+    [[ ! $descriptor =~ $form ]] || kind=${BASH_REMATCH[1]}
     [[ $kind == application/vnd.oci.image.manifest.v1+json || $kind == application/vnd.docker.distribution.manifest.v2+json ]] \
         || die "The pinned image on this computer is ${kind:-of an unknown media type}, not one image manifest: docker save cannot save an index of which this computer has only the $PLATFORM part. This script streams a single-platform image only. Nothing was streamed."
 }

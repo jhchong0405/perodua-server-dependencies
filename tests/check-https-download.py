@@ -2,7 +2,11 @@
 
 deploy-db.sh asks for the password on its terminal (curl itself never asks) or,
 in a non-interactive run (KIT_NON_INTERACTIVE=1), takes it from
---cloud-password-file without a question; curl gets it on stdin either way.
+--cloud-password-file without a question; curl gets it on stdin either way. A
+password with a backslash, a #, and spaces and tabs at its start and end reaches
+the server unchanged. A non-interactive run without --cloud-password-file stops
+before the download when the database is not deployed yet, and needs no file
+when it is.
 Only used by the disposable-container integration harness. No external cloud
 service, network connection, persistent credential, or production DB is used.
 """
@@ -26,10 +30,13 @@ if os.environ.get("DEPLOY_DB_TEST_ISOLATED") != "1" or not Path("/.dockerenv").i
 
 scripts_dir, test_dir = map(Path, sys.argv[1:])
 download_password = "Cloud:fixture'\"!password"
+# A second account password: a backslash, a #, and spaces and tabs at both ends.
+special_password = " \t Cloud\\pass#word \t"
 download_user = "download_user"
-auth_header = "Basic " + base64.b64encode(
-    f"{download_user}:{download_password}".encode()
-).decode()
+auth_headers = {
+    "Basic " + base64.b64encode(f"{download_user}:{password}".encode()).decode()
+    for password in (download_password, special_password)
+}
 accepted_requests = []
 
 subprocess.run(
@@ -50,7 +57,7 @@ with (test_dir / "https-ca-install.log").open("w") as log:
 
 class BackupHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        accepted = self.headers.get("Authorization") == auth_header
+        accepted = self.headers.get("Authorization") in auth_headers
         accepted_requests.append(accepted)
         if not accepted:
             self.send_response(401)
@@ -79,7 +86,7 @@ server.socket = context.wrap_socket(server.socket, server_side=True)
 threading.Thread(target=server.serve_forever, daemon=True).start()
 
 
-def deployment(name, cloud_password, password_file=None):
+def deployment(name, cloud_password, password_file=None, non_interactive=False):
     template = (test_dir / "config_only.conf").read_text()
     lines = [
         line for line in template.splitlines()
@@ -98,6 +105,8 @@ def deployment(name, cloud_password, password_file=None):
     env = {key: value for key, value in os.environ.items() if key != "KIT_NON_INTERACTIVE"}
     if password_file:
         argv += ["--cloud-password-file", str(password_file)]
+        non_interactive = True
+    if non_interactive:
         env["KIT_NON_INTERACTIVE"] = "1"  # on a terminal, as ssh -t gives an agent: still no question
     child, terminal = pty.fork()
     if child == 0:
@@ -115,7 +124,7 @@ def deployment(name, cloud_password, password_file=None):
                 except OSError:
                     chunk = b""
                 output.extend(chunk)
-                if b"password for user" in output.lower() and not sent and not password_file:
+                if b"password for user" in output.lower() and not sent and not non_interactive:
                     os.write(terminal, cloud_password.encode() + b"\n")
                     sent = True
             exited, result = os.waitpid(child, os.WNOHANG)
@@ -129,28 +138,52 @@ def deployment(name, cloud_password, password_file=None):
     finally:
         os.close(terminal)
         (test_dir / f"{name}.log").write_bytes(output)
-    if password_file:
-        assert b"password for user" not in output.lower(), f"{name} asked although --cloud-password-file gives the password"
-        cloud_password = password_file.read_text().strip()
+    if non_interactive:
+        assert b"password for user" not in output.lower(), f"{name} asked in a non-interactive run"
+        cloud_password = password_file.read_text().rstrip("\n") if password_file else None
     else:
         assert sent, f"{name} did not request the cloud password from its terminal"
-    assert cloud_password.encode() not in output, "Cloud password appeared in terminal output"
-    return os.waitstatus_to_exitcode(status)
+    if cloud_password:
+        assert cloud_password.encode() not in output, "Cloud password appeared in terminal output"
+    return os.waitstatus_to_exitcode(status), output.decode(errors="replace")
+
+
+def protected(name, text):
+    path = test_dir / name
+    path.write_text(text)
+    path.chmod(0o600)
+    return path
 
 
 try:
-    assert deployment("https_restored", download_password) == 0, "Authenticated HTTPS restore failed"
-    assert deployment("https_refused", "incorrect-cloud-password") != 0, "Bad cloud credentials accepted"
-    cloud_file = test_dir / "cloud.password"
-    cloud_file.write_text(download_password + "\n")
-    cloud_file.chmod(0o600)
-    assert deployment("https_from_file", None, cloud_file) == 0, "Non-interactive restore with --cloud-password-file failed"
+    assert deployment("https_restored", download_password)[0] == 0, "Authenticated HTTPS restore failed"
+    assert deployment("https_refused", "incorrect-cloud-password")[0] != 0, "Bad cloud credentials accepted"
+    cloud_file = protected("cloud.password", download_password + "\n")
+    assert deployment("https_from_file", None, cloud_file)[0] == 0, "Non-interactive restore with --cloud-password-file failed"
+    requests = len(accepted_requests)
+    special_file = protected("special.password", special_password + "\n")
+    code, output = deployment("https_special", None, special_file)
+    assert code == 0, "The password with a backslash, # and spaces and tabs at its ends was not accepted:\n" + output
+    assert accepted_requests[requests:] == [True], f"Expected one accepted request: {accepted_requests[requests:]}"
+    # Non-interactive without --cloud-password-file: a database that is not deployed stops before the download.
+    requests = len(accepted_requests)
+    code, output = deployment("https_no_file", None, non_interactive=True)
+    assert code != 0 and "pass --cloud-password-file FILE" in output, "Missing --cloud-password-file accepted:\n" + output
+    assert "FAILED during credentials" in output, output
+    assert len(accepted_requests) == requests, "A refused run reached the download server"
+    # A deployed database is not downloaded again: no file is needed (review P3-3).
+    code, output = deployment("https_from_file", None, non_interactive=True)
+    assert code == 0, "A non-interactive rerun of a deployed restore needed --cloud-password-file:\n" + output
+    assert len(accepted_requests) == requests, "A rerun of a deployed restore downloaded again"
     assert True in accepted_requests and False in accepted_requests, "HTTPS auth checks were not exercised"
 finally:
     server.shutdown()
     server.server_close()
 
 for log in Path("/var/lib/perodua-db-deploy").rglob("*.log"):
-    assert download_password.encode() not in log.read_bytes(), "Cloud password in deployment log"
+    for password in (download_password, special_password):
+        assert password.encode() not in log.read_bytes(), "Cloud password in deployment log"
 
-print("HTTPS fixture: correct and incorrect Basic-auth passwords exercised via PTY, and --cloud-password-file without a question")
+print("HTTPS fixture: correct and incorrect Basic-auth passwords exercised via PTY; --cloud-password-file without a "
+      "question, also with a backslash, # and spaces and tabs at the ends; non-interactive without the file: refused "
+      "before the download, and not needed for a deployed database")

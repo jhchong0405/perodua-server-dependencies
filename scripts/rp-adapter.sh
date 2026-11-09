@@ -106,7 +106,7 @@ read_terminal() {  # [-s hidden] [-k keep spaces] VAR PROMPT HOW
         if [[ $1 == -s ]]; then read_options+=(-s); else read_ifs=''; fi
         shift
     done
-    ((NON_INTERACTIVE == 0)) && [[ -t 0 ]] || die "$3"
+    { ((NON_INTERACTIVE == 0)) && [[ -t 0 ]]; } || die "$3"
     IFS=$read_ifs read -r "${read_options[@]}" -p "$2" "$1"
 }
 # Any other local step that fails (a full disk, a directory that cannot be made)
@@ -235,6 +235,14 @@ ask_settings() {
 # leaves the setup as it was.
 STAGED=()                 # staged files, removed by cleanup unless published
 
+secret_ready() {   # $1 file name in secrets/, $2 *_FILE setting: before any change, stage_secret can have it without a question
+    local source=${!2}
+    if [[ -n $source ]]; then
+        [[ $source == /* && -f $source && -r $source ]] || die "$2 must be an absolute path to a readable file. Nothing was changed."
+    elif [[ ! -f $DEPLOY_DIR/secrets/$1 ]] && { ((NON_INTERACTIVE)) || [[ ! -t 0 ]]; }; then
+        die "A first install without a terminal, or a non-interactive one, needs $2 in --config. Nothing was changed."
+    fi
+}
 stage_secret() {   # $1 file name in secrets/, $2 *_FILE setting, $3 prompt; nothing when it stays
     local name=$1 source=${!2} prompt=$3 value=''
     if [[ -n $source ]]; then
@@ -244,10 +252,10 @@ stage_secret() {   # $1 file name in secrets/, $2 *_FILE setting, $3 prompt; not
     elif [[ -f $DEPLOY_DIR/secrets/$name ]]; then
         return 0
     elif ((NON_INTERACTIVE)) || [[ ! -t 0 ]]; then
-        die "The first install without a terminal needs $2 in --config"
+        die "A first install without a terminal, or a non-interactive one, needs $2 in --config"
     else
         while [[ -z $value ]]; do
-            read_terminal -s -k value "$prompt (hidden): " "The first install without a terminal needs $2 in --config" || die 'Cancelled'
+            read_terminal -s -k value "$prompt (hidden): " "A first install without a terminal, or a non-interactive one, needs $2 in --config" || die 'Cancelled'
             printf '\n'
         done
     fi
@@ -531,6 +539,8 @@ cmd_install() {
         ask_settings
     fi
     check_settings
+    secret_ready db_password DB_PASSWORD_FILE
+    [[ -z $API_URL ]] || secret_ready api_key API_KEY_FILE
     install -d -m 0700 "$DEPLOY_DIR" "$DEPLOY_DIR/secrets"
     # Claimed before anything else is written, so an install that fails later
     # (a registry login, a pull) can be run again or uninstalled.
@@ -585,7 +595,7 @@ cmd_uninstall() {
             || printf '; the output folder stays')"
     if [[ -z $CONFIRM ]]; then
         read_terminal CONFIRM "Type the directory ($DEPLOY_DIR) to confirm: " \
-            "No terminal to confirm on: pass --confirm $DEPLOY_DIR. Nothing was changed." || die 'Cancelled'
+            "A non-interactive run, or a run without a terminal, asks nothing: pass --confirm $DEPLOY_DIR. Nothing was changed." || die 'Cancelled'
     fi
     [[ $CONFIRM == "$DEPLOY_DIR" ]] || die 'Not confirmed. Nothing was changed.'
     # exactly the files install creates, with the staged and kept copies a crash

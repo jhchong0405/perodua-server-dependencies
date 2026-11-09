@@ -67,12 +67,17 @@ MANUAL = {
     "manual-id-2": ["", [], "legacy-app", OLD_IMAGE],
     "manual-id-3": ["", [], "unrelated", "busybox"],
 }
+# A run of rp-adapter.sh (the cron export at 02:30): no Compose project, "perodua" in its
+# image, and the label com.perodua.rp-adapter=1 (the sixth item). It is never listed.
+RP_ADAPTER_RUN = {
+    "adapter-id-1": ["", [], "eager_adapter", "perodua-deploy.novutal.com/rp-adapter:v0.1.0", "", "1"],
+}
 # Its volumes: the attachments, the anonymous one and one that no container mounts.
 OLD_VOLUMES = {OLD_VOLUME: f"named:{OLD_PROJECT}", "old-anon": "anonymous", "old-unused": f"named:{OLD_PROJECT}"}
 # What the other deployments' tests change. This directory's lock does not guard them.
 OTHERS = {OLD_PROJECT, *OLD_VOLUMES, "manual-id-1", "manual-id-2"}
 LISTING = ('{{.ID}}|{{.Label "com.docker.compose.project"}}|{{.Label "com.docker.compose.project.working_dir"}}'
-           '|{{.Names}}|{{.Image}}|{{.Status}}|{{.Ports}}')
+           '|{{.Names}}|{{.Image}}|{{.Status}}|{{.Ports}}|{{.Label "com.perodua.rp-adapter"}}')
 UNREACHABLE = "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?"
 # The last two are the checks deploy-app.sh makes before it takes its lock.
 READS = (["ps"], ["inspect"], ["network", "ls"], ["volume", "ls"], ["compose", "version"], ["info"])
@@ -161,8 +166,8 @@ elif args[:2] == ['compose', '--project-name'] and args[3] == '--file' and args[
 elif args == ['ps', '-a', '--format', LISTING]:
     containers.update(state.pop('start_before_listing', {}))  # for example a deployment that started meanwhile
     for container, entry in containers.items():
-        project, _, name, image, directory = entry + [container, '', ''][len(entry) - 2:]
-        out.append(f'{container}|{project or ""}|{directory}|{name}|{image}|Up 2 hours|')
+        project, _, name, image, directory, kit = entry + [container, '', '', ''][len(entry) - 2:]
+        out.append(f'{container}|{project or ""}|{directory}|{name}|{image}|Up 2 hours||{kit}')
 elif args[:2] == ['compose', '--project-name'] and args[3:] == ['down', '--remove-orphans']:
     # A project taken down by its name alone. Compose would read a compose file
     # in the current directory instead.
@@ -638,8 +643,10 @@ class UninstallAppTests(unittest.TestCase):
         self.assertEqual(self.changes(), [])
 
     def test_perodua_containers_without_a_compose_project_are_removed_by_id(self):
-        self.with_old_deployment(**MANUAL)
+        self.with_old_deployment(**MANUAL, **RP_ADAPTER_RUN)
         code, output = self.on_terminal(["--confirm", PROJECT], [b"n", b"y"])
+        self.assertNotIn("adapter", output)  # the run of rp-adapter.sh is not offered
+        self.assertIn("adapter-id-1", self.left("containers"))
         self.assertEqual(code, 0, output)
         self.assertIn("Containers without a Compose project:\n"
                       "  Perodua-Manual  busybox  Up 2 hours\n"

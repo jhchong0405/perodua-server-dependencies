@@ -619,8 +619,8 @@ class OracleViewAppTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertEqual(result.stdout, "")
         self.assertIn(f"ERROR: The pinned image on this server does not start: {error}. Remove it (sudo docker image rm "
-                      f"{PINNED} {STREAM_TAG}), stream the pinned image again, then run install again. Nothing was "
-                      "changed.\n", result.stderr)
+                      f"{PINNED}), stream the pinned image again, then run install again. Nothing was changed.\n",
+                      result.stderr)
         self.assertNoPullChangedNothing()
         self.assertIn(list(STARTS), [call["args"] for call in self.calls()])
         self.assertFalse(self.dir.exists())
@@ -1866,7 +1866,8 @@ class OracleViewRoleTest(unittest.TestCase):
                 self.assertEqual(self.scripts(), [])
         result = self.run_script("drop-role", "--drop-staging")  # the choice is not the confirmation
         self.assertEqual(result.returncode, 1)
-        self.assertIn("No terminal to confirm on: pass --confirm oracle_view_rp. Nothing was changed.", result.stderr)
+        self.assertIn("A non-interactive run, or a run without a terminal, asks nothing: pass --confirm oracle_view_rp. "
+                      "Nothing was changed.", result.stderr)
         self.assertEqual(self.scripts(), [])
         result = self.run_script("drop-role", "--confirm", "oracle_view_rp", "--drop-staging", "--pg-port", "5433")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -3476,7 +3477,7 @@ ARCHIVE = f"archive of {STREAM_TAG} -> {DIGEST}\n"  # what the fake docker save 
 TERMINAL = "typed on the terminal\n"  # the standard input of the helper: no check on the server may read it
 MAC_INFO = ["info", "--format", STORE_FORMAT]
 MAC_PINNED = ["image", "inspect", "--format", "{{.Id}}", PINNED]
-MAC_KIND = ["image", "inspect", "--format", "{{.Descriptor.MediaType}}", PINNED]
+MAC_KIND = ["image", "inspect", "--format", "{{json .Descriptor}}", PINNED]
 MAC_TAGGED = ["image", "inspect", "--format", "{{.Id}}", STREAM_TAG]
 MAC_PULL = ["pull", "--platform", "linux/amd64", IMAGE]
 MAC_TAG = ["tag", PINNED, STREAM_TAG]
@@ -3503,8 +3504,10 @@ if args == ["info", "--format", "{{json .DriverStatus}}"]:
         err, status = "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?\n", 1
 elif args == ["image", "inspect", "--format", "{{.Id}}", PINNED]:
     out, err, status = (mac["pinned"] + "\n", "", 0) if mac["pinned"] else ("", missing, 1)
-elif args == ["image", "inspect", "--format", "{{.Descriptor.MediaType}}", PINNED]:
-    out, err, status = (mac["kind"] + "\n", "", 0) if mac["pinned"] else ("", missing, 1)
+elif args == ["image", "inspect", "--format", "{{json .Descriptor}}", PINNED]:  # as Docker 29 prints it
+    descriptor = {"mediaType": mac["kind"], "digest": mac["pinned"], "size": 3144,
+                  "annotations": {"config.digest": "sha256:" + "d" * 64}}
+    out, err, status = (json.dumps(descriptor, separators=(",", ":")) + "\n", "", 0) if mac["pinned"] else ("", missing, 1)
 elif args == ["image", "inspect", "--format", "{{.Id}}", STREAM_TAG]:
     out, err, status = (mac["tag"] + "\n", "", 0) if mac["tag"] else ("", missing, 1)
 elif args == ["pull", "--platform", "linux/amd64", IMAGE]:

@@ -23,7 +23,8 @@ the script asks on the terminal for this server's internal IP and the App
 server's IP, and saves the answers there as a fresh UAT (DB_MODE=empty) setup.
 --app-ip, --listen-ip and --allow-public-listen (the App on another server) or
 --app-here (the App on this server) give these answers instead: nothing is
-asked, and an answer that cannot be used stops the run.
+asked, and an answer that cannot be used stops the run. A rerun with the same
+options uses the deploy.conf that they saved; another deploy.conf stops it.
 Passwords are prompted on the terminal. --password-file accepts a root-owned
 regular file with no group/other permissions (for controlled automation).
 --cloud-password-file is the same for the password of DOWNLOAD_USER.
@@ -82,8 +83,14 @@ esac
 ((APP_HERE == 0)) || [[ -z $APP_IP ]] || die 'Give --app-ip (the App on another server) or --app-here (the App on this server), not both.'
 [[ -z $LISTEN_IP && $ALLOW_PUBLIC == 0 ]] || [[ -n $APP_IP ]] \
     || die '--listen-ip and --allow-public-listen belong to --app-ip: with --app-here, PostgreSQL listens on the address of Docker on this server.'
-if ((GUIDED)) && { ((CONFIG_GIVEN)) || [[ -e $CONFIG || -L $CONFIG ]]; }; then
-    die "--app-ip and --app-here answer the guided setup, which runs only when there is no deploy.conf; $CONFIG is given or exists. Edit it instead. Nothing was changed."
+if ((GUIDED && CONFIG_GIVEN)); then
+    die "--app-ip and --app-here answer the guided setup, which runs only without --config; $CONFIG is given. Edit it instead. Nothing was changed."
+fi
+# A non-interactive run asks nothing: the database password comes from its file.
+# Checked before the guided setup saves deploy.conf, so that a refused run saves
+# nothing and its retry with --password-file is not refused for that file.
+if ((NON_INTERACTIVE && CHECK_ONLY == 0)) && [[ -z $PASSWORD_FILE ]]; then
+    die 'A non-interactive run never asks for the database password: pass --password-file FILE (root-owned, chmod 600). Nothing was changed.'
 fi
 command -v python3 >/dev/null || die 'Install python3 (standard library only; no pip packages).'
 
@@ -96,7 +103,7 @@ read_terminal() {  # [-s hidden] [-k keep spaces] VAR PROMPT HOW
         if [[ $1 == -s ]]; then read_options+=(-s); else read_ifs=''; fi
         shift
     done
-    ((NON_INTERACTIVE == 0)) && [[ -t 0 ]] || die "$3"
+    { ((NON_INTERACTIVE == 0)) && [[ -t 0 ]]; } || die "$3"
     IFS=$read_ifs read -r "${read_options[@]}" -p "$2" "$1"
 }
 
@@ -200,9 +207,9 @@ guided_answers() {  # the answers of the options: sets listen, app and together,
     is_app_network "$app" || die "--app-ip must be the IPv4 address (or network) that the App server connects from. Nothing was saved."
 }
 guided_setup() {
-    local port listen app address default together choices=() private=() gateways=()
+    local port listen app address default together answers choices=() private=() gateways=()
     if ((GUIDED == 0)); then
-        ((NON_INTERACTIVE == 0)) && [[ -t 0 ]] \
+        { ((NON_INTERACTIVE == 0)) && [[ -t 0 ]]; } \
             || die "No configuration at $CONFIG. Copy deploy.conf.example to deploy.conf and edit it, or pass --app-ip ADDRESS --listen-ip ADDRESS (the App on another server) or --app-here (the App on this server) for a fresh UAT system, or run on a terminal to be guided."
     fi
     port=$(pg_conftool 16 main show port 2>/dev/null | awk '{print $NF}') || true
@@ -283,10 +290,19 @@ guided_setup() {
         say 'Answer again (Ctrl-C stops without saving).'
     done
     ((GUIDED == 0)) || summary
-    {
-        printf '# Created by deploy-db.sh from your answers. All settings: deploy.conf.example.\n'
-        printf '%s\n' DB_MODE=empty DB_NAME=perodua DB_USER=odoo "PG_PORT=$port" "DB_LISTEN_IP=$listen" "APP_CIDR=$app"
-    } > "$CONFIG.new"
+    answers=$(printf '# Created by deploy-db.sh from your answers. All settings: deploy.conf.example.\n'
+              printf '%s\n' DB_MODE=empty DB_NAME=perodua DB_USER=odoo "PG_PORT=$port" "DB_LISTEN_IP=$listen" "APP_CIDR=$app")
+    if [[ -e $CONFIG || -L $CONFIG ]]; then
+        # Only with the options: an earlier run of the same options saved this file
+        # (and stopped later, for example without --password-file). Other content,
+        # also the same answers edited by hand, is never replaced.
+        if [[ -f $CONFIG && ! -L $CONFIG && $(cat -- "$CONFIG") == "$answers" ]]; then
+            say "$CONFIG holds these answers already (saved by an earlier run of the same options): it is used as it is." ''
+            return
+        fi
+        die "--app-ip and --app-here answer the guided setup, which saves deploy.conf; $CONFIG exists with other settings. Edit it instead. Nothing was changed."
+    fi
+    printf '%s\n' "$answers" > "$CONFIG.new"
     mv -f -- "$CONFIG.new" "$CONFIG"
     printf 'Saved %s.\n\n' "$CONFIG" >&2
 }
@@ -299,7 +315,7 @@ summary() {  # what the answers set up, before they are saved
         say "Listen on $listen and accept connections only from $app."
     fi
 }
-if ((CONFIG_GIVEN == 0)) && [[ ! -e $CONFIG && ! -L $CONFIG ]]; then guided_setup; fi
+if ((CONFIG_GIVEN == 0)) && { ((GUIDED)) || [[ ! -e $CONFIG && ! -L $CONFIG ]]; }; then guided_setup; fi
 
 [[ -f $CONFIG && ! -L $CONFIG ]] || die "Configuration is not a regular, non-symlink file: $CONFIG"
 (( (8#$(stat -c %a "$CONFIG") & 8#022) == 0 )) || die 'Configuration must not be group/world writable.'
@@ -405,15 +421,25 @@ fi
 [[ -z $CLOUD_PASSWORD_FILE || -n $DOWNLOAD_USER ]] || die '--cloud-password-file is the password of DOWNLOAD_USER, which the configuration does not set.'
 if ((CHECK_ONLY)); then printf 'Configuration valid. No services or databases changed.\n'; exit 0; fi
 
-# A non-interactive run asks nothing: each password comes from its file.
-if ((NON_INTERACTIVE)); then
-    [[ -n $PASSWORD_FILE ]] \
-        || die "A non-interactive run never asks for the database password of $DB_USER: pass --password-file FILE (root-owned, chmod 600). Nothing was changed."
-    if [[ $DB_MODE == restore && -n $BACKUP_URL && -n $DOWNLOAD_USER && -z $CLOUD_PASSWORD_FILE ]]; then
-        die "A non-interactive run never asks for the cloud download password of $DOWNLOAD_USER: pass --cloud-password-file FILE (root-owned, chmod 600). Nothing was changed."
-    fi
-fi
 [[ $EUID -eq 0 ]] || die 'Run with sudo or as root.'
+# The password files, before PostgreSQL starts or a state directory is made.
+protected_file() {  # $1 a password file, $2 its option: root-owned, no group/other permissions
+    [[ -f $1 && ! -L $1 && $(stat -c %u "$1") == 0 ]] || die "$2 must be a root-owned regular file, not a symlink. Nothing was changed."
+    (( (8#$(stat -c %a "$1") & 8#077) == 0 )) || die "$2 must have no group/other permissions (use chmod 600). Nothing was changed."
+    [[ -r $1 ]] || die "$2 cannot be read. Nothing was changed."
+}
+if [[ -n $PASSWORD_FILE ]]; then
+    protected_file "$PASSWORD_FILE" '--password-file'
+    password_ok "$(cat -- "$PASSWORD_FILE")" \
+        || die '--password-file must hold a 12-1024 character printable ASCII password (spaces and punctuation are supported). Nothing was changed.'
+fi
+if [[ -n $CLOUD_PASSWORD_FILE ]]; then
+    protected_file "$CLOUD_PASSWORD_FILE" '--cloud-password-file'
+    cloud_password=$(cat -- "$CLOUD_PASSWORD_FILE")
+    [[ -n $cloud_password && $cloud_password != *[$'\n\r']* ]] \
+        || die '--cloud-password-file must hold the cloud download password on one line (no line break, no carriage return of Windows). Nothing was changed.'
+    unset cloud_password
+fi
 # shellcheck source=/dev/null
 source /etc/os-release
 [[ ${ID:-} == ubuntu && ${VERSION_ID:-} == 24.04 ]] || die 'This script supports Ubuntu 24.04.'
@@ -540,12 +566,13 @@ if [[ -n $TARGET_OID ]]; then
 fi
 
 PHASE=credentials
-protected_file() {  # $1 a password file, $2 its option: root-owned, no group/other permissions
-    [[ -f $1 && ! -L $1 && $(stat -c %u "$1") == 0 ]] || die "$2 must be a root-owned regular file, not a symlink."
-    (( (8#$(stat -c %a "$1") & 8#077) == 0 )) || die "$2 must have no group/other permissions (use chmod 600)."
-}
+# A non-interactive restore that downloads with DOWNLOAD_USER: the password comes
+# from its file. Only a database that is not deployed yet is downloaded.
+if ((NON_INTERACTIVE && ! DEPLOYED)) && [[ $DB_MODE == restore && -n $BACKUP_URL && -n $DOWNLOAD_USER && -z $CLOUD_PASSWORD_FILE ]]; then
+    die "A non-interactive run never asks for the cloud download password of $DOWNLOAD_USER: pass --cloud-password-file FILE (root-owned, chmod 600). No database was changed; PostgreSQL runs."
+fi
 if [[ -n $PASSWORD_FILE ]]; then
-    protected_file "$PASSWORD_FILE" 'Password file'
+    protected_file "$PASSWORD_FILE" '--password-file'
     DB_PASSWORD=$(cat -- "$PASSWORD_FILE")
 else
     confirmation=''

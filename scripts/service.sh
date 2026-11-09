@@ -86,7 +86,7 @@ read_terminal() {  # [-s hidden] [-k keep spaces] VAR PROMPT HOW
         if [[ $1 == -s ]]; then read_options+=(-s); else read_ifs=''; fi
         shift
     done
-    ((NON_INTERACTIVE == 0)) && [[ -t 0 ]] || die "$3"
+    { ((NON_INTERACTIVE == 0)) && [[ -t 0 ]]; } || die "$3"
     IFS=$read_ifs read -r "${read_options[@]}" -p "$2" "$1"
 }
 confirm() {
@@ -95,7 +95,7 @@ confirm() {
         [[ $CONFIRM == "$expected" ]] || die "--confirm must be exactly $expected. Nothing was changed."
         return
     fi
-    read_terminal -k answer "Type $expected to confirm: " "No terminal to confirm on: pass --confirm $expected. Nothing was changed." \
+    read_terminal -k answer "Type $expected to confirm: " "A non-interactive run, or a run without a terminal, asks nothing: pass --confirm $expected. Nothing was changed." \
         || die 'Cancelled. Nothing was changed.'
     [[ $answer == "$expected" ]] || die 'The confirmation did not match. Nothing was changed.'
 }

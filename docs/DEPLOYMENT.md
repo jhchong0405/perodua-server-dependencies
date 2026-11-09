@@ -99,7 +99,7 @@ Edit the file, especially these settings:
 | `BACKUP_FILE` | Local `.dump`; relative paths are relative to `deploy.conf` |
 | `BACKUP_URL` | Direct HTTPS download URL; leave `BACKUP_FILE` empty to use it |
 | `BACKUP_SHA256` | Required SHA-256 from the backup preparer |
-| `DOWNLOAD_USER` | Optional HTTP Basic-auth username; curl prompts for its password |
+| `DOWNLOAD_USER` | Optional HTTP Basic-auth username. The script asks for its password on the terminal, or reads it from `--cloud-password-file`; curl gets it on its stdin and never asks |
 | `DB_LC_COLLATE`, `DB_LC_CTYPE` | Source database locales |
 | `DB_LISTEN_IP` | DB server's own IPv4 address; initially `127.0.0.1` |
 | `APP_CIDR` | Allowed App Server IPv4 source, e.g. `10.0.0.10/32`, or several separated by commas; empty means local access only |
@@ -1275,8 +1275,8 @@ App first. It then removes:
 - the deployment records, and `deploy.conf` if the guided setup wrote it. A
   hand-written `deploy.conf` is kept.
 
-PostgreSQL stays installed. With `--purge`, and a typed `PURGE` on a terminal,
-the script also uninstalls the PostgreSQL 16 packages and deletes all their data,
+PostgreSQL stays installed. With `--purge`, and a typed `PURGE` on a terminal
+or `--confirm-purge PURGE` (also in a non-interactive run), the script also uninstalls the PostgreSQL 16 packages and deletes all their data,
 configuration and logs, which removes every database on the server. It first
 checks that apt would remove only those packages, and refuses if another
 PostgreSQL version or a dependent package would go too. Libraries pulled in by

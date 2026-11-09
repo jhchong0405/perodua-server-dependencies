@@ -25,8 +25,9 @@ same platform gates: root on Linux for service.sh, iss-api.sh, rp-adapter.sh
 and https.sh, root on Ubuntu 24.04 for uninstall.sh. The tests remove
 KIT_NON_INTERACTIVE from their own environment first.
 
-oracle-view.sh and oracle-view-stream.sh are not checked here yet: another
-branch changes them (README.md, "Run the kit without a person").
+oracle-view-stream.sh runs on the Mac and asks nothing (ssh in batch mode,
+sudo -n): the static checks of the reads and of the external commands cover it,
+but it has no --non-interactive and no read_terminal.
 """
 
 import json
@@ -43,19 +44,22 @@ import time
 import unittest
 
 import test_deploy_app as app_tests
+import test_deploy_app_module_upgrade as module_tests
 import test_deploy_app_uat as uat_tests
 import test_deploy_db_guided as guided_tests
 import test_https as https_tests
 import test_iss_api as iss_tests
+import test_oracle_view as ov_tests
 import test_rp_adapter as rp_tests
 import test_service_app as service_tests
 import test_uninstall_app as uninstall_tests
 
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
-# Changed by another branch at the same time; checked after it merges.
-NOT_YET = {"oracle-view.sh", "oracle-view-stream.sh"}
-KIT = sorted(path for path in SCRIPTS.glob("*.sh") if path.name not in NOT_YET)
+# Runs on the Mac, never on a server, and asks nothing: no option replaces an answer.
+MAC_ONLY = {"oracle-view-stream.sh"}
+ALL = sorted(SCRIPTS.glob("*.sh"))
+KIT = [path for path in ALL if path.name not in MAC_ONLY]
 LINUX = Path("/proc/self/fd").is_dir()
 ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
 # What a question to a person looks like in the output of any kit script.
@@ -66,7 +70,10 @@ CTRL_C = b"\x03"
 
 HEREDOC = re.compile(r"(?<!<)<<(?!<)-?\s*(['\"]?)([A-Za-z_]\w*)\1")
 COMMAND_START = r"(?:^|[;&|({!]|\$\(|\bthen\b|\bdo\b|\belse\b|\bwhile\b|\buntil\b|\bif\b)\s*(?:[A-Za-z_]\w*=\S*\s+)*"
-READ = re.compile(COMMAND_START + r"(read|mapfile|readarray)\s+-")
+# read with options, and a bare read VAR (or read alone, into REPLY).
+READ = re.compile(COMMAND_START + r"(read|mapfile|readarray)(?=\s|$|;)")
+# Commands that read their standard input when no file is named.
+STDIN_READERS = re.compile(COMMAND_START + r"(cat|head|tail|python3?|base64|sha256sum|wc)\b(?!-)([^;&|)]*)")
 
 
 def without_variable(env):
@@ -143,7 +150,8 @@ class NoWait:
 # ───────────────────────────────────────────────────────────── static checks
 def code_text(raw):
     """The shell code of a script, line for line: heredoc bodies and comments
-    blanked, the text in quotes replaced by Q (its line breaks kept). The code
+    blanked, the text in quotes replaced by Q (its line breaks kept, each as a
+    backslash-newline, so that logical_lines joins the command again). The code
     of a $( ) inside double quotes stays code."""
     lines, term = [], None
     for line in raw.split("\n"):
@@ -162,7 +170,7 @@ def code_text(raw):
         c, mode = text[i], modes[-1]
         if mode == "double":
             if c == "\\":
-                out.append("\n" * text.count("\n", i, i + 2))
+                out.append("\\\n" * text.count("\n", i, i + 2))
                 i += 2
             elif c == '"':
                 modes.pop()
@@ -173,7 +181,7 @@ def code_text(raw):
                 out.append("$(")
                 i += 2
             else:
-                out.append("\n" if c == "\n" else "")
+                out.append("\\\n" if c == "\n" else "")
                 i += 1
         elif c == "\\":
             out.append(text[i:i + 2])
@@ -182,7 +190,7 @@ def code_text(raw):
             end = i + (2 if c == "$" else 1)
             while end < len(text) and text[end] != "'":
                 end += 2 if c == "$" and text[end] == "\\" else 1
-            out.append("Q" + "\n" * text.count("\n", i, end))
+            out.append("Q" + "\\\n" * text.count("\n", i, end))
             i = end + 1
         elif c == '"':
             modes.append("double")
@@ -258,23 +266,65 @@ def terminal_reads(path):
     return found
 
 
+def reads_standard_input(name, args):
+    """Whether the command name with the arguments args (shell code, quotes as Q)
+    reads its standard input: python with the script -, the others with no file."""
+    tokens, operands, skip = args.split(), [], False
+    for token in tokens:
+        if skip:
+            skip = False
+        elif token in (">", ">>", "2>", "2>>", "&>", "<", "<<<"):
+            skip = True
+        elif not token.startswith(("-", ">", "2>", "<", "&>")) and not re.fullmatch(r"\d+", token):
+            operands.append(token)
+    if name.startswith("python"):
+        return "-" in tokens
+    return not operands
+
+
+def every_call_gives_input(code, number):
+    """Line number is in a shell function, and each call of it has a redirection of
+    its standard input or a pipe into it."""
+    lines = code.split("\n")
+    for start in range(number, 0, -1):
+        match = re.match(r"^(\w[\w-]*)\(\)\s*\{", lines[start - 1])
+        if match:
+            break
+    else:
+        return False
+    name = match.group(1)
+    if number not in function_lines(code, name):
+        return False
+    calls = [line for n, line in logical_lines(code)
+             if n not in function_lines(code, name) and re.search(COMMAND_START + re.escape(name) + r"\b", line)]
+    return bool(calls) and all(re.search(r"<|\|\s*" + re.escape(name) + r"\b", line) for line in calls)
+
+
 class StaticChecks(unittest.TestCase):
     def test_the_scripts_are_found(self):
         self.assertGreaterEqual({path.name for path in KIT}, {
             "deploy-app.sh", "deploy-db.sh", "https.sh", "install-dependencies.sh", "iss-api.sh",
             "rp-adapter.sh", "service.sh", "uninstall.sh"})
 
+    def test_the_read_check_finds_a_bare_read(self):
+        with tempfile.TemporaryDirectory() as temp:
+            script = Path(temp) / "sample.sh"
+            script.write_text('ask() {\n    read answer\n    read\n    [[ -n $answer ]] && read -r other\n}\n'
+                              'while read -r line; do :; done < "$file"\nIFS= read -r value <<< "$text"\n')
+            self.assertEqual(terminal_reads(script), [(2, "read answer"), (3, "read"),
+                                                      (4, "[[ -n $answer ]] && read -r other")])
+
     def test_no_script_uses_dev_tty(self):
         # Not as a test ([[ -r /dev/tty ]] tests only the file mode), not to
         # read (an agent under ssh -t that gives stdin from /dev/null would
         # still be asked there), not to write (without a terminal it fails).
-        for path in KIT:
+        for path in ALL:
             with self.subTest(script=path.name):
                 code = code_text(path.read_text())
                 self.assertEqual([n for n, line in enumerate(code.split("\n"), 1) if "/dev/tty" in line], [])
 
     def test_every_answer_of_a_person_is_read_in_read_terminal_only(self):
-        for path in KIT:
+        for path in ALL:
             with self.subTest(script=path.name):
                 self.assertEqual(terminal_reads(path), [])
 
@@ -289,7 +339,7 @@ class StaticChecks(unittest.TestCase):
                 continue
             text = "\n".join(code.split("\n")[body.start - 1:body.stop - 1])
             with self.subTest(script=path.name):
-                self.assertRegex(text, r"\(\(NON_INTERACTIVE == 0\)\) && \[\[ -t 0 \]\] \|\| (die|fail) Q")
+                self.assertRegex(text, r"\{ \(\(NON_INTERACTIVE == 0\)\) && \[\[ -t 0 \]\]; \} \|\| (die|fail) Q")
                 self.assertIn("read -r", text)
                 self.assertNotIn("/dev/", text)
             helpers[path.name] = re.sub(r"\b(die|fail)\b", "STOP", text)
@@ -309,7 +359,7 @@ class StaticChecks(unittest.TestCase):
                     self.assertIn("((NON_INTERACTIVE == 0)) || export KIT_NON_INTERACTIVE=1", raw)
 
     def test_no_external_command_can_ask(self):
-        for path in KIT:
+        for path in ALL:
             raw, code = path.read_text(), code_text(path.read_text())
             raw_lines = raw.split("\n")
             with self.subTest(script=path.name):
@@ -325,14 +375,32 @@ class StaticChecks(unittest.TestCase):
                         self.assertIn("--password-stdin", line, where)
                     if re.search(COMMAND_START + r"sudo\b", line):
                         self.assertRegex(line, r"\bsudo\s+-n\b", where)
-                    if re.search(COMMAND_START + r"ssh\b", line):
+                    # ssh -G only prints the configuration: it connects nowhere.
+                    if re.search(COMMAND_START + r"ssh\b(?!\s+-G\b)", line):
                         self.assertIn("BatchMode=yes", line, where)
                     # A container with a terminal could ask through it.
                     self.assertNotRegex(line, r"(?<![\w-])(-it|-ti|--tty|--interactive)(?![\w-])", where)
                     if re.search(r"\bdocker\s+(run|exec)\b", line):
-                        self.assertNotRegex(line, r"(?<![\w-])-[it](?![\w-])", where)
-                    if re.search(r"(?:^|[\s;&|(])(compose|current|staged)\b.*\b(run|exec)\b", line):
+                        self.assertNotRegex(line, r"(?<![\w-])-t(?![\w-])", where)
+                        # -i gives the container the standard input of the script: only a pipe.
+                        if re.search(r"(?<![\w-])-i(?![\w-])", line):
+                            self.assertRegex(line, r"\|\s*docker\s+run\b", where)
+                    if re.search(r"(?:^|[\s;&|(])(compose|current|staged|old|new)\b.*\b(run|exec)\b", line):
                         self.assertRegex(line, r"(?<![\w-])-T(?![\w-])", where)
+                        # Without a redirection or a pipe, Compose passes the standard input of the
+                        # script to the container: a terminal, or the rest of a script given on stdin.
+                        self.assertTrue(re.search(r"<|\|\s*(\w+\s+)*(compose|current|staged|old|new)\b", line)
+                                        or every_call_gives_input(code, number), where)
+                    # A command that reads its standard input when no file is named: its input is
+                    # a redirection or a pipe, or each call of its function gives one.
+                    for match in STDIN_READERS.finditer(line):
+                        if not reads_standard_input(match.group(1), match.group(2)):
+                            continue
+                        before = line[:match.start(1)]
+                        if "<" in match.group(2) or re.search(r"\|\s*(\w+=\S*\s+)*$", before):
+                            continue
+                        self.assertTrue(every_call_gives_input(code, number), where)
+                    self.assertNotRegex(line, COMMAND_START + r"select\b", where)
                     match = re.search(COMMAND_START + r"apt-get\s+(install|upgrade|full-upgrade|dist-upgrade|purge|remove)\b", line)
                     if match:
                         self.assertRegex(line, r"(?<![\w-])-y(?![\w-])", where)
@@ -380,7 +448,8 @@ class CheckedBeforeAnyChange(NoWait, unittest.TestCase):
         for script, args in (("deploy-db.sh", ["--check-config"]), ("service.sh", ["--role", "app", "status"]),
                              ("uninstall.sh", ["--role", "app"]), ("deploy-app.sh", ["--dir", self.tmp / "app"]),
                              ("iss-api.sh", ["status"]), ("rp-adapter.sh", ["status"]), ("https.sh", ["status"]),
-                             ("install-dependencies.sh", ["--role", "app"])):
+                             ("install-dependencies.sh", ["--role", "app"]),
+                             ("oracle-view.sh", ["status", "--dir", self.tmp / "ov"])):
             for value in ("yes", "true", "2"):
                 with self.subTest(script=script, value=value):
                     code, output = self.run_on_terminal(script, *args, value=value)
@@ -395,7 +464,12 @@ class CheckedBeforeAnyChange(NoWait, unittest.TestCase):
                 (["--role", "app", "--purge", "--confirm-purge", "PURGE"], "--confirm-purge belongs to --role db --purge"),
                 (["--role", "db", "--delete-old-containers", "perodua-odoo"], "belong to --role app"),
                 (["--role", "app", "--delete-old-volumes"], "give that too"),
-                (["--role", "app", "--delete-old-containers", "Not A Project"], "needs a Compose project name")):
+                (["--role", "app", "--delete-old-containers", "Not A Project"], "needs a Compose project name"),
+                (["--role", "app", "--delete-old-containers", "-"], "needs the IDs of the containers without a Compose "
+                                                                    "project, as a run without the option lists them: "
+                                                                    "-:ID,ID"),
+                (["--role", "app", "--delete-old-containers", "-:"], "needs a Compose project name, or -:ID,ID"),
+                (["--role", "app", "--delete-old-containers", "-:id one"], "needs a Compose project name, or -:ID,ID")):
             with self.subTest(args=args):
                 code, output = self.run_on_terminal("uninstall.sh", *args)
                 self.assert_refused(code, output, message, "Nothing was changed")
@@ -495,9 +569,11 @@ class DeployDbNoWait(NoWait, unittest.TestCase):
     def test_the_options_never_replace_a_deploy_conf(self):
         self.write_config()
         before = self.config.read_text()
-        code, output = self.deploy_db("--app-ip", "10.0.0.10", "--listen-ip", guided_tests.LOCAL, "--check-config")
-        self.assert_refused(code, output, "Edit it instead. Nothing was changed.")
-        self.assertEqual(self.config.read_text(), before)
+        for extra in (["--check-config"], ["--check-config", "--config", self.config]):
+            with self.subTest(extra=extra):
+                code, output = self.deploy_db("--app-ip", "10.0.0.10", "--listen-ip", guided_tests.LOCAL, *extra)
+                self.assert_refused(code, output, "Edit it instead. Nothing was changed.")
+                self.assertEqual(self.config.read_text(), before)
 
     def test_the_database_password_comes_only_from_password_file(self):
         self.write_config()
@@ -505,25 +581,96 @@ class DeployDbNoWait(NoWait, unittest.TestCase):
         self.assert_refused(code, output, "pass --password-file FILE", "Nothing was changed")
         self.assertNotIn("Database password for", output)
 
-    def test_an_authenticated_download_needs_cloud_password_file(self):
-        self.write_config(DB_MODE="restore", BACKUP_URL="https://backup.example.invalid/database.dump",
-                          BACKUP_SHA256="0" * 64, DOWNLOAD_USER="cloud", DB_LISTEN_IP="127.0.0.1")
+    def test_a_retry_with_the_password_file_is_not_refused(self):
+        # Review P2-1: the first run, without --password-file, saved deploy.conf and then stopped, and the
+        # retry with the same options was refused because deploy.conf existed.
+        answers = ["--app-ip", "10.0.0.10", "--listen-ip", guided_tests.LOCAL]
+        saved = ["DB_MODE=empty", "DB_NAME=perodua", "DB_USER=odoo", "PG_PORT=5433",
+                 f"DB_LISTEN_IP={guided_tests.LOCAL}", "APP_CIDR=10.0.0.10/32"]
+        code, output = self.deploy_db(*answers)
+        self.assert_refused(code, output, "pass --password-file FILE", "Nothing was changed")
+        self.assertFalse(self.config.exists())
+        # Group-readable: the run stops at the check of the file, after the guided setup and before PostgreSQL.
         password = self.config.with_name("db-password")
         password.write_text("Fixture password 2026\n")
-        password.chmod(0o600)
-        code, output = self.deploy_db("--config", self.config, "--password-file", password)
-        self.assert_refused(code, output, "pass --cloud-password-file FILE", "Nothing was changed")
+        password.chmod(0o640)
+        stop = "--password-file must have no group/other permissions" if ROOT else "Run with sudo or as root."
+        for attempt in ("first", "again"):  # again: the deploy.conf of the first is there now
+            with self.subTest(attempt=attempt):
+                code, output = self.deploy_db(*answers, "--password-file", password)
+                self.assert_refused(code, output, stop)
+                self.assertNotIn("Edit it instead", output)
+                self.assertEqual(self.settings(), saved)
+                if attempt == "again":
+                    self.assertIn("holds these answers already", output)
+        # Other answers, or the same answers edited by hand, never replace it.
+        code, output = self.deploy_db("--app-ip", "10.0.0.11", "--listen-ip", guided_tests.LOCAL,
+                                      "--password-file", password)
+        self.assert_refused(code, output, "exists with other settings. Edit it instead. Nothing was changed.")
+        self.config.write_text(self.config.read_text().replace("DB_NAME=perodua", "DB_NAME=perodua_uat"))
+        code, output = self.deploy_db(*answers, "--password-file", password)
+        self.assert_refused(code, output, "exists with other settings. Edit it instead. Nothing was changed.")
+        self.assertIn("DB_NAME=perodua_uat", self.settings())
+
+    def test_cloud_password_file_needs_download_user(self):
         # Without DOWNLOAD_USER, the option has nothing to give the password to.
+        password = self.config.with_name("cloud-password")
+        password.write_text("Fixture password 2026\n")
+        password.chmod(0o600)
         self.write_config()
         code, output = self.deploy_db("--config", self.config, "--cloud-password-file", password, "--check-config")
         self.assert_refused(code, output, "--cloud-password-file is the password of DOWNLOAD_USER")
 
+    @unittest.skipUnless(ROOT, "needs root: the files are checked after the root check")
+    def test_the_password_files_are_checked_before_postgresql_starts(self):
+        # Review P3-2: the checks ran after PostgreSQL started and the state directories were made.
+        self.write_config(DB_MODE="restore", BACKUP_URL="https://backup.example.invalid/database.dump",
+                          BACKUP_SHA256="0" * 64, DOWNLOAD_USER="cloud", DB_LISTEN_IP="127.0.0.1")
+        good = self.config.with_name("db-password")
+        good.write_text("Fixture password 2026\n")
+        good.chmod(0o600)
+        target = self.config.with_name("cloud-target")
+        target.write_text("Cloud password\n")
+        target.chmod(0o600)
+        link = self.config.with_name("cloud-link")
+        link.symlink_to(target)
+        readable = self.config.with_name("cloud-0644")
+        readable.write_text("Cloud password\n")
+        readable.chmod(0o644)
+        foreign = self.config.with_name("cloud-nobody")
+        foreign.write_text("Cloud password\n")
+        foreign.chmod(0o600)
+        os.chown(foreign, 65534, 65534)
+        windows = self.config.with_name("cloud-crlf")
+        windows.write_text("Cloud password\r\n")
+        windows.chmod(0o600)
+        short = self.config.with_name("db-short")
+        short.write_text("too short\n")
+        short.chmod(0o600)
+        state = Path("/var/lib/perodua-db-deploy")
+        before = state.exists()
+        for option, path, message in (
+                ("--cloud-password-file", link, "--cloud-password-file must be a root-owned regular file, not a symlink"),
+                ("--cloud-password-file", readable, "--cloud-password-file must have no group/other permissions"),
+                ("--cloud-password-file", foreign, "--cloud-password-file must be a root-owned regular file"),
+                ("--cloud-password-file", windows, "--cloud-password-file must hold the cloud download password on one line"),
+                ("--password-file", short, "--password-file must hold a 12-1024 character printable ASCII password")):
+            with self.subTest(option=option, file=path.name):
+                files = {"--password-file": good, option: path}
+                code, output = self.deploy_db("--config", self.config, *[str(x) for pair in files.items() for x in pair])
+                self.assert_refused(code, output, message, "Nothing was changed")
+                self.assertNotIn("Cloud password", output)
+                self.assertEqual(state.exists(), before)
+
     def test_a_person_on_a_terminal_is_still_asked(self):
-        code, output = on_terminal(["bash", self.script, "--check-config"], without_variable(self.env),
-                                   answers=[(guided_tests.SETUP, CTRL_C)])
-        self.assertIsNotNone(code, output)
-        self.assertIn(guided_tests.SETUP.decode(), output)
-        self.assertFalse(self.config.exists())
+        # Without the variable, and with KIT_NON_INTERACTIVE=0 (ask on a terminal).
+        for env in (without_variable(self.env), non_interactive(self.env, "0")):
+            with self.subTest(variable=env.get("KIT_NON_INTERACTIVE")):
+                code, output = on_terminal(["bash", self.script, "--check-config"], env,
+                                           answers=[(guided_tests.SETUP, CTRL_C)])
+                self.assertIsNotNone(code, output)
+                self.assertIn(guided_tests.SETUP.decode(), output)
+                self.assertFalse(self.config.exists())
 
 
 # ─────────────────────────────────────────────────────────────────── service.sh
@@ -541,6 +688,39 @@ class ServiceNoWait(NoWait, unittest.TestCase):
     def reset(self, *args, env=None):
         return on_terminal(["bash", self.bundle / "service.sh", "--role", "app", "--dir", self.app, "reset", *args],
                            non_interactive(self.env) if env is None else env)
+
+    def child_variable(self):
+        """KIT_NON_INTERACTIVE as each run of the fake deploy-app.sh saw it, in order ("unset" without it)."""
+        path = Path(str(self.deploys) + ".env")
+        return path.read_text().splitlines() if path.exists() else []
+
+    def record_the_variable_of_the_child(self):
+        fake = service_tests.FAKE_DEPLOY_APP.replace(
+            "printf '%s %s\\n'", "printf '%s\\n' \"${KIT_NON_INTERACTIVE-unset}\" >> \"$FAKE_DEPLOY_LOG.env\"\nprintf '%s %s\\n'", 1)
+        self.assertNotEqual(fake, service_tests.FAKE_DEPLOY_APP)
+        (self.bundle / "deploy-app.sh").write_text(fake)
+        Path(str(self.deploys) + ".env").unlink(missing_ok=True)
+
+    def test_service_exports_the_variable_to_deploy_app(self):
+        # Gap 5 of the review: with the flag alone, the child gets KIT_NON_INTERACTIVE=1 in its environment
+        # (and --non-interactive); a person's reset passes neither on.
+        for env, extra, expected in ((without_variable(self.env), ["--non-interactive"], ["1", "1"]),
+                                     (non_interactive(self.env), [], ["1", "1"]),
+                                     (non_interactive(self.env, "0"), [], None)):
+            with self.subTest(flag=extra, variable=env.get("KIT_NON_INTERACTIVE")):
+                self.set_state()
+                self.deploys.unlink(missing_ok=True)
+                self.record_the_variable_of_the_child()
+                if expected is None:
+                    code, output = on_terminal(
+                        ["bash", self.bundle / "service.sh", "--role", "app", "--dir", self.app, "reset"], env,
+                        answers=[(b"Type perodua to confirm: ", b"perodua")])
+                    self.assertEqual(code, 0, output)
+                    self.assertEqual(self.child_variable(), ["0", "0"])  # passed through as it was, never 1
+                    continue
+                code, output = self.reset("--confirm", "perodua", *extra, env=env)
+                self.assertEqual(code, 0, output)
+                self.assertEqual(self.child_variable(), expected)
 
     def test_a_reset_without_confirm_asks_nothing_and_deletes_nothing(self):
         for env, extra in ((non_interactive(self.env), []), (without_variable(self.env), ["--non-interactive"])):
@@ -640,13 +820,30 @@ class UninstallNoWait(NoWait, unittest.TestCase):
                     self.assertIn("Kept the volumes they used (", output)
                     self.assertIn("--delete-old-volumes deletes them.", output)
 
-    def test_containers_without_a_project_are_named_with_a_dash(self):
-        self.with_old_deployment(**uninstall_tests.MANUAL)
-        code, output = self.uninstall("--confirm", uninstall_tests.PROJECT, "--delete-old-containers", "-")
+    def test_containers_without_a_project_are_named_by_their_ids(self):
+        # Review P3-4: the IDs of the list, never every container without a project that runs at the time:
+        # a run of rp-adapter.sh (the cron export) is not listed, and one that is not named stays.
+        self.with_old_deployment(**uninstall_tests.MANUAL, **uninstall_tests.RP_ADAPTER_RUN)
+        code, output = self.uninstall("--confirm", uninstall_tests.PROJECT)
+        self.assertEqual(code, 0, output)
+        self.assertIn("Or run this again with --delete-old-containers -:manual-id-1,manual-id-2.\n", output)
+        self.assertNotIn("adapter", output)
+        self.setUp()
+        self.with_old_deployment(**uninstall_tests.MANUAL, **uninstall_tests.RP_ADAPTER_RUN)
+        code, output = self.uninstall("--confirm", uninstall_tests.PROJECT, "--delete-old-containers", "-:manual-id-2",
+                                      "--delete-old-containers", "-:gone-id")
         self.assert_ended_without_a_question(code, output)
         self.assertEqual(code, 0, output)
-        self.assertIn(["rm", "-f", "manual-id-1", "manual-id-2"], self.changes())
+        self.assertIn(["rm", "-f", "manual-id-2"], self.changes())
         self.assertNotIn(self.old_down(), self.changes())
+        self.assertEqual(sorted(c for c in self.left("containers") if c.startswith(("manual-", "adapter-"))),
+                         ["adapter-id-1", "manual-id-1", "manual-id-3"])
+        self.assertIn("Containers without a Compose project that -:ID,ID does not name:\n"
+                      "  Perodua-Manual  busybox  Up 2 hours\n"
+                      "Not deleted. To delete them: sudo docker rm -f manual-id-1\n"
+                      "Or run this again with --delete-old-containers -:manual-id-1.\n", output)
+        self.assertIn("has the ID gone-id: it is not deleted.", output)
+        self.assertNotIn("adapter", output)
 
     def test_a_named_project_that_is_not_there_is_reported(self):
         code, output = self.uninstall("--confirm", uninstall_tests.PROJECT, "--delete-old-containers", "no-such-app")
@@ -703,6 +900,75 @@ class DeployAppNoWait(NoWait, unittest.TestCase):
                                    answers=[(b"Database server IP / hostname", CTRL_C)])
         self.assertIsNotNone(code, output)
         self.assertIn("Database server IP / hostname", output)
+
+    # Gap 7 of the review: the variable alone (no --non-interactive) on a pseudo-terminal.
+    interactive_run = app_tests.DeploymentSafetyTests.interactive_run
+    terminal_exchange = app_tests.DeploymentSafetyTests.terminal_exchange
+    saved_command = app_tests.DeploymentSafetyTests.saved_command
+    pulls_succeed = app_tests.DeploymentSafetyTests.pulls_succeed
+    mail_copy = app_tests.DeploymentSafetyTests.mail_copy
+    smtp_password_file = app_tests.DeploymentSafetyTests.smtp_password_file
+    write_mail_config = app_tests.DeploymentSafetyTests.write_mail_config
+    MAIL = app_tests.DeploymentSafetyTests.MAIL
+
+    def test_the_variable_alone_never_asks_for_the_database_password(self):
+        self.pulls_succeed()
+        self.write_config(DB_PASSWORD_FILE="")
+        code, output = on_terminal(self.command(), non_interactive(self.env))
+        self.assert_refused(code, output, "DB_PASSWORD_FILE is required for the first non-interactive deployment")
+        self.assertNotIn("Database password", output)
+
+    def test_the_variable_alone_keeps_the_saved_password_of_an_unverified_run(self):
+        # A person's first run stopped before the database was verified; a later run on a terminal would ask
+        # for the password again ("Enter keeps the one entered before"). With the variable it keeps the saved one.
+        code, output = self.interactive_run([b"192.0.2.20"], [(b"Choose [2]: ", b"", True)])
+        self.assertIn("Fixture stopped before", output)
+        secret = self.deploy_dir / "secrets" / "db_password"
+        before = secret.read_text()
+        code, output = on_terminal(self.saved_command(), non_interactive(self.env))
+        self.assert_ended_without_a_question(code, output, "Enter keeps the one entered before")
+        self.assertIn("Fixture stopped before", output)
+        self.assertEqual(secret.read_text(), before)
+
+    def test_the_variable_alone_never_asks_for_the_smtp_password(self):
+        script = self.mail_copy()
+        self.pulls_succeed()
+        self.write_mail_config(SMTP_PASSWORD_FILE="")
+        code, output = on_terminal(self.command(script=script), non_interactive(self.env))
+        self.assert_refused(code, output, "SMTP_PASSWORD_FILE")
+        self.assertNotIn("SMTP password (hidden)", output)
+
+    def test_the_variable_alone_never_asks_who_may_open_the_page(self):
+        # choose_bind_ip runs only for a run without settings, and such a run stops at the database
+        # settings first: with the variable, no path reaches the question.
+        for directory in (self.base / "empty-app", self.base / "hand-written"):
+            with self.subTest(directory=directory.name):
+                if directory.name == "hand-written":
+                    directory.mkdir()
+                    (directory / "app.env").write_text("HTTP_PORT=8110\nPUBLIC_ROOT=/dev\n")
+                    (directory / "app.env").chmod(0o600)
+                code, output = on_terminal(["bash", app_tests.SCRIPT, "--dir", directory], non_interactive(self.env))
+                self.assert_refused(code, output, "DB_HOST")
+                self.assertNotIn("Who may open the web page?", output)
+                self.assertEqual(self.docker_calls(), [])
+
+
+@unittest.skipUnless(LINUX, "needs Linux (GNU tools and bash 4 or later)")
+class DeployAppUpgradeNoWait(NoWait, module_tests.ModuleUpgradeFixture, unittest.TestCase):
+    """deploy-app.sh --upgrade with a module upgrade, with the fakes of test_deploy_app_module_upgrade.py."""
+
+    def test_the_variable_alone_never_asks_to_confirm_the_module_upgrade(self):
+        for env, extra in ((non_interactive(self.env), []), (without_variable(self.env), ["--non-interactive"])):
+            with self.subTest(flag=extra):
+                self.log.unlink(missing_ok=True)
+                code, output = on_terminal(["bash", module_tests.SCRIPT, "--upgrade", "--dir", self.deploy_dir, *extra],
+                                           env, timeout=60)
+                self.assert_refused(code, output, "A module upgrade needs a confirmation: run on a terminal, or pass "
+                                                  "--confirm perodua")
+                self.assertNotIn("to start the module upgrade", output)
+                self.assertIn(f"Nothing was changed: {self.deploy_dir} still runs {module_tests.OLD}.", output)
+                self.assertNotIn("stop web odoo", self.names())
+                self.assertEqual(self.db_state(), "from")
 
 
 @unittest.skipUnless(LINUX, "needs Linux (GNU tools and bash 4 or later)")
@@ -770,6 +1036,7 @@ class IssApiNoWait(NoWait, unittest.TestCase):
         self.installed()
         key = self.tmp / "api-key"
         key.write_text("k3y-from-a-file\r\n")  # saved on Windows
+        key.chmod(0o600)
         self.log.unlink(missing_ok=True)
         code, output = self.iss_api("check", "--key-file", key)
         self.assert_ended_without_a_question(code, output)
@@ -784,6 +1051,48 @@ class IssApiNoWait(NoWait, unittest.TestCase):
         code, output = self.iss_api("uninstall")
         self.assert_refused(code, output, f"pass --confirm {iss_tests.PROJECT}. Nothing was changed.")
         self.assertTrue((self.dir / "compose.yml").exists())
+
+    def test_the_key_file_is_protected_like_a_password_file(self):
+        # Review P3-5: only "regular and readable" was checked.
+        self.installed()
+        target = self.tmp / "key-target"
+        target.write_text("k3y\n")
+        target.chmod(0o600)
+        link = self.tmp / "key-link"
+        link.symlink_to(target)
+        readable = self.tmp / "key-0644"
+        readable.write_text("k3y\n")
+        readable.chmod(0o644)
+        foreign = self.tmp / "key-nobody"
+        foreign.write_text("k3y\n")
+        foreign.chmod(0o600)
+        os.chown(foreign, 65534, 65534)
+        for path, message in ((link, "--key-file must be a root-owned regular file, not a symlink"),
+                              (readable, "--key-file must have no group/other permissions (use chmod 600)"),
+                              (foreign, "--key-file must be a root-owned regular file")):
+            with self.subTest(file=path.name):
+                self.log.unlink(missing_ok=True)
+                code, output = self.iss_api("check", "--key-file", path)
+                self.assert_refused(code, output, message)
+                self.assertEqual(self.calls(), [])
+                self.assertNotIn("k3y", output)
+
+    def test_logs_follow_is_refused(self):
+        # Review P3-7: logs --follow runs until it is stopped.
+        self.installed()
+        self.log.unlink(missing_ok=True)
+        for env, extra in ((non_interactive(self.env), []), (without_variable(self.env), ["--non-interactive"])):
+            with self.subTest(flag=extra):
+                code, output = self.iss_api("logs", "--follow", *extra, env=env)
+                self.assert_refused(code, output, "logs --follow runs until it is stopped", "use logs without --follow")
+                self.assertEqual(self.calls(), [])
+
+    def test_a_first_install_without_the_password_file_makes_nothing(self):
+        # The README said "stops before it changes anything": the directory and the identity file were made first.
+        self.config.write_text("DB_HOST=db.example.internal\nDB_SERVICE=ORCLPDB1\nDB_USER=API$USR\n")
+        code, output = self.iss_api("install", "--config", self.config)
+        self.assert_refused(code, output, "needs DB_PASSWORD_FILE in --config. Nothing was changed.")
+        self.assertFalse(self.dir.exists())
 
     def test_a_first_install_without_settings_asks_nothing(self):
         code, output = self.iss_api("install")
@@ -831,6 +1140,14 @@ class RpAdapterNoWait(NoWait, unittest.TestCase):
         self.assert_refused(code, output, "No settings yet")
         self.assertNotIn("Oracle database server", output)
 
+    def test_a_first_install_without_the_password_file_makes_nothing(self):
+        code, output = self.rp_adapter("install", "--config", self.config(DB_PASSWORD_FILE=None))
+        self.assert_refused(code, output, "needs DB_PASSWORD_FILE in --config. Nothing was changed.")
+        self.assertFalse(self.dir.exists())
+        code, output = self.rp_adapter("install", "--config", self.config(API_URL="http://iss.example.invalid:8000"))
+        self.assert_refused(code, output, "needs API_KEY_FILE in --config. Nothing was changed.")
+        self.assertFalse(self.dir.exists())
+
     def test_a_registry_login_is_never_asked(self):
         self.set_state(pull_error="unauthorized: authentication required")
         code, output = self.rp_adapter("install", "--config", self.config())
@@ -849,6 +1166,72 @@ class RpAdapterNoWait(NoWait, unittest.TestCase):
         self.assertIn(prompt, output)
         self.assertIn("Not confirmed. Nothing was changed.", output)
         self.assertNotEqual(code, 0)
+
+
+# ─────────────────────────────────────────────────────────────── oracle-view.sh
+@ov_tests.needs_root_on_linux
+class OracleViewNoWait(NoWait, unittest.TestCase):
+    """oracle-view.sh on the App server, with the fakes of test_oracle_view.py."""
+
+    setUp = ov_tests.OracleViewAppTest.setUp
+    set_state = ov_tests.OracleViewAppTest.set_state
+    run_script = ov_tests.OracleViewAppTest.run_script
+    install = ov_tests.OracleViewAppTest.install
+    installed = ov_tests.OracleViewAppTest.installed
+    calls = ov_tests.OracleViewAppTest.calls
+    pulls_and_logins = ov_tests.OracleViewAppTest.pulls_and_logins
+
+    def oracle_view(self, *args, env=None, answers=()):
+        return on_terminal(["bash", ov_tests.SCRIPT, *args, "--dir", self.dir],
+                           non_interactive(self.env) if env is None else env, answers=answers, timeout=60)
+
+    def test_uninstall_without_confirm_asks_nothing(self):
+        self.installed()
+        for env, extra in ((non_interactive(self.env), []), (without_variable(self.env), ["--non-interactive"])):
+            with self.subTest(flag=extra):
+                code, output = self.oracle_view("uninstall", *extra, env=env)
+                self.assert_refused(code, output, "pass --confirm oracle-view. Nothing was changed.")
+                self.assertTrue((self.dir / "compose.yml").exists())
+
+    def test_a_registry_login_is_never_asked(self):
+        # The variable alone, without --non-interactive and without --no-pull.
+        self.set_state(registry_account=ov_tests.REGISTRY_ACCOUNT)
+        code, output = self.oracle_view("install")
+        self.assert_refused(code, output, "The registry needs a login: run docker login perodua-deploy.novutal.com first")
+        self.assertEqual([call["args"][:1] for call in self.calls() if call["args"][:1] == ["login"]], [])
+
+    def test_non_interactive_is_an_option_of_every_command(self):
+        self.installed()
+        result = self.run_script("status", "--non-interactive")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result = self.run_script("uninstall", "--non-interactive", "--confirm", "oracle-view")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_a_person_is_still_asked_to_confirm(self):
+        self.installed()
+        for env in (without_variable(self.env), non_interactive(self.env, "0")):
+            with self.subTest(variable=env.get("KIT_NON_INTERACTIVE")):
+                code, output = self.oracle_view("uninstall", env=env, answers=[(b"Type oracle-view to confirm: ", b"wrong")])
+                self.assertIn("Type oracle-view to confirm: ", output)
+                self.assertIn("Not confirmed. Nothing was changed.", output)
+                self.assertNotEqual(code, 0)
+
+
+@ov_tests.needs_root_on_linux
+class OracleViewRoleNoWait(NoWait, unittest.TestCase):
+    """oracle-view.sh drop-role on the DB server, with the fake psql of test_oracle_view.py."""
+
+    setUp = ov_tests.OracleViewRoleTest.setUp
+    set_state = ov_tests.OracleViewRoleTest.set_state
+    calls = ov_tests.OracleViewRoleTest.calls
+    scripts = ov_tests.OracleViewRoleTest.scripts
+
+    def test_drop_role_without_confirm_asks_nothing(self):
+        for env, extra in ((non_interactive(self.env), []), (without_variable(self.env), ["--non-interactive"])):
+            with self.subTest(flag=extra):
+                code, output = on_terminal(["bash", ov_tests.SCRIPT, "drop-role", *extra], env, timeout=60)
+                self.assert_refused(code, output, "pass --confirm oracle_view_rp. Nothing was changed.")
+                self.assertEqual(self.scripts("drop-role"), [])
 
 
 # ───────────────────────────────────────────────────────────────────── https.sh
@@ -881,18 +1264,93 @@ class HttpsNoWait(NoWait, https_tests.Base):
         self.assertNotIn("key.pem.tmp", self.files())
         self.assertFalse((self.dir / "key.pem").exists())
 
+    def pass_file(self, text, name="pass", mode=0o600):
+        secret = self.tmp / name
+        secret.write_bytes(text.encode())
+        secret.chmod(mode)
+        return secret
+
+    def der_key(self):
+        """The encrypted key as DER (PKCS#8): no header shows that it is encrypted."""
+        der = self.tmp / "encrypted.der"
+        https_tests.openssl("pkcs8", "-topk8", "-in", self.encrypted, "-passin", f"pass:{self.PASS}", "-v2", "aes-256-cbc",
+                            "-passout", f"pass:{self.PASS}", "-outform", "DER", "-out", der)
+        return der
+
     def test_key_pass_file_gives_the_pass_phrase(self):
-        secret = self.tmp / "pass"
-        secret.write_text(self.PASS + "\n")
-        code, output = self.https("csr", "--key", self.encrypted, "--key-pass-file", secret)
-        self.assert_ended_without_a_question(code, output)
+        # Also a file saved on Windows (review P3-5): openssl -passin file: kept its carriage return.
+        for name, text in (("pass", self.PASS + "\n"), ("pass-crlf", self.PASS + "\r\n"), ("pass-no-eol", self.PASS)):
+            with self.subTest(file=name):
+                (self.dir / "key.pem").unlink(missing_ok=True)
+                code, output = self.https("csr", "--key", self.encrypted, "--key-pass-file", self.pass_file(text, name))
+                self.assert_ended_without_a_question(code, output)
+                self.assertEqual(code, 0, output)
+                self.assertEqual(self.written_key(), self.expected)
+                self.assertNotIn(self.PASS, output)
+
+    def test_key_pass_file_is_protected_like_a_password_file(self):
+        target = self.pass_file(self.PASS + "\n", "pass-target")
+        link = self.tmp / "pass-link"
+        link.symlink_to(target)
+        foreign = self.pass_file(self.PASS + "\n", "pass-nobody")
+        os.chown(foreign, 65534, 65534)
+        for path, message in ((link, "--key-pass-file must be a root-owned regular file, not a symlink"),
+                              (self.pass_file(self.PASS + "\n", "pass-0640", 0o640),
+                               "--key-pass-file must have no group/other permissions (use chmod 600)"),
+                              (foreign, "--key-pass-file must be a root-owned regular file"),
+                              (self.pass_file("\n", "pass-empty"), "holds no pass phrase on its first line")):
+            with self.subTest(file=path.name):
+                code, output = self.https("csr", "--key", self.encrypted, "--key-pass-file", path)
+                self.assert_refused(code, output, message)
+                self.assertFalse((self.dir / "key.pem").exists())
+                self.assertNotIn(self.PASS, output)
+
+    def test_openssl_with_an_empty_passin_never_asks(self):
+        # Gap 1 of the review: openssl pkey -passin pass: on an encrypted key, on a pseudo-terminal that is also
+        # its controlling terminal (as ssh -t gives), fails at once and reads no /dev/tty. The test image is Ubuntu
+        # 24.04 with its OpenSSL 3.0.13; the gate receipt records openssl version.
+        for key in (self.encrypted, self.der_key()):
+            with self.subTest(key=key.name):
+                code, output = on_terminal(["openssl", "pkey", "-in", key, "-passin", "pass:", "-out",
+                                            self.tmp / "out.pem"], without_variable(self.env), timeout=20)
+                self.assertIsNotNone(code, "openssl waited for a pass phrase:\n" + output)
+                self.assertNotEqual(code, 0, output)
+                self.assertNotIn("Enter pass phrase", output)
+                self.assertNotIn("pass phrase", output.lower())
+
+    def test_a_der_key_asks_a_person_for_its_pass_phrase(self):
+        # Review P3-6: an encrypted DER key has no PEM header; before this branch openssl asked for it.
+        der = self.der_key()
+        code, output = self.https("csr", "--key", der, env=without_variable(self.env),
+                                  answers=[(b"Pass phrase of ", self.PASS.encode())])
         self.assertEqual(code, 0, output)
-        self.assertEqual(self.written_key(), self.expected)
+        self.assertIn(f"Pass phrase of {der} (hidden): ", output)
+        self.assertNotIn("Enter pass phrase", output)
         self.assertNotIn(self.PASS, output)
+        self.assertEqual(self.written_key(), self.expected)
+        # With the variable: refused, no question.
+        (self.dir / "key.pem").unlink()
+        code, output = self.https("csr", "--key", der)
+        self.assert_refused(code, output, "--key-pass-file FILE")
+        self.assertFalse((self.dir / "key.pem").exists())
+
+    def test_an_empty_pass_phrase_never_reaches_openssl(self):
+        code, output = self.https("csr", "--key", self.encrypted, env=without_variable(self.env),
+                                  answers=[(b"Pass phrase of ", b"")])
+        self.assertNotEqual(code, 0, output)
+        self.assertIn("An empty pass phrase was typed: openssl did not run.", output)
+        self.assertNotIn("Enter pass phrase", output)
+        self.assertFalse((self.dir / "key.pem").exists())
+
+    def test_a_plaintext_key_that_openssl_cannot_read_asks_nothing(self):
+        broken = self.tmp / "broken.key"
+        broken.write_text("-----BEGIN PRIVATE KEY-----\nbm90IGEga2V5\n-----END PRIVATE KEY-----\n")
+        code, output = self.https("csr", "--key", broken, env=without_variable(self.env))
+        self.assert_refused(code, output, "is not a private key this script can read")
+        self.assertNotIn("Pass phrase of", output)
 
     def test_another_pass_phrase_is_refused(self):
-        secret = self.tmp / "pass"
-        secret.write_text("not the pass phrase\n")
+        secret = self.pass_file("not the pass phrase\n")
         code, output = self.https("csr", "--key", self.encrypted, "--key-pass-file", secret)
         self.assert_refused(code, output, "holds another pass phrase")
         self.assertNotIn("key.pem.tmp", self.files())
