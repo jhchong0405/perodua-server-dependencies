@@ -25,13 +25,18 @@ LINES=' client-stable-uiux demo-uiux '
 SSH=(ssh -T -a -x -o BatchMode=yes -o ConnectTimeout=20 -o ClearAllForwardings=yes -o PermitLocalCommand=no
      -o ServerAliveInterval=15 -o ServerAliveCountMax=4)
 REMOTE_DIR=stream-image   # --file: the folder (0700) in the home folder of the ssh user on the server
-ARCHIVE_DIR=''            # --file: the folder (0700) of the archives on this computer
+# --file: the folder (0700) of the archives for this server on this computer, in stream-image-archives (0700). One
+# folder for each server: the lock of the server makes its folder one run's at a time, so a run to another server
+# never removes or overwrites an archive that a broken run to this server kept for its resume.
+ARCHIVE_DIR=''
+DOCKER_ROOT=''            # --file: the Docker root folder of the server (docker info), for its free space
 # The sources, in the order of the command line: a kit script (with the line of deploy-app.sh) or an --image.
 SOURCE_NAMES=() SOURCE_LINES=() SOURCE_IMAGES=()
 # The images, one for each pin: the pin and its platform.
 IMAGES=() PLATFORMS=()
 # For each image: on this computer (1/0), the ID that its stream tag names here, and on the server (1/0).
 MAC_HAS=() MAC_TAGGED=() SERVER_HAS=()
+STREAMED=()   # the pins that this run put on the server and checked there, for the message of a later stop
 REPOSITORY='' DIGEST='' PINNED='' STREAM_TAG='' REGISTRY=''
 
 usage() {
@@ -59,14 +64,19 @@ SOURCE     A kit script next to this one, whose pins it reads (the pin stays in
                         --platform linux/ARCH (default linux/amd64) applies to
                         every --image.
 --file     For a big image over a link that can break: docker save to an
-           archive on this computer (kept under the name of its stream tag until
-           the check on the server passes), shasum -a 256, rsync --partial to the
-           folder ~/stream-image (0700) of the ssh user on the server, sha256sum
-           there must be the same, sudo -n docker load -i, the check, then the
-           archive goes on both sides. A run after a break resumes from the kept
-           archive. The server needs rsync and sha256sum.
+           archive on this computer (in a folder for each server, kept under the
+           name of its stream tag until the check on the server passes), shasum
+           -a 256, rsync --partial to the folder ~/stream-image (0700) of the ssh
+           user on the server, sha256sum there must be the same, sudo -n docker
+           load -i, the check, then the archive goes on both sides. A run after a
+           break resumes from the kept archive. Before the save, df here: the
+           free space must hold the image (its size here, more than its
+           archive); before the copy, df on the server: the archive and the
+           image after the load. The archives hold the secrets of the image: for
+           a pin that the server has, a run removes the archive that an earlier
+           --file run kept, on both sides. The server needs rsync and sha256sum.
 --dry-run  The checks here and on the server, and the steps it would run. It
-           pulls, tags, saves, copies and loads nothing.
+           pulls, tags, saves, copies, loads and removes nothing.
 --non-interactive, or KIT_NON_INTERACTIVE=1 in the environment: accepted as in
            every kit script (README.md, "Run the kit without a person"). This
            script never asks either way.
@@ -79,17 +89,29 @@ here. The engine of this computer must use the containerd image store; on the
 server, a classic image store gets nothing either. Each pin is one image
 manifest, or an index whose one image is the platform (linux/amd64) and whose
 other entries are attestation manifests (platform unknown/unknown), as BuildKit
-pushes it. For an index it reads the entries from the registry (docker buildx
-imagetools inspect, also in a dry run) and checks that the index there has the
-pinned digest. docker save has no --platform, so the archive holds the index
-itself and the server finds the pinned digest. An image that the server has
-already gets nothing. One run at a time for each server (the host name and port
-of ssh -G).
+pushes it. It reads the media type of a pin from this computer, or from the
+registry when the pin is not here (docker buildx imagetools inspect), and for
+an index the entries and the bytes from the registry, which must have the
+pinned digest: all before the server, also in a dry run. docker save has no
+--platform, so the archive holds the index itself and the server finds the
+pinned digest. An image that the server has already gets nothing. One run at a
+time for each server (the host name and port of ssh -G).
+The next step that it prints for deploy-app.sh is not for the grey App while
+owner rule C1 holds (README.md, "Install from streamed images").
 Exit codes: 0 done; 1 error; 2 usage.
 HELP
 }
 
-die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+die() {   # a stop after an image reached the server also names the images that this run streamed before it
+    printf 'ERROR: %s\n' "$*" >&2
+    if ((${#STREAMED[@]})); then
+        printf 'This run streamed and checked on %s before the stop: %s\n' "$HOST" "${STREAMED[*]}" >&2
+    fi
+    exit 1
+}
+nothing() {   # $1 streamed or copied: the end of a message that stops the stream of PINNED
+    if ((${#STREAMED[@]})); then printf '%s was not %s.' "$PINNED" "$1"; else printf 'Nothing was %s.' "$1"; fi
+}
 usage_error() { printf 'ERROR: %s (see: bash stream-image.sh --help)\n' "$*" >&2; exit 2; }
 cleanup() { [[ -z $LOCK ]] || rm -rf -- "$LOCK"; }
 trap cleanup EXIT
@@ -176,16 +198,23 @@ read_pins() {   # the images of every source, from the kit scripts next to this 
     done
 }
 
-streamable() {   # $1 platform: docker save writes the pin itself, with all its content, so the server can check its digest
+streamable() {   # $1 platform, $2 here (the pin is on this computer) or registry (it is not): docker save writes the
+    # pin itself, with all its content, so the server can check its digest. Before the server, also in a dry run.
     # docker save has no --platform: with it, the archive holds the manifest of that platform instead of the pinned
     # index, and on the server the digest reference finds no image (lab of 2026-11-10). Without it, docker save
     # needs every entry of an index on this computer; a pull for one platform brings that image and its attestations.
-    local descriptor kind='' form='"mediaType":"([^"]+)"' sum entries verdict
-    descriptor=$(docker image inspect --format '{{json .Descriptor}}' "$PINNED" 2> /dev/null) || descriptor=''
-    [[ ! $descriptor =~ $form ]] || kind=${BASH_REMATCH[1]}
+    local descriptor kind='' form='"mediaType":"([^"]+)"' sum entries verdict where='on this computer'
+    if [[ $2 == here ]]; then
+        descriptor=$(docker image inspect --format '{{json .Descriptor}}' "$PINNED" 2> /dev/null) || descriptor=''
+        [[ ! $descriptor =~ $form ]] || kind=${BASH_REMATCH[1]}
+    else
+        where='in the registry'
+        kind=$(docker buildx imagetools inspect --format '{{.Manifest.MediaType}}' "$PINNED") \
+            || die "docker buildx imagetools inspect $PINNED failed on this computer (above): the media type of a pin that is not on this computer comes from the registry. When the registry wants a login, run docker login $REGISTRY on this computer first. Nothing was streamed."
+    fi
     [[ -z $kind || $MANIFEST_TYPES != *" $kind "* ]] || return 0
     [[ -n $kind && $INDEX_TYPES == *" $kind "* ]] \
-        || die "The pinned image $PINNED on this computer is ${kind:-of an unknown media type}: this script streams one image manifest, or an index of one $1 image and its attestation manifests. Nothing was streamed."
+        || die "The pinned image $PINNED $where is ${kind:-of an unknown media type}: this script streams one image manifest, or an index of one $1 image and its attestation manifests. Nothing was streamed."
     # The entries of the index, from the registry with the login of this computer; the index there must have the pin.
     sum=$(docker buildx imagetools inspect --raw "$PINNED" | shasum -a 256) \
         || die "docker buildx imagetools inspect --raw $PINNED failed on this computer (above): the entries of an index come from the registry. When the registry wants a login, run docker login $REGISTRY on this computer first. Nothing was streamed."
@@ -211,15 +240,67 @@ server_has_pin() {   # the check of the --no-pull runs: found by the digest refe
     [[ $SERVER_STORE != containerd || ${facts%% *} == "$DIGEST" ]]
 }
 archive_name() { printf '%s.tar' "$(printf '%s' "$STREAM_TAG" | tr -c 'A-Za-z0-9._-' _)"; }
-archive_dir() {   # --file: the folder of the archives on this computer, 0700 and of this user
-    ARCHIVE_DIR=${TMPDIR:-/tmp}
-    ARCHIVE_DIR=${ARCHIVE_DIR%/}/stream-image-archives
-    [[ -e $ARCHIVE_DIR || -L $ARCHIVE_DIR ]] || mkdir -m 0700 "$ARCHIVE_DIR" 2> /dev/null || true
-    [[ -d $ARCHIVE_DIR && ! -L $ARCHIVE_DIR && -O $ARCHIVE_DIR ]] \
-        || die "$ARCHIVE_DIR is not a folder of this user: remove it, then run again"
-    chmod 0700 "$ARCHIVE_DIR"
+server_slug() { printf '%s' "$SERVER" | tr -c 'A-Za-z0-9._-' _; }
+own_folder() { [[ -d $1 && ! -L $1 && -O $1 ]]; }   # a folder of this user, not a link
+archive_dir() {   # --file: the folder of the archives for this server on this computer, 0700 and of this user
+    local folder
+    for folder in "${ARCHIVE_DIR%/*}" "$ARCHIVE_DIR"; do
+        [[ -e $folder || -L $folder ]] || mkdir -m 0700 "$folder" 2> /dev/null || true
+        own_folder "$folder" || die "$folder is not a folder of this user: remove it, then run again"
+        chmod 0700 "$folder"
+    done
 }
 local_sum() { shasum -a 256 "$1" | sed 's/ .*//'; }
+kib() { printf '%s' $((($1 + 1023) / 1024)); }   # $1 bytes, in KiB (rounded up)
+image_size() {   # the size of the stream tag on this computer, in bytes: its content and its unpacked layers
+    local size
+    size=$(docker image inspect --format '{{.Size}}' "$STREAM_TAG") || die "docker image inspect $STREAM_TAG failed on this computer (above). $(nothing copied)"
+    [[ $size =~ ^[0-9]+$ ]] || die "docker image inspect gives no size for $STREAM_TAG on this computer: $size. $(nothing copied)"
+    printf '%s' "$size"
+}
+mac_space() {   # $1 the size of the image here, in bytes: the archive is smaller (its compressed content only)
+    local free
+    free=$(df -Pk "$ARCHIVE_DIR" | awk 'NR == 2 { print $4 }')
+    [[ $free =~ ^[0-9]+$ ]] || die "df -Pk $ARCHIVE_DIR gives no free space on this computer. $(nothing copied)"
+    ((free >= $(kib "$1"))) \
+        || die "--file: this computer has $free KiB free in $ARCHIVE_DIR, and the archive of $STREAM_TAG needs up to $(kib "$1") KiB (the size of the image here). Free some space, or stream without --file. $(nothing copied)"
+}
+server_space() {   # $1 archive, $2 image, in bytes: on the server the archive and the image after docker load
+    local report home_free home_mount root_free root_mount need
+    report=$(remote "df -Pk $REMOTE_DIR $DOCKER_ROOT") \
+        || die "df -Pk $REMOTE_DIR $DOCKER_ROOT failed on $HOST (above). The archive stays here: $ARCHIVE_DIR/$(archive_name)"
+    home_free=$(printf '%s\n' "$report" | awk 'NR == 2 { print $4 }')
+    home_mount=$(printf '%s\n' "$report" | awk 'NR == 2 { print $NF }')
+    root_free=$(printf '%s\n' "$report" | awk 'NR == 3 { print $4 }')
+    root_mount=$(printf '%s\n' "$report" | awk 'NR == 3 { print $NF }')
+    [[ $home_free =~ ^[0-9]+$ && $root_free =~ ^[0-9]+$ && -n $home_mount && -n $root_mount ]] \
+        || die "df -Pk on $HOST gives no free space: $(printf '%s\n' "$report" | tail -n 1). The archive stays here: $ARCHIVE_DIR/$(archive_name)"
+    if [[ $home_mount == "$root_mount" ]]; then
+        need=$(($(kib "$1") + $(kib "$2")))
+        ((home_free >= need)) \
+            || die "--file: $HOST has $home_free KiB free on $home_mount (~/$REMOTE_DIR and $DOCKER_ROOT), and the archive ($(kib "$1") KiB) and the image after docker load ($(kib "$2") KiB) need $need KiB. Free some space there, or stream without --file. The archive stays here: $ARCHIVE_DIR/$(archive_name)"
+    else
+        ((home_free >= $(kib "$1"))) \
+            || die "--file: $HOST has $home_free KiB free on $home_mount (~/$REMOTE_DIR), and the archive needs $(kib "$1") KiB. Free some space there, or stream without --file. The archive stays here: $ARCHIVE_DIR/$(archive_name)"
+        ((root_free >= $(kib "$2"))) \
+            || die "--file: $HOST has $root_free KiB free on $root_mount ($DOCKER_ROOT), and the image after docker load needs $(kib "$2") KiB. Free some space there, or stream without --file. The archive stays here: $ARCHIVE_DIR/$(archive_name)"
+    fi
+}
+leftovers_here() { [[ -e $1 || -e $1.sha256 || -e $1.part ]]; }   # $1 an archive of this computer
+drop_leftovers() {   # a pin that is on the server: the archive that an earlier --file run kept goes, on both sides,
+    local name archive   # as it holds the secrets of the image. Without --file, only after such a run kept one here.
+    name=$(archive_name)
+    archive=$ARCHIVE_DIR/$name
+    if ((FILE_MODE == 0)) && { ! own_folder "$ARCHIVE_DIR" || ! leftovers_here "$archive"; }; then
+        return 0
+    fi
+    if leftovers_here "$archive"; then
+        rm -f -- "$archive" "$archive.sha256" "$archive.part"
+        printf 'Removed the archive that an earlier --file run kept here: %s\n' "$archive"
+    fi
+    remote "rm -f $REMOTE_DIR/$name" \
+        || printf 'NOTE An archive %s/%s of an earlier --file run may stay on %s: remove it there.\n' "$REMOTE_DIR" "$name" "$HOST" >&2
+}
 
 check_load() {   # $1 the output of docker load on the server
     printf '%s\n' "$1"
@@ -227,6 +308,7 @@ check_load() {   # $1 the output of docker load on the server
         || die "docker load on $HOST could not unpack the image (above). Remove it there (sudo docker image rm $STREAM_TAG), then run this script again."
     server_has_pin || die "After docker load, $HOST does not find $PINNED with the pinned digest"
     printf 'On %s: %s, ID %s\n' "$HOST" "$PINNED" "$DIGEST"
+    STREAMED+=("$PINNED")
 }
 stream_pipe() {   # docker save here | sudo -n docker load there
     local out
@@ -236,9 +318,11 @@ stream_pipe() {   # docker save here | sudo -n docker load there
         die "The stream to $HOST failed (above)"
     fi
     check_load "$out"
+    drop_leftovers
 }
 stream_file() {   # --file: an archive here, rsync --partial, the same checksum there, docker load -i, then no archive
-    local name archive sum kept='' there out
+    local name archive sum kept='' there out size
+    size=$(image_size)
     name=$(archive_name)
     archive=$ARCHIVE_DIR/$name
     if [[ -f $archive && -f $archive.sha256 ]]; then
@@ -252,14 +336,17 @@ stream_file() {   # --file: an archive here, rsync --partial, the same checksum 
     fi
     if [[ -z $kept ]]; then
         rm -f -- "$archive" "$archive.sha256" "$archive.part"
+        mac_space "$size"
         printf 'Saving %s to %s...\n' "$STREAM_TAG" "$archive"
-        docker save -o "$archive.part" "$STREAM_TAG" || die "docker save $STREAM_TAG failed on this computer (above). Nothing was copied."
+        docker save -o "$archive.part" "$STREAM_TAG" \
+            || { rm -f -- "$archive.part"; die "docker save $STREAM_TAG failed on this computer (above). $(nothing copied)"; }
         sum=$(local_sum "$archive.part")
         mv -f -- "$archive.part" "$archive"
         printf '%s\n' "$sum" > "$archive.sha256"
     fi
     remote "mkdir -p -m 0700 $REMOTE_DIR && chmod 0700 $REMOTE_DIR" \
         || die "Could not make the folder ~/$REMOTE_DIR on $HOST (above). The archive stays here: $archive"
+    server_space "$(wc -c < "$archive" | tr -d ' ')" "$size"
     printf 'Copying %s to %s:%s/%s (rsync --partial)...\n' "$archive" "$HOST" "$REMOTE_DIR" "$name"
     rsync --partial -e "${SSH[*]}" "$archive" "$HOST:$REMOTE_DIR/$name" \
         || die "The copy to $HOST broke (above). Run this script again: it resumes from the archive kept here ($archive) and from the part on the server."
@@ -281,8 +368,8 @@ next_steps() {   # the --no-pull runs of the kit scripts among the sources
     local i=0
     while ((i < ${#SOURCE_NAMES[@]})); do
         case ${SOURCE_NAMES[i]} in
-            deploy-app.sh)
-                printf 'Next, on %s: sudo bash deploy-app.sh --no-pull --non-interactive --line %s (with the --config and --dir of the deployment)\n' \
+            deploy-app.sh)   # owner rule C1: not on the grey App while it runs on an Oracle DB
+                printf 'Next, on %s, but not on the grey App while owner rule C1 holds (README.md, "Install from streamed images"): sudo bash deploy-app.sh --no-pull --non-interactive --line %s (with the --config and --dir of the deployment)\n' \
                     "$HOST" "${SOURCE_LINES[i]}" ;;
             --image) ;;
             *) printf 'Next, on %s: sudo bash %s install --no-pull --non-interactive\n' "$HOST" "${SOURCE_NAMES[i]}" ;;
@@ -348,20 +435,23 @@ read_pins
 
 server_of_host
 lock
+ARCHIVE_DIR=${TMPDIR:-/tmp}
+ARCHIVE_DIR=${ARCHIVE_DIR%/}/stream-image-archives/$(server_slug)
 command -v docker > /dev/null || die 'Docker is needed on this computer'
 store=$(docker info --format '{{json .DriverStatus}}' 2> /dev/null) || die 'Docker on this computer does not answer docker info: start it first'
 [[ $store == *"$CONTAINERD"* ]] || die 'Docker on this computer does not use the containerd image store: its docker save does not keep the manifest of the registry, so the server cannot check the pinned digest. Docker Desktop: Settings, General, Use containerd for pulling and storing images.'
 ((FILE_MODE == 0)) || { command -v rsync > /dev/null && command -v shasum > /dev/null; } \
     || die '--file needs rsync and shasum on this computer'
 
-# This computer, for every image before the server: the pin, its kind and its stream tag.
+# This computer, for every image before the server: the pin, its kind (from here, or from the registry when the pin
+# is not here) and its stream tag.
 i=0
 while ((i < ${#IMAGES[@]})); do
     pin_parts "${IMAGES[i]}"
     here=0
     id=$(docker image inspect --format '{{.Id}}' "$PINNED" 2> /dev/null) || id=''
     [[ $id != "$DIGEST" ]] || here=1
-    ((here == 0)) || streamable "${PLATFORMS[i]}"
+    if ((here)); then streamable "${PLATFORMS[i]}" here; else streamable "${PLATFORMS[i]}" registry; fi
     tagged=$(docker image inspect --format '{{.Id}}' "$STREAM_TAG" 2> /dev/null) || tagged=''
     [[ -z $tagged || $tagged == "$DIGEST" ]] \
         || die "On this computer the stream tag $STREAM_TAG names another image (ID $tagged), not the pinned digest. Remove that tag (docker image rm $STREAM_TAG), then run this script again. Nothing was changed."
@@ -392,6 +482,9 @@ done
 if ((missing && FILE_MODE)); then
     out=$(remote 'command -v rsync && command -v sha256sum' 2>&1) \
         || die "--file needs rsync and sha256sum on $HOST, and it has not both. Install them there, or stream without --file. Nothing was changed."
+    DOCKER_ROOT=$(remote "sudo -n docker info --format '{{.DockerRootDir}}'") \
+        || die "docker info failed on $HOST (above). Nothing was changed."
+    [[ $DOCKER_ROOT =~ ^/[A-Za-z0-9._/-]*$ ]] || die "docker info on $HOST gives no Docker root folder: $DOCKER_ROOT. Nothing was changed."
 fi
 
 if ((DRY_RUN)); then
@@ -404,35 +497,41 @@ if ((DRY_RUN)); then
             ((MAC_HAS[i])) || printf '  docker pull --platform %s %s\n' "${PLATFORMS[i]}" "${IMAGES[i]}"
             [[ -n ${MAC_TAGGED[i]} ]] || printf '  docker tag %s %s\n' "$PINNED" "$STREAM_TAG"
             if ((FILE_MODE)); then
-                printf '  docker save -o ARCHIVE %s, shasum -a 256 ARCHIVE (ARCHIVE: %s/%s, kept until the check passes)\n' \
-                    "$STREAM_TAG" "${TMPDIR:-/tmp}" "stream-image-archives/$(archive_name)"
-                printf '  rsync --partial ARCHIVE %s:%s/%s, then sha256sum there\n' "$HOST" "$REMOTE_DIR" "$(archive_name)"
+                printf '  df here (room for the image), then docker save -o ARCHIVE %s, shasum -a 256 ARCHIVE (ARCHIVE: %s/%s, kept until the check passes)\n' \
+                    "$STREAM_TAG" "$ARCHIVE_DIR" "$(archive_name)"
+                printf '  df on %s (room for the archive and the image), then rsync --partial ARCHIVE %s:%s/%s and sha256sum there\n' \
+                    "$HOST" "$HOST" "$REMOTE_DIR" "$(archive_name)"
                 printf "  ssh %s 'sudo -n docker load -i %s/%s'\n" "$HOST" "$REMOTE_DIR" "$(archive_name)"
             else
                 printf "  docker save %s | ssh %s 'sudo -n docker load'\n" "$STREAM_TAG" "$HOST"
             fi
             printf '  the check of %s on %s\n' "$PINNED" "$HOST"
+        elif ((FILE_MODE)) || { own_folder "$ARCHIVE_DIR" && leftovers_here "$ARCHIVE_DIR/$(archive_name)"; }; then
+            printf 'Dry run: nothing was changed. Any archive of %s that an earlier --file run kept goes, here (%s) and on %s (%s/%s)\n' \
+                "$PINNED" "$ARCHIVE_DIR/$(archive_name)" "$HOST" "$REMOTE_DIR" "$(archive_name)"
         fi
         i=$((i + 1))
     done
     exit 0
 fi
 
-((FILE_MODE == 0 || missing == 0)) || archive_dir
+((FILE_MODE == 0)) || archive_dir
 i=0
 while ((i < ${#IMAGES[@]})); do
     pin_parts "${IMAGES[i]}"
-    if ((SERVER_HAS[i] == 0)); then
+    if ((SERVER_HAS[i])); then
+        drop_leftovers
+    else
         if ((MAC_HAS[i] == 0)); then
+            # streamable read the kind of the pin from the registry before the server; the pull must give that pin.
             printf 'Pulling the pinned image on this computer: %s\n' "${IMAGES[i]}"
             docker pull --platform "${PLATFORMS[i]}" "${IMAGES[i]}" \
                 || die "The pull failed on this computer (above). When the registry wants a login, run docker login $REGISTRY on this computer first."
             id=$(docker image inspect --format '{{.Id}}' "$PINNED" 2> /dev/null) || id=''
-            [[ $id == "$DIGEST" ]] || die "After the pull, $PINNED on this computer does not have the pinned digest as its ID (ID: ${id:-none}). Nothing was streamed."
-            streamable "${PLATFORMS[i]}"
+            [[ $id == "$DIGEST" ]] || die "After the pull, $PINNED on this computer does not have the pinned digest as its ID (ID: ${id:-none}). $(nothing streamed)"
         fi
         if [[ -z ${MAC_TAGGED[i]} ]]; then
-            docker tag "$PINNED" "$STREAM_TAG" || die "docker tag $PINNED $STREAM_TAG failed on this computer (above). Nothing was streamed."
+            docker tag "$PINNED" "$STREAM_TAG" || die "docker tag $PINNED $STREAM_TAG failed on this computer (above). $(nothing streamed)"
         fi
         if ((FILE_MODE)); then stream_file; else stream_pipe; fi
     fi
