@@ -14,6 +14,9 @@ REVISION=ecd966496435b9999da2624ba8cdc349bce3f852
 ODOO_IMAGE=perodua-deploy.novutal.com/perodua-odoo:client-stable-uiux-v1.2.2@sha256:772500ec34d45c24cf9f66aa2bf26c3287d5c81ce8b8173f82ffed282d18bdfb
 WEB_IMAGE=perodua-deploy.novutal.com/perodua-odoo:client-stable-uiux-web-v1.2.2@sha256:477ec3df5878069319f029eb076f317aa3a8b2192b75550ec560f41c5b74619f
 REGISTRY=${ODOO_IMAGE%%/*}
+# The platform of the images of both lines and of the App server, for the pull
+# on the Mac that streams them (--no-pull, README.md "Install from streamed images").
+PLATFORM=linux/amd64
 # Whether the pinned web image serves the page under PUBLIC_ROOT and shows
 # ENVIRONMENT_LABEL: yes from v1.0.4. The scripts folder of v1.0.3 has 0 here.
 PUBLIC_ROOT_SUPPORTED=1
@@ -100,6 +103,9 @@ DEMO_OLD_RELEASES_ACCEPTED=demo-uiux-grey-v0.55.0,demo-uiux-grey-v0.55.1
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 DEPLOY_DIR=/opt/perodua-app
 CONFIG='' NON_INTERACTIVE=0 INIT_DB=0 CHECK_ONLY=0 TEMP_DIR='' AUTH_DIR='' STARTED=0
+# --no-pull (NO_PULL_OPTION) or KIT_NO_PULL=1: only the pinned images on this
+# server, and --pull never on every container that a run of Compose starts.
+NO_PULL=0 NO_PULL_OPTION=0 PULL_NEVER=()
 # --upgrade: the release the directory runs before, the backup of its data,
 # whether its App was running, and how far the upgrade got (see cleanup).
 UPGRADE=0 BACKUP_BASE='' BACKUP_DIR='' OLD_RELEASE='' OLD_REVISION='' WAS_RUNNING=0 UPGRADE_STATE='' BACKUP_APP_ENV_TRIMMED=0
@@ -154,10 +160,10 @@ PREPARED=0
 
 usage() {
     cat <<'HELP'
-Usage: bash deploy-app.sh [--config PATH] [--dir PATH] [--non-interactive] [--init-db]
+Usage: bash deploy-app.sh [--config PATH] [--dir PATH] [--non-interactive] [--no-pull] [--init-db]
                           [--line LINE] [--replace DIR] [--delete-old-attachments VOLUME]
        bash deploy-app.sh [--config PATH] [--dir PATH] --check-config
-       bash deploy-app.sh --upgrade [--dir PATH] [--backup-dir PATH] [--non-interactive]
+       bash deploy-app.sh --upgrade [--dir PATH] [--backup-dir PATH] [--non-interactive] [--no-pull]
                           [--confirm DATABASE] [--drop-retired-data]
        bash deploy-app.sh --release-queued-mail [--dir PATH]
        bash deploy-app.sh --mail [--dir PATH] [--init-db]
@@ -233,6 +239,19 @@ it. Without it, a run without a terminal stops there.
 --non-interactive, or KIT_NON_INTERACTIVE=1 in the environment, never asks
 (README.md, "Run the kit without a person"): every value comes from --config,
 app.env or an option, and a missing one stops the run.
+--no-pull, or KIT_NO_PULL=1 in the environment (sudo env KIT_NO_PULL=1 bash
+...), deploys (also --init-db, --upgrade and --replace) with the pinned Odoo
+and web images of the line that are already on this server, streamed from the
+Mac (bash scripts/stream-image.sh SSH_HOST deploy-app.sh --line LINE there). It
+never pulls, never logs in to the registry and never asks (as
+--non-interactive). Before any change it finds each image by its digest
+reference, checks that its registry digest, and on the containerd image store
+its ID, is the pinned digest, and starts it once, with no network. When one is
+missing, or does not start, it stops and prints the command for the Mac. On
+the classic image store an image from docker load has no registry digest: it
+stops there too. Every container it starts gets --pull never, which needs
+Docker Compose 2.32.2 or later (README.md, "Install from streamed images").
+KIT_NO_PULL=1 also gives --release-queued-mail and --send-test-mail --pull never.
 HELP
 }
 fail() { printf 'Error: %s\n' "$*" >&2; exit 1; }
@@ -265,7 +284,7 @@ replace_stopped() {  # --replace: this App failed after the App of REPLACE_DIR s
     fi
     printf 'Starting the App of %s in %s again...\n' "$REPLACE_RELEASE" "$REPLACE_DIR" >&2
     if docker compose --project-name "$REPLACE_PROJECT" --file "$REPLACE_DIR/compose.yml" \
-            up --detach --no-recreate --wait --wait-timeout "$STARTUP_TIMEOUT" >&2; then
+            up "${PULL_NEVER[@]}" --detach --no-recreate --wait --wait-timeout "$STARTUP_TIMEOUT" >&2; then
         printf 'The App of %s runs again, with its own database and attachments.\n' "$REPLACE_RELEASE" >&2
     else
         printf 'The App of %s did not start again. Start it with: sudo bash service.sh --role app --dir %q start\n' \
@@ -352,7 +371,7 @@ upgrade_stopped() {  # what a failed --upgrade leaves, and the way back
             if ((WAS_RUNNING)); then
                 printf 'Starting the App of %s again...\n' "$OLD_RELEASE" >&2
                 if docker compose --project-name "$PROJECT_NAME" --file "$DEPLOY_DIR/compose.yml" \
-                        up --detach --no-recreate --wait --wait-timeout "$STARTUP_TIMEOUT" >&2; then
+                        up "${PULL_NEVER[@]}" --detach --no-recreate --wait --wait-timeout "$STARTUP_TIMEOUT" >&2; then
                     printf 'The App of %s runs again.\n' "$OLD_RELEASE" >&2
                 else
                     printf 'The App of %s did not start again. Start it with: sudo bash service.sh --role app --dir %q start\n' "$OLD_RELEASE" "$DEPLOY_DIR" >&2
@@ -415,6 +434,7 @@ while (($#)); do
             esac
             shift 2 ;;
         --non-interactive) NON_INTERACTIVE=1; shift ;;
+        --no-pull) NO_PULL_OPTION=1; shift ;;
         --init-db) INIT_DB=1; shift ;;
         --check-config) CHECK_ONLY=1; shift ;;
         --upgrade) UPGRADE=1; shift ;;
@@ -425,6 +445,18 @@ while (($#)); do
         *) fail "Unknown argument: $1" ;;
     esac
 done
+# --no-pull, or KIT_NO_PULL=1 in the environment (README.md, "Install from streamed
+# images"): a deployment uses only the pinned images on this server, streamed from the
+# Mac. It never pulls, never logs in to the registry and never asks: no-pull is
+# non-interactive. The variable also keeps --release-queued-mail and --send-test-mail
+# from pulling.
+NO_PULL=$NO_PULL_OPTION
+case ${KIT_NO_PULL:-} in
+    ''|0) ;;
+    1) NO_PULL=1 ;;
+    *) fail 'KIT_NO_PULL must be 1 (never pull: use the images streamed from the Mac) or 0 (pull as before)' ;;
+esac
+if ((NO_PULL)); then NON_INTERACTIVE=1 PULL_NEVER=(--pull never); fi
 # --non-interactive, or KIT_NON_INTERACTIVE=1 in the environment: no question
 # at all (README.md, "Run the kit without a person"). Each answer comes from an
 # option or a setting; a missing one stops the run.
@@ -434,6 +466,12 @@ case ${KIT_NON_INTERACTIVE:-} in
     *) fail 'KIT_NON_INTERACTIVE must be 1 (never ask) or 0 (ask on a terminal)' ;;
 esac
 ((NON_INTERACTIVE == 0)) || export KIT_NON_INTERACTIVE=1
+if ((NO_PULL_OPTION)); then
+    ((CHECK_ONLY == 0 && RELEASE_MAIL == 0 && ${#TEST_MAIL} == 0)) \
+        || fail '--no-pull belongs to a deployment: not with --check-config, --release-queued-mail or --send-test-mail'
+fi
+((MAIL == 0 || NO_PULL == 0)) \
+    || fail '--mail asks the outgoing email questions, and --no-pull (or KIT_NO_PULL=1) never asks. Write the SMTP_ settings and MAIL_REDIRECT_TO into app.env and run deploy-app.sh --no-pull --non-interactive'
 [[ -z $DELETE_ATTACHMENTS ]] || ((INIT_DB && UPGRADE == 0)) \
     || fail '--delete-old-attachments applies only to --init-db: a new empty database'
 [[ $DEPLOY_DIR == /* && $DEPLOY_DIR != / && $DEPLOY_DIR != *$'\n'* ]] || fail '--dir must be an absolute directory path, not /'
@@ -1015,6 +1053,73 @@ docker compose version >/dev/null 2>&1 || fail 'Docker Compose v2 is required'
 docker info >/dev/null 2>&1 || fail 'Cannot reach Docker. Start the engine and check your account permissions'
 engine=$(docker info --format '{{.OSType}}/{{.Architecture}}')
 [[ $engine == linux/x86_64 || $engine == linux/amd64 ]] || fail 'The Docker engine must run Linux amd64 containers'
+# --no-pull uses only the pinned images on this server, checked here, before the first
+# change. On the containerd image store the ID of an image is the digest of its manifest,
+# checked against the content, and docker load keeps it; on the classic store a loaded
+# image has no registry digest.
+pin_parts() {  # $1 a pin: REPOSITORY (a registry port stays), DIGEST, PINNED and STREAM_TAG
+    # PINNED finds the image by its digest, whatever its tag; STREAM_TAG is the tag the
+    # Mac streams it under: one for each digest, never moved.
+    REPOSITORY=${1%:*@*} DIGEST=${1##*@}
+    PINNED=$REPOSITORY@$DIGEST STREAM_TAG=$REPOSITORY:${DIGEST/:/-}
+}
+image_store() {  # containerd, classic, or nothing when docker info does not answer
+    local status
+    status=$(docker info --format '{{json .DriverStatus}}' 2>/dev/null) || return 0
+    if [[ $status == *'["driver-type","io.containerd.snapshotter.v1"]'* ]]; then echo containerd; else echo classic; fi
+}
+pinned_here() {  # $1 store, $2 a pin; 0: the image is here, 1: no image has its digest, 2: one does, but not as pinned
+    local facts
+    pin_parts "$2"
+    facts=$(docker image inspect --format '{{.Id}}{{range .RepoDigests}} {{.}}{{end}}' "$PINNED" 2>/dev/null) || return 1
+    [[ " $facts " == *" $PINNED "* ]] || return 2
+    [[ $1 != containerd || ${facts%% *} == "$DIGEST" ]] || return 2
+}
+starts() {  # $1 a pin: the image starts a process, with no pull and no network: its layers are complete
+    # sh: the entrypoint of the Odoo image and of the web image is a shell script.
+    docker run --rm --pull never --network none --read-only --cap-drop ALL --security-opt no-new-privileges:true \
+        --entrypoint sh "$1" -c :
+}
+check_compose_pull() {  # every container a run of Compose starts gets --pull never: run has it from Compose 2.32.2
+    local version
+    version=$(docker compose version 2>/dev/null) || version=''
+    if [[ ! $version =~ ([0-9]+)\.([0-9]+)\.([0-9]+) ]] || ((10#${BASH_REMATCH[1]} < 2 || (10#${BASH_REMATCH[1]} == 2 \
+            && (10#${BASH_REMATCH[2]} < 32 || (10#${BASH_REMATCH[2]} == 32 && 10#${BASH_REMATCH[3]} < 2))))); then
+        fail "--no-pull starts every container with --pull never, and docker compose run has that option from Docker Compose 2.32.2 on. This server answers: ${version:-nothing (docker compose version)}. Update the Compose plugin first (sudo apt-get install --only-upgrade docker-compose-plugin). Nothing was changed"
+    fi
+}
+check_pinned_images() {  # --no-pull, before any change: both images of the line; no pull, no login and no question
+    local store image found out missing=() commands=()
+    store=$(image_store)
+    [[ -n $store ]] || fail 'The Docker engine does not answer docker info. Nothing was changed'
+    for image in "$ODOO_IMAGE" "$WEB_IMAGE"; do
+        found=0
+        pinned_here "$store" "$image" || found=$?
+        case $found in
+            0) out=$(starts "$image" 2>&1) \
+                   || fail "The pinned image $PINNED on this server does not start: $(printf '%s\n' "$out" | tail -n 1). Remove it (sudo docker image rm $PINNED), stream the pinned image again, then run this command again. Nothing was changed"
+               printf 'Pinned image on this server (%s image store), not pulled: %s\n' "$store" "$PINNED" ;;
+            1) missing+=("The pinned image is not on this server, and --no-pull does not pull it: $PINNED")
+               commands+=("  docker pull --platform $PLATFORM $image && docker tag $PINNED $STREAM_TAG && docker save $STREAM_TAG | ssh SSH_HOST 'sudo -n docker load'") ;;
+            *) fail "The image that $PINNED finds on this server does not have the pinned digest as its registry digest (and, on the containerd image store, as its ID). Remove it (sudo docker image rm $PINNED), stream the pinned image again, then run this command again. Nothing was changed" ;;
+        esac
+    done
+    ((${#missing[@]})) || return 0
+    [[ $store == containerd ]] || fail "$(printf '%s\n' "${missing[@]}" \
+        'The Docker engine of this server uses the classic image store: there an image from docker load has no registry digest, so deploy-app.sh cannot check it against the pinned digest and does not use it. Switch the engine to the containerd image store first (README.md, "Install from streamed images"), then stream the images. Nothing was changed')"
+    # docker save of a digest reference writes no image name, and docker load then keeps a
+    # dangling image that the digest reference does not find; a release tag moves to a later
+    # pin: the Mac saves the stream tag, one for each digest.
+    fail "$(printf '%s\n' "${missing[@]}" \
+        "Stream $( ((${#missing[@]} == 1)) && printf it || printf them ) from the Mac (it has the registry login and the containerd image store). There, SSH_HOST is the ssh name of this server (host name $(uname -n)):" \
+        "  bash scripts/stream-image.sh SSH_HOST deploy-app.sh --line $LINE" \
+        'or with Docker alone:' "${commands[@]}" \
+        'Then run this command again. Nothing was changed')"
+}
+if ((NO_PULL)); then
+    check_compose_pull
+    ((RELEASE_MAIL)) || [[ -n $TEST_MAIL ]] || check_pinned_images
+fi
 mkdir -p -- "$DEPLOY_DIR"
 DEPLOY_DIR=$(cd -- "$DEPLOY_DIR" && pwd -P)
 [[ $DEPLOY_DIR != / && $DEPLOY_DIR != *$'\n'* ]] || fail 'Unsupported directory path'
@@ -1086,7 +1191,7 @@ if ((RELEASE_MAIL)); then
     ! unverified || fail "The first deployment in $DEPLOY_DIR stopped before it used its database: there is no held mail"
     printf 'Queuing the mail that the module upgrade held in database %s again...\n' "$DB_NAME"
     released=$(docker compose --project-name "$PROJECT_NAME" --file "$DEPLOY_DIR/compose.yml" \
-        run --rm --no-deps -T odoo python3 /opt/deploy/preflight.py release-mail </dev/null) \
+        run "${PULL_NEVER[@]}" --rm --no-deps -T odoo python3 /opt/deploy/preflight.py release-mail </dev/null) \
         || fail 'The held mail was not released, for the reason above. Nothing was changed'
     [[ $released =~ ^RELEASED\ ([0-9]+)\ ([0-9]+)$ ]] || fail "Unexpected answer from the database check: $released"
     printf '%s held mail(s) are queued again (outgoing): %s that the module upgrade queued, %s that waited in the queue before the upgrade. Odoo sends them with its mail queue.\n' \
@@ -1110,7 +1215,7 @@ if [[ -n $TEST_MAIL ]]; then
         settings_hint='Check the SMTP settings with sudo bash deploy-app.sh --mail, and that this server reaches the SMTP server'
     fi
     docker compose --project-name "$PROJECT_NAME" --file "$DEPLOY_DIR/compose.yml" \
-        run --rm --no-deps -T odoo perodua-mail-test "$TEST_MAIL" </dev/null \
+        run "${PULL_NEVER[@]}" --rm --no-deps -T odoo perodua-mail-test "$TEST_MAIL" </dev/null \
         || fail "The test email was not sent, for the reason above. $settings_hint"
     if [[ $MAIL_REDIRECT_TO == off ]]; then
         printf 'Test email sent to %s. Check that it arrives.\n' "$TEST_MAIL"
@@ -1233,8 +1338,10 @@ if [[ -n $CONFIG && $BIND_IP == 0.0.0.0 ]]; then  # asked on the terminal otherw
         printf 'Warning: BIND_IP=0.0.0.0 opens the web page on every address of this server, including the public %s. Unless a cloud firewall (security group) blocks port %s, anyone on the internet can sign in with the UAT passwords. Docker opens published ports past ufw.\n' "$exposed" "$HTTP_PORT" >&2
     fi
 fi
-pull_image "$ODOO_IMAGE"
-pull_image "$WEB_IMAGE"
+if ((NO_PULL == 0)); then  # --no-pull checked both images before the first change
+    pull_image "$ODOO_IMAGE"
+    pull_image "$WEB_IMAGE"
+fi
 
 cat > "$TEMP_DIR/preflight.py" <<'PY'
 # Modes: check | mark-pending | verify-fresh | stamp | public-urls [BASE_URL].
@@ -2159,7 +2266,7 @@ upgrade_check_database() {
     [[ -z $SMTP_USER ]] || cp -p -- "$TEMP_DIR/smtp_password" "$TEMP_DIR/secrets/smtp_password"
     staged config --quiet
     printf 'Checking database %s for %s before anything is changed...\n' "$DB_NAME" "$RELEASE"
-    if ! report=$(staged run --rm --no-deps -T odoo python3 /opt/deploy/preflight.py upgrade-check "$MODULE_UPGRADE_FROM" \
+    if ! report=$(staged run "${PULL_NEVER[@]}" --rm --no-deps -T odoo python3 /opt/deploy/preflight.py upgrade-check "$MODULE_UPGRADE_FROM" \
             </dev/null 2> "$TEMP_DIR/check.log"); then
         cat "$TEMP_DIR/check.log" >&2
         if grep -q 'module fingerprint does not match' "$TEMP_DIR/check.log"; then
@@ -2271,7 +2378,7 @@ upgrade_recheck_database() {
     # A refusal here starts the old App again (state backed-up).
     local report state modules
     printf 'Checking database %s again, now that the App is stopped...\n' "$DB_NAME"
-    if ! report=$(staged run --rm --no-deps -T odoo python3 /opt/deploy/preflight.py upgrade-check "$MODULE_UPGRADE_FROM" \
+    if ! report=$(staged run "${PULL_NEVER[@]}" --rm --no-deps -T odoo python3 /opt/deploy/preflight.py upgrade-check "$MODULE_UPGRADE_FROM" \
             </dev/null 2> "$TEMP_DIR/check.log"); then
         cat "$TEMP_DIR/check.log" >&2
         lock_table_steps "$report"
@@ -2301,14 +2408,14 @@ upgrade_recheck_database() {
 }
 module_upgrade_guard() {  # before anything changes: the modules -u touches never need EXCLUDED_MODULE
     printf 'Checking that the module upgrade keeps %s out of database %s...\n' "$EXCLUDED_MODULE" "$DB_NAME"
-    if ! staged run --rm --no-deps -T odoo python3 /opt/deploy/uat_guard.py guard --modules "$UPGRADE_MODULES" \
+    if ! staged run "${PULL_NEVER[@]}" --rm --no-deps -T odoo python3 /opt/deploy/uat_guard.py guard --modules "$UPGRADE_MODULES" \
             --exclude "$EXCLUDED_MODULE" --line "$LINE" --odoo-config /etc/odoo/odoo.conf --json \
             </dev/null > "$TEMP_DIR/uat-guard.json" 2> "$TEMP_DIR/uat-guard.log"; then
         cat "$TEMP_DIR/uat-guard.log" >&2
         fail "Refused before any change: the modules of $RELEASE cannot keep $EXCLUDED_MODULE out of database $DB_NAME safely (above)"
     fi
     cat "$TEMP_DIR/uat-guard.log"
-    DEMO_FLAG=$(staged run --rm --no-deps -T odoo python3 /opt/deploy/uat_guard.py demo-flag --odoo-config /etc/odoo/odoo.conf \
+    DEMO_FLAG=$(staged run "${PULL_NEVER[@]}" --rm --no-deps -T odoo python3 /opt/deploy/uat_guard.py demo-flag --odoo-config /etc/odoo/odoo.conf \
         </dev/null 2>> "$TEMP_DIR/uat-guard.log") \
         || fail "Cannot determine how the Odoo of $RELEASE disables demo data (above)"
     [[ $DEMO_FLAG =~ ^--[a-z-]+=[A-Za-z0-9]+$ ]] || fail 'Unexpected demo-data option reported by the image'
@@ -2345,7 +2452,7 @@ PLAN
 }
 export_retired_data() {  # the owner agreed (--drop-retired-data): keep a copy next to the backup
     printf 'Saving the retired data to %s/retired-data.tar.gz...\n' "$BACKUP_DIR"
-    staged --file "$TEMP_DIR/no-log.yml" run --rm --no-deps -T odoo python3 /opt/deploy/preflight.py retired-export \
+    staged --file "$TEMP_DIR/no-log.yml" run "${PULL_NEVER[@]}" --rm --no-deps -T odoo python3 /opt/deploy/preflight.py retired-export \
         </dev/null > "$BACKUP_DIR/retired-data.tar.gz" || fail 'The export of the retired data failed (above)'
     tar -tzf "$BACKUP_DIR/retired-data.tar.gz" > "$TEMP_DIR/retired.list" \
         || fail "The export $BACKUP_DIR/retired-data.tar.gz cannot be read back"
@@ -2359,7 +2466,7 @@ module_upgrade() {  # after the backup: the mark, -u, and the check of its resul
     # anything: then the old App starts again (backed-up). Any other failure
     # may come after the mark was written, so it counts as marked.
     UPGRADE_STATE=marked
-    state=$(staged run --rm --no-deps -T odoo python3 /opt/deploy/preflight.py mark-upgrading \
+    state=$(staged run "${PULL_NEVER[@]}" --rm --no-deps -T odoo python3 /opt/deploy/preflight.py mark-upgrading \
         "$MODULE_UPGRADE_FROM" "$OLD_RELEASE" "$RELEASE" </dev/null) || status=$?
     if ((status == 3)); then
         UPGRADE_STATE=backed-up
@@ -2380,7 +2487,7 @@ module_upgrade() {  # after the backup: the mark, -u, and the check of its resul
     # the background, so that a lost session stops it at once (cleanup).
     # shellcheck disable=SC2016
     timeout "$INIT_TIMEOUT" docker compose --project-name "$PROJECT_NAME" --file "$TEMP_DIR/compose.yml" \
-        run --rm --no-deps -T --name "$UPGRADE_CONTAINER" \
+        run "${PULL_NEVER[@]}" --rm --no-deps -T --name "$UPGRADE_CONTAINER" \
         -e PERODUA_UPGRADE_MODULES="$UPGRADE_MODULES" -e PERODUA_DEMO_FLAG="$DEMO_FLAG" odoo bash -c \
         'PGPASSWORD="$DB_PASSWORD" exec odoo -c /etc/odoo/odoo.conf -d "$DB_NAME" --db_host="$DB_HOST" --db_port="$DB_PORT" --db_user="$DB_USER" -u "$PERODUA_UPGRADE_MODULES" "$PERODUA_DEMO_FLAG" --max-cron-threads=0 --stop-after-init --log-handler=odoo.modules.migration:INFO' \
         </dev/null > "$BACKUP_DIR/module-upgrade.log" 2>&1 &
@@ -2396,7 +2503,7 @@ module_upgrade() {  # after the backup: the mark, -u, and the check of its resul
     # of the old release are removed. So no mail queue runs before
     # verify-upgrade holds the queue.
     printf 'Module upgrade finished. Checking the result, putting the cron flags back and holding every mail of the mail queue...\n'
-    if ! state=$(staged run --rm --no-deps -T odoo python3 /opt/deploy/preflight.py verify-upgrade </dev/null 2> "$TEMP_DIR/verify.log"); then
+    if ! state=$(staged run "${PULL_NEVER[@]}" --rm --no-deps -T odoo python3 /opt/deploy/preflight.py verify-upgrade </dev/null 2> "$TEMP_DIR/verify.log"); then
         cat "$TEMP_DIR/verify.log" >&2
         fail 'The upgraded database failed its checks (above)'
     fi
@@ -2410,7 +2517,7 @@ upgrade_space() {  # the backup must fit, before the App stops
     # pg_database_size (indexes included, nothing compressed) and the
     # attachments as stored: more than the dump and the archive will take.
     # shellcheck disable=SC2016
-    sizes=$(staged run --rm --no-deps -T odoo bash -c \
+    sizes=$(staged run "${PULL_NEVER[@]}" --rm --no-deps -T odoo bash -c \
         'PGPASSWORD="$DB_PASSWORD" psql -X -A -t -q --no-password --host="$DB_HOST" --port="$DB_PORT" --username="$DB_USER" --dbname="$DB_NAME" -c "SELECT pg_database_size(current_database()) / 1024" && if [ -d "/var/lib/odoo/filestore/$DB_NAME" ]; then du -sk "/var/lib/odoo/filestore/$DB_NAME" | cut -f1; else echo 0; fi' \
         </dev/null) || fail "Cannot read the size of database $DB_NAME and of its attachments (above)"
     [[ $sizes =~ ^([0-9]+)$'\n'([0-9]+)$ ]] || fail "Cannot read the size of database $DB_NAME and of its attachments: $sizes"
@@ -2444,17 +2551,17 @@ upgrade_backup() {
     # does. The password comes from the container's own environment, never a
     # command line.
     # shellcheck disable=SC2016
-    staged --file "$TEMP_DIR/no-log.yml" run --rm --no-deps -T odoo bash -c \
+    staged --file "$TEMP_DIR/no-log.yml" run "${PULL_NEVER[@]}" --rm --no-deps -T odoo bash -c \
         'PGPASSWORD="$DB_PASSWORD" exec pg_dump --format=custom --no-password --host="$DB_HOST" --port="$DB_PORT" --username="$DB_USER" --dbname="$DB_NAME"' \
         </dev/null > "$BACKUP_DIR/database.dump" || fail "pg_dump of database $DB_NAME failed (above)"
-    if ! { staged run --rm --no-deps -T odoo pg_restore --list < "$BACKUP_DIR/database.dump" > "$TEMP_DIR/database.list" \
+    if ! { staged run "${PULL_NEVER[@]}" --rm --no-deps -T odoo pg_restore --list < "$BACKUP_DIR/database.dump" > "$TEMP_DIR/database.list" \
             && grep -Eq ' TABLE DATA public ir_module_module( |$)' "$TEMP_DIR/database.list"; }; then
         fail "The backup $BACKUP_DIR/database.dump cannot be read back, or holds no Odoo database"
     fi
     printf 'Saving the attachments of %s to %s/filestore.tar.gz...\n' "$DB_NAME" "$BACKUP_DIR"
     # The layout README.md restores ("From a backup"): filestore/DB_NAME/...
     # shellcheck disable=SC2016
-    staged --file "$TEMP_DIR/no-log.yml" run --rm --no-deps -T odoo bash -c \
+    staged --file "$TEMP_DIR/no-log.yml" run "${PULL_NEVER[@]}" --rm --no-deps -T odoo bash -c \
         'cd /var/lib/odoo && if [ -d "filestore/$DB_NAME" ]; then exec tar -czf - "filestore/$DB_NAME"; fi; exec tar -czf - --files-from=/dev/null' \
         </dev/null > "$BACKUP_DIR/filestore.tar.gz" || fail "The archive of the attachments volume ${PROJECT_NAME}_filestore failed (above)"
     files=$(tar -tzf "$BACKUP_DIR/filestore.tar.gz" | awk '!/\/$/ { n++ } END { print n + 0 }') \
@@ -2641,8 +2748,8 @@ mv -f -- "$TEMP_DIR/identity" "$DEPLOY_DIR/.deployment-identity"
 chmod 0600 "$DEPLOY_DIR/app.env"
 compose() { docker compose --project-name "$PROJECT_NAME" --file "$DEPLOY_DIR/compose.yml" "$@"; }
 compose config --quiet
-preflight() { compose run --rm --no-deps -T odoo python3 /opt/deploy/preflight.py "$@"; }
-uat_helper() { compose run --rm --no-deps -T odoo python3 /opt/deploy/uat_guard.py "$@"; }
+preflight() { compose run "${PULL_NEVER[@]}" --rm --no-deps -T odoo python3 /opt/deploy/preflight.py "$@"; }
+uat_helper() { compose run "${PULL_NEVER[@]}" --rm --no-deps -T odoo python3 /opt/deploy/uat_guard.py "$@"; }
 uat_setup() {
     # Reached only from a fresh initialization or its interrupted resumption,
     # never from an ordinary redeploy, so UAT passwords are not reset later.
@@ -2653,7 +2760,7 @@ uat_setup() {
     # travels as PGPASSWORD (Odoo's environment name for --db_password), never
     # on a command line that ps on the host would show.
     # shellcheck disable=SC2016
-    timeout --foreground "$INIT_TIMEOUT" docker compose --project-name "$PROJECT_NAME" --file "$DEPLOY_DIR/compose.yml" run --rm --no-deps -T odoo \
+    timeout --foreground "$INIT_TIMEOUT" docker compose --project-name "$PROJECT_NAME" --file "$DEPLOY_DIR/compose.yml" run "${PULL_NEVER[@]}" --rm --no-deps -T odoo \
         bash -c 'PGPASSWORD="$DB_PASSWORD" exec odoo shell -c /etc/odoo/odoo.conf -d "$DB_NAME" --db_host="$DB_HOST" --db_port="$DB_PORT" --db_user="$DB_USER" < /opt/deploy/uat_admins.py' \
         > "$DEPLOY_DIR/uat-setup.log" 2>&1 || fail "UAT administrator setup failed; see $DEPLOY_DIR/uat-setup.log. Rerun with --init-db to retry it; modules are not reinstalled"
     grep -F 'UAT admins: ready:' "$DEPLOY_DIR/uat-setup.log" || fail "UAT administrator setup did not confirm completion; see $DEPLOY_DIR/uat-setup.log"
@@ -2703,7 +2810,7 @@ uat_demo_run() {  # uat_demo.py, job $1, step $2, with the standard input and ou
     # for the apply step): odoo shell reads the script on its own.
     # shellcheck disable=SC2016
     timeout --foreground "$INIT_TIMEOUT" docker compose --project-name "$PROJECT_NAME" --file "$DEPLOY_DIR/compose.yml" \
-        --file "$TEMP_DIR/no-log.yml" run --rm --no-deps -T -e PERODUA_UAT_DEMO="$1" -e PERODUA_UAT_DEMO_STEP="$2" odoo \
+        --file "$TEMP_DIR/no-log.yml" run "${PULL_NEVER[@]}" --rm --no-deps -T -e PERODUA_UAT_DEMO="$1" -e PERODUA_UAT_DEMO_STEP="$2" odoo \
         bash -c 'exec 3<&0; PGPASSWORD="$DB_PASSWORD" exec odoo shell -c /etc/odoo/odoo.conf -d "$DB_NAME" --db_host="$DB_HOST" --db_port="$DB_PORT" --db_user="$DB_USER" < /opt/deploy/uat_demo.py' \
         2>> "$DEPLOY_DIR/uat-demo.log"
 }
@@ -2772,7 +2879,7 @@ clear_leftover_attachments() {
     # Files an earlier deployment of this project left in the volume belong to
     # that deployment's database, not to a new empty one.
     local files answer=''
-    files=$(compose run --rm --no-deps -T odoo bash -c 'find /var/lib/odoo/filestore -type f 2>/dev/null | wc -l' </dev/null) \
+    files=$(compose run "${PULL_NEVER[@]}" --rm --no-deps -T odoo bash -c 'find /var/lib/odoo/filestore -type f 2>/dev/null | wc -l' </dev/null) \
         || fail "Cannot read the attachments volume $FILESTORE_VOLUME"
     [[ $files =~ ^[0-9]+$ ]] || fail "Cannot read the attachments volume $FILESTORE_VOLUME"
     ((files > 0)) || return 0
@@ -2828,7 +2935,7 @@ case $state in
         # Exact module graph, unlike the image default's empty-database branch,
         # which may install every baked module. Never pass -u on an existing DB.
         STARTED=1
-        timeout --foreground "$INIT_TIMEOUT" docker compose --project-name "$PROJECT_NAME" --file "$DEPLOY_DIR/compose.yml" run --rm --no-deps -T odoo \
+        timeout --foreground "$INIT_TIMEOUT" docker compose --project-name "$PROJECT_NAME" --file "$DEPLOY_DIR/compose.yml" run "${PULL_NEVER[@]}" --rm --no-deps -T odoo \
             odoo -c /etc/odoo/odoo.conf -d "$DB_NAME" -i "$INIT_MODULES" "$demo_flag" --stop-after-init \
             > "$DEPLOY_DIR/initialization.log" 2>&1 || fail 'Initialization failed or timed out; inspect initialization.log. Rerun with --init-db: it finishes the setup if every module was installed, and otherwise stops with the recovery steps in docs/DEPLOYMENT.md'
         [[ $(preflight mark-pending) == PENDING ]] || fail 'Initialized database failed the fresh UAT checks'
@@ -2876,7 +2983,7 @@ if ((attachments > 0)); then
     printf 'Database has %s file attachments. Checking its paired filestore volume.\n' "$attachments"
     # Exit 3: attachments are missing; it then lists the database folders in the volume.
     status=0
-    compose run --rm --no-deps -T odoo python3 -c '
+    compose run "${PULL_NEVER[@]}" --rm --no-deps -T odoo python3 -c '
 import os, pathlib, psycopg2, sys
 p=pathlib.Path("/run/secrets/db_password").read_text()
 db=os.environ["DB_NAME"]
@@ -2932,7 +3039,7 @@ if [[ -n $REPLACE_DIR ]]; then
     docker compose --project-name "$REPLACE_PROJECT" --file "$REPLACE_DIR/compose.yml" stop
 fi
 STARTED=1
-compose up -d --force-recreate --wait --wait-timeout "$STARTUP_TIMEOUT"
+compose up "${PULL_NEVER[@]}" -d --force-recreate --wait --wait-timeout "$STARTUP_TIMEOUT"
 compose exec -T odoo python3 - "$REVISION" "$STARTUP_TIMEOUT" "$PUBLIC_ROOT" "$PROFILE" "$FRESH" <<'PY'
 import http.cookiejar, json, sys, time, urllib.parse, urllib.request, urllib.error
 revision=sys.argv[1]
