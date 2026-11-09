@@ -2188,7 +2188,13 @@ Do the steps in this order.
    any change when the owner is a superuser (the rights of a superuser are every
    right on the server), or when `oracle_view_rp` owns `perodua_oracle2` or
    `perodua_oracle`: a different owner is needed first (the role of the App, not
-   a superuser).
+   a superuser). It also stops before any change when the owner of
+   `perodua_oracle` is a superuser and the command cleans that database (see
+   below: a superuser would run the objects of the role that go to it, for
+   example a `SECURITY DEFINER` function), and when `oracle_view_rp` owns another
+   database or a tablespace (`REASSIGN OWNED BY` would give it to the owner of
+   the database without a word). Give such a database or tablespace a different
+   owner first, as `postgres` (`ALTER DATABASE` or `ALTER TABLESPACE`).
 
    A membership is for the whole server. On each other database of the same
    owner, the role gets the rights of the owner too: `CONNECT` (`pg_hba.conf`
@@ -2213,16 +2219,21 @@ Do the steps in this order.
    database (a database is a shared object), and `deploy-db.sh` revokes the rights
    of `PUBLIC` on its database. So `perodua_oracle2` gets them again in the same
    transaction: a stop between the two changes nothing, and the tool keeps its
-   way in. After the `COMMIT`, the command ends the sessions of the role there
-   again: a container of an earlier release can open a session before the
-   `COMMIT`, and after it no new session can start, because `PUBLIC` has no
-   `CONNECT` there. That is true for the rights of the role itself: when the
+   way in. Without a right of its own there, no new session of the role can
+   start there, because `PUBLIC` has no `CONNECT` there. But when the
    owner of `perodua_oracle2` (`odoo`) owns `perodua_oracle` too, the role keeps
    the rights of that owner there through its membership, and the `INFO` line
    `other databases of odoo` names `perodua_oracle`. So the role can also make
    objects there: before `DROP OWNED BY`, the command gives each object of the
    role there to the owner of `perodua_oracle` (`REASSIGN OWNED BY`) and names
-   it. Nothing that the role made there is dropped. When the server has no
+   it. Nothing that the role made there is dropped. A table that a session of
+   the role commits between `REASSIGN OWNED BY` and `DROP OWNED BY` would be
+   dropped, so before the transaction the role gets `NOLOGIN` (no new session,
+   also in `perodua_oracle2`) and its sessions in `perodua_oracle` end, each one
+   waited for. After the `COMMIT`, the command ends the sessions of the role
+   there again (a session that logged in right before the `NOLOGIN`) and gives
+   the role its `LOGIN` back. When the command stops, the script gives the
+   `LOGIN` back too, when the role had it before the run. When the server has no
    `perodua_oracle`, or when
    `perodua_oracle` does not accept connections (`ALLOW_CONNECTIONS false`, or a
    database half dropped), the command skips this step.
@@ -2247,7 +2258,7 @@ Do the steps in this order.
 
    | Part | Expected |
    | --- | --- |
-   | `== Rights of oracle_view_rp` | Each line starts with `OK`, also `TRUNCATE on every table of public`, `CREATE in public`, `member of odoo, the owner of perodua_oracle2, with INHERIT TRUE, SET FALSE, ADMIN FALSE`, `no right on a database other than perodua_oracle2` (a right of the role itself) and the three lines of the schema `ovb_stage`. A `FAIL` line stops the command. The line of the membership also fails when the role can `SET ROLE` to the owner, or has `ADMIN` on it, through another role. The three last lines start with `INFO` and never stop it: `owns N objects outside the schema ovb_stage` (what the SQL console made, for example a table in `public`), `other databases of odoo, with its rights through the membership` and `other roles of which it is a member (also through odoo)` (`none`, or their names). |
+   | `== Rights of oracle_view_rp` | Each line starts with `OK`, also `TRUNCATE on every table of public`, `CREATE in public`, `member of odoo, the owner of perodua_oracle2, with INHERIT TRUE, SET FALSE, ADMIN FALSE`, `no right on a database other than perodua_oracle2` (a right of the role itself) and the three lines of the schema `ovb_stage`. A `FAIL` line stops the command. The line of the membership also fails when the role can `SET ROLE` to the owner, or has `ADMIN` on it, through another role. The three last lines start with `INFO` and never stop it: `owns N objects outside the schema ovb_stage` (what the SQL console made, for example a table in `public`), `other databases of odoo, with its rights through the membership` and `other roles of which it is a member (also through odoo)` (`none`, or their names). A line end or another control character in a name shows as `\uXXXX` (for example `\u000a`), so each check stays on one line. |
    | `== Staging tables of Copy to RP` | The tables and materialized views in `ovb_stage`, each with its size on disk, and the total. `none` on a new role. The list changes nothing. |
    | `== TLS: SHOW ssl` | `ssl = on`. With `off`, see [TLS to the RP database](#tls-to-the-rp-database). |
    | `== Extensions that can write in a Read run` | `none`. With `dblink` or `postgres_fdw` in `perodua_oracle2`, a Read run of the SQL console can write through them. The command changes no right: that is an owner decision. |
@@ -2376,7 +2387,10 @@ When `ovb_stage` holds tables (a materialized view counts as a table), it lists
 them and stops before any change (exit status 1): run it again with
 `--drop-staging` when the tables can go. Without tables it drops the empty
 schema. A schema `ovb_stage` of another owner stays; `drop-role` drops only the
-tables of the role in it.
+tables of the role in it: the materialized views first, then the tables, each
+kind in one statement, so that a foreign key between two of them cannot stop
+the drop. An object of another role that depends on one of them stops the
+drop, and then nothing is dropped.
 
 `drop-role` drops the schema with `CASCADE`, so it would also drop an object
 outside `ovb_stage` that depends on an object in it, for example a view or a
@@ -2391,11 +2405,19 @@ data. After `ovb_stage`, it gives every other object of the role in
 `perodua_oracle2` to the owner of the database (`REASSIGN OWNED BY
 oracle_view_rp TO odoo`) and names each one, then removes the grants of the
 role (`DROP OWNED BY`). It does the same in `perodua_oracle`, then drops the
-role.
+role. In each database these steps are one transaction: a stop there changes
+nothing there. While they run, the role has `NOLOGIN`; when the command stops,
+the script gives the role its `LOGIN` back.
 
 It stops before any change when `oracle_view_rp` owns `perodua_oracle2` or
 `perodua_oracle`: its objects there would have no other owner to go to. A
-different owner is needed first. A superuser can give the role a database, and
+different owner is needed first. It also stops before any change when the
+owner of `perodua_oracle2` or of `perodua_oracle` is a superuser (a superuser
+would run the objects of the role, for example a `SECURITY DEFINER` function),
+and when `oracle_view_rp` owns another database or a tablespace
+(`REASSIGN OWNED BY` would give it away without a word). Each `REASSIGN OWNED
+BY` reads the owner of its database again, and stops its transaction for the
+same reasons. A superuser can give the role a database, and
 so can the SQL console: in PostgreSQL 16, `REASSIGN OWNED BY odoo TO
 oracle_view_rp` checks the inherited rights, not `SET ROLE`. Then, as
 `postgres` in that database, give the objects back to the role of the App
@@ -2696,7 +2718,7 @@ decisions. On the grey environment this means:
   inherited rights there, not `SET ROLE`), also the databases that `odoo` owns.
   The `INFO` line `owns N objects outside the schema ovb_stage` then shows them.
   `drop-role` gives such objects back to the owner of the database, and stops
-  while the role owns the database itself.
+  while the role owns the database itself, another database or a tablespace.
 - The Oracle account of the image (ISSINTUSR) reaches 5 more databases through
   its DB links (ENTGP2, ENTJP2, ENTRP2, ENTCP2, CRMDB). The console can write
   where that account may write.
