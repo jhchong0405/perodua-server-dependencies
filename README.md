@@ -1067,7 +1067,8 @@ without it.
 value: the pull as before; another value stops the run at once). `sudo`
 removes the environment: put the variable after `sudo env`, as in
 `sudo env KIT_NO_PULL=1 bash iss-api.sh install --non-interactive`.
-`oracle-view.sh` reads `OVB_NO_PULL=1` instead.
+`oracle-view.sh` reads `KIT_NO_PULL` too, and also its own `OVB_NO_PULL`: when
+both have a value, the values must be the same (else a usage error).
 
 1. On the Mac, in this repository, with Docker Desktop on the containerd image
    store, an ssh key that logs in to the server without a question, and
@@ -2949,6 +2950,8 @@ oracle-view.sh`).
    For a run that cannot add an option, the environment variable does the same:
    `sudo env OVB_NO_PULL=1 bash oracle-view.sh install --non-interactive`
    (`0` or no value: the pull as before; another value is a usage error).
+   `KIT_NO_PULL`, the variable of every kit script, works the same way; when
+   both variables have a value, the values must be the same.
 
 `install --no-pull` finds the image by its digest reference
 (`perodua-deploy.novutal.com/oracle-view@sha256:` and the pinned digest), and

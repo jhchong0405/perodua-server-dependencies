@@ -687,6 +687,46 @@ class OracleViewAppTest(unittest.TestCase):
                 self.assertIn(f"--no-pull does not belong to {command}", result.stderr)
         self.assertEqual(self.run_script("status", OVB_NO_PULL="yes").returncode, 0)
 
+    def test_kit_no_pull_works_like_ovb_no_pull(self):
+        # KIT_NO_PULL is the variable of every kit script (README.md, "Install from streamed images").
+        for env in ({"KIT_NO_PULL": "1"}, {"KIT_NO_PULL": "1", "OVB_NO_PULL": "1"}, {"KIT_NO_PULL": "1", "OVB_NO_PULL": ""},
+                    {"KIT_NO_PULL": "", "OVB_NO_PULL": "1"}, {"KIT_NO_PULL": "0", "OVB_NO_PULL": ""}):
+            with self.subTest(env=env):
+                self.set_state(images=[IMAGE], registry_account=REGISTRY_ACCOUNT)
+                args = ("--no-pull",) if env["KIT_NO_PULL"] == "0" else ()  # the option wins over 0
+                result = self.install(*args, **env)
+                self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+                self.assertIn(f"not pulled: {PINNED}\n", result.stdout)
+                self.assertEqual(self.pulls_and_logins(), [])
+        # 0, or no value, in both: the pull as before (here the registry wants a login that is not there).
+        self.set_state(images=[])
+        for env in ({"KIT_NO_PULL": "0"}, {"KIT_NO_PULL": "0", "OVB_NO_PULL": "0"}, {"KIT_NO_PULL": "", "OVB_NO_PULL": ""}):
+            with self.subTest(env=env):
+                result = self.install(**env)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("The registry needs a login: run docker login perodua-deploy.novutal.com first", result.stderr)
+                self.assertEqual(self.pulls_and_logins(), [["pull", IMAGE]])
+        # Both with a value, and not the same: a usage error before Docker.
+        for kit, ovb in (("1", "0"), ("0", "1")):
+            with self.subTest(kit=kit, ovb=ovb):
+                result = self.install(KIT_NO_PULL=kit, OVB_NO_PULL=ovb)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn(f"ERROR: KIT_NO_PULL={kit} and OVB_NO_PULL={ovb} do not agree: give one of them, or the "
+                              "same value to both (see: bash oracle-view.sh --help)", result.stderr)
+                self.assertEqual(self.calls(), [])
+        # Another value stops every command at once, as in the other kit scripts.
+        for command in ("install", "status", "uninstall"):
+            for value in ("yes", "true", "2", " 1"):
+                with self.subTest(command=command, value=value):
+                    result = (self.install(KIT_NO_PULL=value) if command == "install"
+                              else self.run_script(command, KIT_NO_PULL=value))
+                    self.assertEqual(result.returncode, 2)
+                    self.assertIn("ERROR: KIT_NO_PULL must be 1 (never pull: use the image streamed from the Mac) or 0 "
+                                  "(pull as before). (see: bash oracle-view.sh --help)", result.stderr)
+                    self.assertEqual(self.calls(), [])
+        # The other commands do not pull: they take the variable and do as before.
+        self.assertEqual(self.run_script("status", KIT_NO_PULL="1").returncode, 0)
+
     # ------------------------------------------------------------------ the container
     def test_install_runs_the_container_locked_down(self):
         self.installed()
@@ -3353,6 +3393,8 @@ class OracleViewDocsTest(unittest.TestCase):
                          "It stops when the stream tag names another image on the Mac, and when `docker load` on the server "
                          "prints `Error unpacking`.",
                          "The pin must be one image manifest for linux/amd64, not a multi-platform index",
+                         "`KIT_NO_PULL`, the variable of every kit script, works the same way; when both variables have a "
+                         "value, the values must be the same.",
                          "Then it starts the image once, with no pull and no network (`docker run --rm --pull never "
                          "--network none`), so that an image whose layers did not unpack stops the install.",
                          "Do not switch the image store of the grey App server while owner rule C1 applies: while the grey "
@@ -3373,7 +3415,9 @@ class OracleViewDocsTest(unittest.TestCase):
                       "image from the Mac and add `--no-pull`", words(SECTION))
         usage = words(subprocess.run(["bash", str(SCRIPT), "--help"], capture_output=True, text=True, timeout=60).stdout)
         for sentence in ("install [--config PATH] [--non-interactive] [--no-pull] [--dir PATH]",
-                         "--no-pull Or OVB_NO_PULL=1 in the environment (sudo env OVB_NO_PULL=1 bash ...).",
+                         "--no-pull Or OVB_NO_PULL=1 in the environment (sudo env OVB_NO_PULL=1 bash ...), or "
+                         "KIT_NO_PULL=1, the variable of every kit script (0 or no value: the pull as before; another "
+                         "value is a usage error). When both variables have a value, the values must be the same.",
                          "When it is missing, or does not start, install stops before any change and prints the command "
                          "for the Mac."):
             self.assertIn(sentence, usage)

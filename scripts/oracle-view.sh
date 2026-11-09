@@ -88,7 +88,10 @@ install    Pulls the pinned image ($RELEASE) from the private registry
            --confirm, and install stops when the registry wants a login (run
            docker login first, or use --no-pull). KIT_NON_INTERACTIVE=0 or no
            value: ask on a terminal; another value is a usage error.
---no-pull  Or OVB_NO_PULL=1 in the environment (sudo env OVB_NO_PULL=1 bash ...).
+--no-pull  Or OVB_NO_PULL=1 in the environment (sudo env OVB_NO_PULL=1 bash ...),
+           or KIT_NO_PULL=1, the variable of every kit script (0 or no value:
+           the pull as before; another value is a usage error). When both
+           variables have a value, the values must be the same.
            install never pulls, never logs in to the registry and never asks:
            the pinned image must already be on this server, streamed from the
            Mac (bash oracle-view-stream.sh SSH_HOST there). install finds it by
@@ -1773,6 +1776,12 @@ case ${KIT_NON_INTERACTIVE:-} in
     *) usage_error 'KIT_NON_INTERACTIVE must be 1 (never ask) or 0 (ask on a terminal).' ;;
 esac
 ((NON_INTERACTIVE == 0)) || export KIT_NON_INTERACTIVE=1
+# KIT_NO_PULL=1, the variable of every kit script (README.md, "Install from streamed images"),
+# or OVB_NO_PULL=1 below: install --no-pull for a run that cannot add an option.
+case ${KIT_NO_PULL:-} in
+    ''|0|1) ;;
+    *) usage_error 'KIT_NO_PULL must be 1 (never pull: use the image streamed from the Mac) or 0 (pull as before).' ;;
+esac
 allowed() {   # $@: the options of COMMAND
     local option
     for option in "${GIVEN[@]}"; do
@@ -1786,7 +1795,10 @@ case $COMMAND in
             ''|0) ;;
             1) NO_PULL=1 ;;
             *) usage_error "OVB_NO_PULL must be 1 or 0: $OVB_NO_PULL" ;;
-        esac ;;
+        esac
+        [[ -z ${KIT_NO_PULL:-} || -z ${OVB_NO_PULL:-} || $KIT_NO_PULL == "$OVB_NO_PULL" ]] \
+            || usage_error "KIT_NO_PULL=$KIT_NO_PULL and OVB_NO_PULL=$OVB_NO_PULL do not agree: give one of them, or the same value to both"
+        [[ ${KIT_NO_PULL:-} != 1 ]] || NO_PULL=1 ;;
     status) allowed --dir ;;
     uninstall) allowed --purge --confirm --dir ;;
     role)

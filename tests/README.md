@@ -778,9 +778,10 @@ checks:
   pseudo-terminal the username and the hidden password go to `docker login
   --password-stdin` with a throwaway `DOCKER_CONFIG` that is gone afterwards, and
   the password is in no argument and no output;
-- `install --no-pull` (and `OVB_NO_PULL=1`, the same): with the pinned image on
-  the server it installs with no `docker pull`, no `docker login` and no
-  throwaway `DOCKER_CONFIG`, also when the registry wants a login; the check of
+- `install --no-pull` (and `OVB_NO_PULL=1` or `KIT_NO_PULL=1`, the same): with
+  the pinned image on the server it installs with no `docker pull`, no `docker
+  login` and no throwaway `DOCKER_CONFIG`, also when the registry wants a login;
+  the check of
   the image (`docker info` for the image store, `docker image inspect` of
   `REPOSITORY@DIGEST`) and one start of the image (`docker run --rm --pull never
   --network none`) hold the lock and come before `make_user.py`, which runs
@@ -796,7 +797,10 @@ checks:
   has no registry digest) and accepts an image that a pull brought (its ID is
   the digest of its config); `OVB_NO_PULL=0` or empty is the pull as before,
   another value is a usage error (exit 2), and `--no-pull` belongs to `install`
-  only; without `--no-pull` the image step is unchanged (no `docker info`);
+  only; `KIT_NO_PULL` works the same way (another value stops every command at
+  once, the option wins over `0`), and `KIT_NO_PULL` and `OVB_NO_PULL` with
+  two different values are a usage error before Docker; without `--no-pull` the
+  image step is unchanged (no `docker info`);
   `status` names the result of the same check in its `Local:` line; a release
   that does not become healthy under `--no-pull` brings the last good release
   back with `up --pull never` and no pull or login;
