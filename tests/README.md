@@ -626,6 +626,184 @@ creates a run folder there. It checks:
 - usage errors and a local step that fails (a file where a folder must go) exit 3,
   which monitoring reads as UNKNOWN, not WARNING or CRITICAL.
 
+`test_no_pull_apps.py` checks `--no-pull` (and `KIT_NO_PULL`) of `deploy-app.sh`,
+`iss-api.sh` and `rp-adapter.sh`, and the Mac helper `stream-image.sh`. The App
+tests run as root on Linux (the test image; `deploy-app.sh` needs Linux only)
+against the fake Docker CLI of each script's own tests, behind a fake that
+answers what `--no-pull` adds: `docker info` (the image store), `docker image
+inspect` of the digest reference `REPOSITORY@DIGEST`, and the start of a pinned
+image (`docker run --rm --pull never --network none --entrypoint sh IMAGE -c :`).
+In a no-pull test it refuses `docker pull`, `docker login` and `docker context`,
+and it records each call with its `DOCKER_CONFIG` and whether the deployment
+directory existed at that moment. It checks:
+- `NoPullCodeTest` (any host), read from the scripts: no `read`, no `docker pull`
+  or `docker login` command, no terminal and no throwaway `DOCKER_CONFIG` in the
+  no-pull step; `docker pull` and `docker login` only in `pull_image`, which
+  runs only without `--no-pull`; the check before the first change (`install -d`
+  of `iss-api.sh`; `discard_staged`, `put_back` and `install -d` of
+  `rp-adapter.sh`; `mkdir`, the lock and the temporary folder of
+  `deploy-app.sh`), and in it the start after the check of the digest; each of
+  the 24 Compose `run` and `up` calls of `deploy-app.sh` with `"${PULL_NEVER[@]}"`
+  (`--pull never` with `--no-pull`), not the text of `rollback.sh` and
+  `restore.txt`; `--pull never` on every `docker run` and Compose `up` of
+  `iss-api.sh` and `rp-adapter.sh`; the parsing of the option and the variable
+  (`--no-pull` makes the run non-interactive, before the export of
+  `KIT_NON_INTERACTIVE`); the pins of the three scripts are the ones of before
+  (an owner decision), each script names `PLATFORM=linux/amd64` and makes
+  `REPOSITORY`, `DIGEST`, `PINNED` and `STREAM_TAG` from its pin (a registry port
+  stays); the usage text names the option, the variable and the helper; each
+  `deploy-app.sh` step that a run prints goes through `DEPLOY_COMMAND` or
+  `init_again` (`sudo env KIT_NO_PULL=1 bash deploy-app.sh` in a no-pull run),
+  except the go-back step of a run without no-pull and `--mail`;
+- `NoPullOptionTest` (Linux): another value of `KIT_NO_PULL` stops each script at
+  once (exit 1, 3 for `rp-adapter.sh`) and makes nothing; `--no-pull` belongs to
+  `install` (`iss-api.sh`, `rp-adapter.sh`) and to a deployment (`deploy-app.sh`:
+  not with `--check-config`, `--release-queued-mail` or `--send-test-mail`);
+  `--mail` stops with `--no-pull` and with `KIT_NO_PULL=1`;
+- `iss-api.sh install --no-pull` and `rp-adapter.sh install --no-pull` with the
+  pinned image on the server: no pull, no login and no throwaway `DOCKER_CONFIG`,
+  the check (one `docker info`, the digest reference, one start; for the
+  adapter as its user 10001) before the directory exists, the message that the
+  image was not pulled (on stderr for `rp-adapter.sh`), Compose `up` and the
+  adapter runs with `--pull never`, and `status` names the result in its
+  `Local:` line; `KIT_NO_PULL=1` does the same as the option;
+- without the image: exit 1 (3) before any change, with the stream command for
+  the Mac (`bash scripts/stream-image.sh SSH_HOST SCRIPT` and the Docker
+  commands with the values of the pin and the host name); an installed setup
+  stays the same, byte for byte, also the files that an install stopped
+  half-way left for `put_back`; an image with another ID or registry digest, or
+  one that does not start, stops it the same way; on the classic image store a
+  missing image stops it with the classic message, and an image that a pull
+  brought (ID: the digest of its config) is used; an engine that does not answer
+  `docker info` stops it;
+- `KIT_NO_PULL=1` also covers `health`, `survey`, `export` and `run` of
+  `rp-adapter.sh`: without the image they stop before a run folder is made,
+  with it the adapter runs with `--pull never` and the standard output is the
+  adapter's only; without the variable a missing image is pulled as before;
+- `deploy-app.sh --no-pull` on both lines (the pinned client-stable-uiux images,
+  and the demo-uiux line of the fixture release of `test_deploy_app_uat.py`):
+  both images checked and started before the directory exists, no pull, and
+  every Compose `run` and `up` with `--pull never` right after the subcommand;
+  one image or both missing stops it before any change, with the lines of the
+  missing images only and `--line LINE` in the command for the Mac; another
+  digest, a start that fails, the classic store and an engine that does not
+  answer stop it; Compose older than 2.32.2 (no `run --pull`) stops it before
+  the image check; `--release-queued-mail` with `KIT_NO_PULL=1` checks no image
+  and runs with `--pull never`; without the option or with `KIT_NO_PULL=0` the
+  run pulls both images as before and passes no `--pull`;
+- `deploy-app.sh --init-db --check-config` with `KIT_NO_PULL=1` (as `service.sh
+  reset` runs it): one image or both missing, another digest, a start that
+  fails and Compose older than 2.32.2 stop it with the message of the
+  deployment and no "Configuration valid"; with both images it checks them (one
+  `docker info`, the digest references, the starts) and makes no directory;
+  without the variable, or with `0`, it calls no Docker, as before;
+- a `--replace` with `--no-pull` that fails after the other App stopped starts
+  that App again with `up --pull never`, and nothing pulls;
+- on a pseudo-terminal, `--no-pull` (and `KIT_NO_PULL=1`) asks nothing: a run
+  without settings stops and names `--config`.
+- `ServiceResetNoPullTest` (root on Linux): `service.sh reset` with
+  `KIT_NO_PULL=1` and the real `deploy-app.sh` next to it, on the fake Docker of
+  `test_service_app.py` behind the no-pull fake. One image of the line or both
+  missing stop the reset in its settings check, before the plan: no stop, no
+  wipe, no `down`, the identity and the attachments volume as they were, and
+  the message names the images. Another value of the variable stops it at once.
+  With both images the check passes and the reset stops at the confirmation:
+  no-pull never asks, also on a pseudo-terminal. With the `deploy-app.sh`
+  fixture, the container that empties the database starts with `--pull never`
+  right after `run`, and both `deploy-app.sh` runs get `--non-interactive` and
+  the variable; without it the reset is the one of before.
+- `DeployAppUpgradeNoPullTest` (Linux): a failed `--upgrade --no-pull` on the
+  fake Docker of `test_deploy_app_upgrade.py`: before the switch, the old App
+  starts again with `up --pull never`; after the switch, the step to finish the
+  upgrade is `sudo env KIT_NO_PULL=1 bash deploy-app.sh`, and the way back
+  (printed and in step 5 of `restore.txt`) says to stream the old images when
+  they are missing and to use a scripts folder with `--no-pull`; every Compose
+  `run` and `up` has `--pull never`, and nothing pulls. Without `--no-pull` the
+  steps are the ones of before.
+
+`StreamImageTest` runs `stream-image.sh` with `/bin/bash` (bash 3.2 on the Mac,
+no root) against a fake `docker` of the Mac, a fake `ssh` that refuses any call
+without the options of the helper and answers the commands of the server (its
+home folder is a folder of the test), a fake `rsync` that can break half-way
+(it keeps the part, as `--partial` does) or damage the copy, and a fake
+`shasum`. It checks:
+- each SOURCE streams the pins that its script holds, each pin once and in the
+  order of the command line: `iss-api.sh`, `rp-adapter.sh`, `oracle-view.sh`,
+  `deploy-app.sh` (the default line, and `--line demo-uiux`), and a list of them;
+  the next step of each kit script (for `deploy-app.sh` with the mark of owner
+  rule C1 before the command); the order of the checks (every image on the
+  Mac, then `sudo -n docker version` and `info` on the server, the check of the
+  digest reference, the load, the check again), `ssh -n` on each check, the
+  archive only on the standard input of the load; a server with the image gets
+  nothing, and a stream tag that names the pin is not tagged again;
+- `--image` with the rows 1 to 3 of the image table of the rebuild plan of .13:
+  their media type read from the registry before the server and the pulls,
+  pulled on the Mac with `--platform linux/amd64` (or the `--platform` given),
+  streamed, no next step; a pull that brings another ID reaches no server, and
+  without the login of the Mac the registry read stops it before the server and
+  the pull;
+- usage errors (exit 2) before any call: no SSH_HOST or SOURCE, an unknown
+  SOURCE, `--line` without the `deploy-app.sh` before it, twice or with another
+  line, an `--image` that is not a pin (no tag, no or a short digest, capitals,
+  shell syntax), `--platform` without `--image`, twice or not `linux/ARCH`, an
+  unknown option, an SSH_HOST with other characters, and another value of
+  `KIT_NON_INTERACTIVE`;
+- `--dry-run` (also with `--file`) pulls, tags, saves, copies and loads nothing
+  and makes no folder; it prints the steps (with `--file` also the two `df`
+  checks); a pin that is not on the Mac is read from the registry in the dry run
+  too: an index with another platform, another digest in the registry and
+  another media type stop it before the server;
+- `--file`: `docker save -o` to a 0700 folder of the Mac, `rsync --partial` with
+  the ssh options of the helper to `~/stream-image` (0700) on the server, the
+  same SHA-256 there, `docker load -i`, the check, and then no archive on either
+  side; after a break the archive and its SHA-256 stay on the Mac and the part
+  on the server, and the next run saves nothing again and copies over the part;
+  a kept archive whose SHA-256 changed is saved again; a copy with another
+  SHA-256 is removed on the server and loads nothing; a server without `rsync`
+  and `sha256sum` gets nothing; each server has its own folder of archives on
+  the Mac (`stream-image-archives/HOST_PORT`): a run to another server leaves
+  the kept archive of a broken run as it is, and that run resumes from it; a
+  folder that is a link stops `--file` before the server; before the save, the
+  free space of the Mac (a fake `df`) must hold the size of the image there, and
+  before the copy, the free space on the server must hold the archive and the
+  image, on one file system or on each of two, else it stops (the archive stays
+  on the Mac, nothing is copied); the archive that a broken `--file` run kept is
+  removed on both sides when the pin is on the server: by the stream without
+  `--file` that puts it there, and by a `--file` run that finds it there (a dry
+  run names it and removes nothing); a run without `--file` and with nothing
+  kept sends the server the checks only;
+- a stop after an image reached the server (a pull that brings another ID, a
+  `docker tag` that fails) names the image that it stops at ("... was not
+  streamed") and the images that the run streamed and checked; with nothing
+  streamed before, the message stays "Nothing was streamed." (or "Nothing was
+  copied.", and no part of the archive stays);
+- an index (the pins of `iss-api.sh`, `rp-adapter.sh` and the two Odoo images
+  of `deploy-app.sh` are one, as measured on 2026-11-10): its bytes from the
+  registry (`docker buildx imagetools inspect --raw`, the fake `shasum` of the
+  standard input) must have the pinned digest, and its entries (`--format`) must
+  be one image of the platform (any variant of it) and attestation manifests
+  (`unknown/unknown`, `attestation-manifest`); then `docker save` of the stream
+  tag, without `--platform`, and the server finds the pinned digest. Another
+  platform, two images of the platform, an `unknown/unknown` entry that is no
+  attestation manifest, a nested index, no entry, another digest in the
+  registry, a registry that wants a login and another media type stop it before
+  the server, also in a dry run; an index that the Mac pulls now is checked
+  before the server and the pull (the media type, the bytes and the entries
+  from the registry);
+- the classic store on the server streams nothing (and a pin that a pull
+  brought there counts as there), a stream tag of another image and the
+  classic store on the Mac stop it before the server; a refused
+  `sudo` or connection, a load that prints `Error unpacking` and a load that the
+  server does not find by its digest stop it with exit 1;
+- one run at a time for each server, whatever name `ssh -G` resolves to it;
+- read from the helper: no `read`, ssh only with `-T -a -x`, batch mode, no
+  forwarding and no local command (and `ssh -G` in batch mode), each command on
+  the server `sudo -n docker` or one of the five commands of `--file` (`df -Pk`
+  too; the Docker root folder only as a plain absolute path), `docker
+  save` only of the stream tag and never with `--platform`, the template of the
+  entries of an index, and no pin in the helper: it reads them from the kit
+  scripts.
+
 `test_oracle_view.py` runs `oracle-view.sh` against fakes and, in the test image,
 its role SQL on a real throwaway PostgreSQL 16 cluster. Every password, key and
 verifier in it is made up. On the App side, a fake Docker CLI records every call,
@@ -653,9 +831,10 @@ checks:
   pseudo-terminal the username and the hidden password go to `docker login
   --password-stdin` with a throwaway `DOCKER_CONFIG` that is gone afterwards, and
   the password is in no argument and no output;
-- `install --no-pull` (and `OVB_NO_PULL=1`, the same): with the pinned image on
-  the server it installs with no `docker pull`, no `docker login` and no
-  throwaway `DOCKER_CONFIG`, also when the registry wants a login; the check of
+- `install --no-pull` (and `OVB_NO_PULL=1` or `KIT_NO_PULL=1`, the same): with
+  the pinned image on the server it installs with no `docker pull`, no `docker
+  login` and no throwaway `DOCKER_CONFIG`, also when the registry wants a login;
+  the check of
   the image (`docker info` for the image store, `docker image inspect` of
   `REPOSITORY@DIGEST`) and one start of the image (`docker run --rm --pull never
   --network none`) hold the lock and come before `make_user.py`, which runs
@@ -671,7 +850,10 @@ checks:
   has no registry digest) and accepts an image that a pull brought (its ID is
   the digest of its config); `OVB_NO_PULL=0` or empty is the pull as before,
   another value is a usage error (exit 2), and `--no-pull` belongs to `install`
-  only; without `--no-pull` the image step is unchanged (no `docker info`);
+  only; `KIT_NO_PULL` works the same way (another value stops every command at
+  once, the option wins over `0`), and `KIT_NO_PULL` and `OVB_NO_PULL` with
+  two different values are a usage error before Docker; without `--no-pull` the
+  image step is unchanged (no `docker info`);
   `status` names the result of the same check in its `Local:` line; a release
   that does not become healthy under `--no-pull` brings the last good release
   back with `up --pull never` and no pull or login;
@@ -684,19 +866,25 @@ checks:
   `restore.txt` or `grey-oracle-sync-wayback` (owner rule C1: forbidden while
   the grey App runs on an Oracle DB);
 - `oracle-view-stream.sh` (`OracleViewStreamTest`, no root, run with
-  `/bin/bash`, which is bash 3.2 on the Mac; a fake `docker` of the Mac and a
-  fake `ssh` that refuses any call without the options of the helper, reads the
-  standard input like ssh unless `-n` is given, answers `ssh -G` and the
-  commands of the server): it gives the pin its stream tag
+  `/bin/bash`, which is bash 3.2 on the Mac; a fake `docker` of the Mac with
+  `docker buildx imagetools inspect` of an index, a fake `shasum` and a fake
+  `ssh` that refuses any call without the options of the helper, reads the
+  standard input like ssh unless `-n` is given, answers `ssh -G` in batch mode
+  and the commands of the server): the script runs `stream-image.sh` with the
+  source `oracle-view.sh`, so its messages, its lock (`stream-image-HOST_PORT`)
+  and its checks are those of `stream-image.sh`; it gives the pin its stream tag
   `REPOSITORY:sha256-HEX` and streams `docker save` of that tag to `sudo -n
   docker load`, then checks the server by the digest reference; each check on
   the server runs with `ssh -n` and reads nothing of the standard input, the
-  load reads the archive; a stream tag that already names the pin is not tagged
-  again, and one that names another image stops it before the server; an index
-  (not one manifest) stops it before the stream; it pulls on the Mac
-  (`--platform linux/amd64`) only when the pin is missing there, and a failed
-  pull (no login on the Mac) or a pull that brings another ID reaches no
-  server; a failed `docker info`, `docker tag` (with its message) or `docker
+  load reads the archive; its output names no command of owner rule C1; a stream
+  tag that already names the pin is not tagged again, and one that names another
+  image stops it before the server; an index of one linux/amd64 image and its
+  attestation manifest streams, an index with another platform stops it before
+  the stream (also when the pin is not on the Mac: the registry gives its media
+  type, bytes and entries before the pull); it pulls on the Mac (`--platform
+  linux/amd64`) only when the pin is missing there, after it read the media type
+  from the registry, and a registry read without the login of the Mac or a pull
+  that brings another ID reaches no server; a failed `docker info`, `docker tag` (with its message) or `docker
   save` on the Mac, a failed `docker info` or `docker load` on the server, and a
   load that prints `Error unpacking` stop it with exit 1; a server with the pin
   gets nothing; a load that the server does not find by the digest exits 1;
@@ -707,10 +895,9 @@ checks:
   message of the server; one run at a time for each server, whatever name
   `ssh -G` resolves to it (a lock directory of a live process, or one with no
   process number yet, stops it; one of an ended process is taken over; a file or
-  a link there stops it); usage errors exit 2; the script has no `read`, ssh
-  only with `-T -a -x`, batch mode, no forwarding and no local command, each
-  command on the server through `sudo -n docker`, and it reads the pin from
-  `oracle-view.sh`;
+  a link there stops it); usage errors exit 2; the script has no `read` and no
+  `ssh`, `docker`, `sudo` or `rsync` of its own, runs `stream-image.sh` with
+  `exec`, and holds no pin (`stream-image.sh` reads it from `oracle-view.sh`);
 - the container of `deploy/grey/compose.yml`: read-only root file system, tmpfs
   `/tmp`, the state volume, the users file bound read-only without
   `create_host_path`, `127.0.0.1:8797` only, no capabilities, `no-new-privileges`,
@@ -1490,6 +1677,57 @@ attachments must equal the originals, and the sessions folder must be gone
 Docker resources are named `perodua-upgrade-check-*` and are removed at the
 end.
 
+`check-no-pull-engines.sh` runs `--no-pull` of `deploy-app.sh`, `iss-api.sh` and
+`rp-adapter.sh`, and `stream-image.sh`, on real Docker engines. Run it on the Mac
+(Docker Desktop or OrbStack on the containerd image store), from the kit
+repository:
+
+```bash
+bash tests/check-no-pull-engines.sh
+```
+
+The servers are two throwaway `docker:29-dind` engines (linux/amd64), one on the
+containerd image store and one on the classic store. A throwaway `registry:2`
+on `localhost:5055` gives three tiny test images (the busybox of the dind image)
+real digest pins, and two index pins that `docker buildx build --provenance=mode=min
+--push` on the Mac makes from the same files: one of `linux/amd64` and its
+attestation manifest (the form of the kit pins of `iss-api.sh`, `rp-adapter.sh`
+and the Odoo images), and one of `linux/amd64`, `linux/arm64` and their
+attestations; the classic engine shares the network of the registry, so a
+pull there reaches it under the same name. Copies of the kit scripts pin these
+images, and `stream-image.sh` runs with an ssh that runs each command in the
+engine of the server (`docker exec`). It checks, on the real engines: a missing
+image stops each script before any change; `--dry-run`; the stream (the Mac
+pulls each pin once from the registry); the ID and the registry digest of each
+streamed image on the containerd store; the image step of each script after the
+stream (also `deploy-app.sh --line demo-uiux` and the `Local:` line of
+`iss-api.sh status`), and no image pull in the engine during these runs (`docker
+events`); a stream tag of another image on the Mac; the classic store (missing:
+refused by the script and by the helper; pulled: used); and `--file` with a link
+that breaks after 150000 bytes, then the resume from the kept archive and the
+part on the server, no archive left, and a start of the loaded image; the index
+pin of `linux/amd64` and its attestation streamed (its ID and registry digest
+on the server are the index digest, its descriptor is the index, it starts with
+`--pull never` as `x86_64`), `iss-api.sh install --no-pull` with that pin and no
+pull in the engine, and the index with `linux/arm64` refused from the registry
+(also in a dry run) before the pull, with nothing pulled or loaded. A `--file`
+run of the index pin that breaks keeps the archive on the Mac and the part on
+the server, and the stream without `--file` then removes both. `service.sh
+reset` with `KIT_NO_PULL=1`, on a Compose project of the test images (a
+container and its volume) and a kit copy whose web image is not on the server
+yet, stops in its settings check with the stream message: the container still
+runs, the volume and the identity stay. Once the image is there, the check
+passes and the reset stops at the confirmation, with no pull and no change. The
+second run of the script stops at the guard ("already exists") before it sets
+its cleanup, so it removes nothing of the first run. The test
+images have no Odoo, API or adapter, so a run that passes the image check fails
+later: each check reads only its image step. It prints PASS or FAIL for each
+check and exits 1 when one fails. Its Docker resources are named
+`kit-no-pull-check-*` and are removed at the end, with their volumes. It needs
+`docker:29-dind` and `registry:2` (on the Mac or from Docker Hub), `docker
+buildx` on the Mac (its build cache keeps the small layers of the index pins)
+and apk downloads in the engines.
+
 `test_uat_guard.py` runs `uat_guard.py` against temporary addon trees shaped
 like the pinned image (literal manifests, code shipped as bare `.pyc`): direct,
 transitive and `auto_install` dependencies on `perodua_demo_client`, XML IDs,
@@ -1745,7 +1983,8 @@ Static checks, on any host:
 - Each server script accepts `--non-interactive`, checks `KIT_NON_INTERACTIVE`
   (1, 0 or empty), and passes the mode on to a kit script that it starts.
   `oracle-view-stream.sh` runs on the Mac and asks nothing: it has neither, but
-  the checks of the reads and of the external commands cover it.
+  the checks of the reads and of the external commands cover it (it runs
+  `stream-image.sh`, which accepts both and never asks).
 - No external command can ask: no `curl --user`, no `openssl pkey` without
   `-passin`, no `docker login` without `--password-stdin`, no `apt-get install`
   without `-y` and `--force-confold`, no `sudo` without `-n`, no `ssh` without

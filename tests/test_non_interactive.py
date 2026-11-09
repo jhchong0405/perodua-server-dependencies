@@ -25,9 +25,10 @@ same platform gates: root on Linux for service.sh, iss-api.sh, rp-adapter.sh
 and https.sh, root on Ubuntu 24.04 for uninstall.sh. The tests remove
 KIT_NON_INTERACTIVE from their own environment first.
 
-oracle-view-stream.sh runs on the Mac and asks nothing (ssh in batch mode,
-sudo -n): the static checks of the reads and of the external commands cover it,
-but it has no --non-interactive and no read_terminal.
+oracle-view-stream.sh runs on the Mac and asks nothing: it runs stream-image.sh
+(ssh in batch mode, sudo -n), which takes the flag and the variable like a server
+script. The static checks of the reads and of the external commands cover both,
+but the wrapper has no --non-interactive and no read_terminal.
 """
 
 import json
