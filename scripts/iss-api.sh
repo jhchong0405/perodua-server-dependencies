@@ -49,7 +49,8 @@ install    Pulls the pinned image (iss-oracle-api-v1.0.0) from the private regis
            Without API_KEY_HASH the deployed key stays.
 status, start, stop and restart keep the settings. A stopped API stays stopped
            after a reboot until it is started again.
-logs       The container's log; --follow keeps reading.
+logs       The container's log; --follow keeps reading until it is stopped
+           (not in a non-interactive run).
 check      Runs the check again; --key asks for an API key to test a query with it,
            --key-file FILE takes it from the first line of a file instead.
 gen-key    Issues a new API key for the release that runs; the old key stops
@@ -78,7 +79,7 @@ read_terminal() {  # [-s hidden] [-k keep spaces] VAR PROMPT HOW
         if [[ $1 == -s ]]; then read_options+=(-s); else read_ifs=''; fi
         shift
     done
-    ((NON_INTERACTIVE == 0)) && [[ -t 0 ]] || die "$3"
+    { ((NON_INTERACTIVE == 0)) && [[ -t 0 ]]; } || die "$3"
     IFS=$read_ifs read -r "${read_options[@]}" -p "$2" "$1"
 }
 show_key() {
@@ -215,6 +216,15 @@ ask_settings() {
     ask HTTP_PORT 'API port on this server'
 }
 
+PASSWORD_WITHOUT_QUESTION='A first install without a terminal, or a non-interactive one, needs DB_PASSWORD_FILE in --config'
+password_ready() {   # before any change: the password that read_password will need can be had without a question
+    if [[ -n $DB_PASSWORD_FILE ]]; then
+        [[ $DB_PASSWORD_FILE == /* && -f $DB_PASSWORD_FILE && -r $DB_PASSWORD_FILE ]] \
+            || die 'DB_PASSWORD_FILE must be an absolute path to a readable file. Nothing was changed.'
+    elif [[ ! -f $DEPLOY_DIR/secrets/db_password ]] && { ((NON_INTERACTIVE)) || [[ ! -t 0 ]]; }; then
+        die "$PASSWORD_WITHOUT_QUESTION. Nothing was changed."
+    fi
+}
 read_password() {   # into the staged secrets/db_password, unless the deployed password stays
     local password=''
     if [[ -n $DB_PASSWORD_FILE ]]; then
@@ -225,10 +235,10 @@ read_password() {   # into the staged secrets/db_password, unless the deployed p
     elif [[ -f $DEPLOY_DIR/secrets/db_password ]]; then
         return 0
     elif ((NON_INTERACTIVE)) || [[ ! -t 0 ]]; then
-        die 'The first install without a terminal needs DB_PASSWORD_FILE in --config'
+        die "$PASSWORD_WITHOUT_QUESTION"
     else
         while [[ -z $password ]]; do
-            read_terminal -s -k password 'Database password (hidden): ' 'The first install without a terminal needs DB_PASSWORD_FILE in --config' \
+            read_terminal -s -k password 'Database password (hidden): ' "$PASSWORD_WITHOUT_QUESTION" \
                 || die 'Cancelled'
             printf '\n'
         done
@@ -509,6 +519,7 @@ cmd_install() {
     fi
     if is_ours; then same_project; fi
     check_settings
+    password_ready
     claim_project
     install -d -m 0700 "$DEPLOY_DIR"
     is_ours || printf 'PROJECT_NAME=%s\nDIR=%s\n' "$PROJECT_NAME" "$DEPLOY_DIR" > "$DEPLOY_DIR/$IDENTITY"
@@ -570,7 +581,7 @@ cmd_uninstall() {
         "$PROJECT_NAME" "$DEPLOY_DIR" "$( ((PURGE)) && printf ', and the image')"
     if [[ -z $CONFIRM ]]; then
         read_terminal CONFIRM "Type the project name ($PROJECT_NAME) to confirm: " \
-            "No terminal to confirm on: pass --confirm $PROJECT_NAME. Nothing was changed." || die 'Cancelled'
+            "A non-interactive run, or a run without a terminal, asks nothing: pass --confirm $PROJECT_NAME. Nothing was changed." || die 'Cancelled'
     fi
     [[ $CONFIRM == "$PROJECT_NAME" ]] || die 'Not confirmed. Nothing was changed.'
     claim_project
@@ -629,12 +640,19 @@ esac
 # Read as a regular file only: never a terminal, never a pipe that may not end.
 [[ -z $KEY_FILE ]] || [[ -f $KEY_FILE && -r $KEY_FILE ]] || die "--key-file must be a readable regular file: $KEY_FILE"
 [[ $FOLLOW == 0 || $COMMAND == logs ]] || die '--follow belongs to logs'
+# logs --follow reads until it is stopped: a run without a person must end by itself.
+((FOLLOW == 0 || NON_INTERACTIVE == 0)) || die 'logs --follow runs until it is stopped, and a non-interactive run must end: use logs without --follow'
 [[ $DEPLOY_DIR == /* ]] || die '--dir must be an absolute path'
 [[ ! -L ${DEPLOY_DIR%/} ]] || die '--dir must not be a symbolic link'
 DEPLOY_DIR=$(realpath -m -- "$DEPLOY_DIR")
 [[ $DEPLOY_DIR != / ]] || die '--dir cannot be /'
 STAGE=$DEPLOY_DIR/.stage
 [[ $EUID -eq 0 ]] || die 'Run with sudo or as root.'
+protected_file() {  # $1 a secret file, $2 its option: root-owned, not a symlink, no group/other permissions
+    [[ -f $1 && ! -L $1 && $(stat -c %u "$1") == 0 ]] || die "$2 must be a root-owned regular file, not a symlink: $1"
+    (( (8#$(stat -c %a "$1") & 8#077) == 0 )) || die "$2 must have no group/other permissions (use chmod 600): $1"
+}
+[[ -z $KEY_FILE ]] || protected_file "$KEY_FILE" --key-file
 if ! command -v docker > /dev/null || ! docker compose version > /dev/null 2>&1; then
     die 'Docker with the Compose plugin is required: sudo bash install-dependencies.sh --role app'
 fi

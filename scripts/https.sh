@@ -206,7 +206,7 @@ read_terminal() {  # [-s hidden] [-k keep spaces] VAR PROMPT HOW
         if [[ $1 == -s ]]; then read_options+=(-s); else read_ifs=''; fi
         shift
     done
-    ((NON_INTERACTIVE == 0)) && [[ -t 0 ]] || die "$3"
+    { ((NON_INTERACTIVE == 0)) && [[ -t 0 ]]; } || die "$3"
     IFS=$read_ifs read -r "${read_options[@]}" -p "$2" "$1"
 }
 
@@ -732,16 +732,29 @@ cmd_csr() {
 unencrypted_key() {   # $1 a private key, written unencrypted to $2; openssl itself never asks
     local pass=''
     if [[ -n $KEY_PASS_FILE ]]; then
-        openssl pkey -in "$1" -passin "file:$KEY_PASS_FILE" -out "$2"
+        # The first line, read here: openssl -passin file: keeps the carriage return
+        # of a file saved on Windows. The pass phrase goes to openssl on its stdin.
+        IFS= read -r pass < "$KEY_PASS_FILE" || [[ -n $pass ]] || die "--key-pass-file $KEY_PASS_FILE holds no pass phrase on its first line"
+        pass=${pass%$'\r'}
+        [[ -n $pass ]] || die "--key-pass-file $KEY_PASS_FILE holds no pass phrase on its first line"
+        printf '%s\n' "$pass" | openssl pkey -in "$1" -passin stdin -out "$2"
         return
     fi
     openssl pkey -in "$1" -passin pass: -out "$2" 2> /dev/null && return 0
-    # An encrypted key: its pass phrase from a person on the terminal (stdin),
-    # never from /dev/tty, where openssl would ask an agent's ssh -t too.
-    grep -Eqs -e '-----BEGIN ENCRYPTED PRIVATE KEY-----|Proc-Type: 4,ENCRYPTED' -- "$1" || return 1
+    # An encrypted key (PEM, or DER that has no header to show it): its pass phrase from a
+    # person on the terminal (stdin), never from /dev/tty, where openssl would ask an
+    # agent's ssh -t too. A plaintext PEM key that openssl cannot read needs no pass phrase.
+    if grep -Eqs -e '-----BEGIN ([A-Z0-9]+ )*PRIVATE KEY-----' -- "$1" \
+        && ! grep -Eqs -e '-----BEGIN ENCRYPTED PRIVATE KEY-----|Proc-Type: 4,ENCRYPTED' -- "$1"; then
+        return 1
+    fi
     ((NON_INTERACTIVE == 0)) && [[ -t 0 ]] || return 1
     read_terminal -s -k pass "Pass phrase of $1 (hidden): " '--key-pass-file FILE gives the pass phrase' || return 1
     printf '\n' >&2
+    if [[ -z $pass ]]; then
+        printf 'An empty pass phrase was typed: openssl did not run.\n' >&2
+        return 1
+    fi
     printf '%s\n' "$pass" | openssl pkey -in "$1" -passin stdin -out "$2"
 }
 
@@ -2217,7 +2230,7 @@ cmd_uninstall() {
         "$( ((PURGE)) && printf ', and deletes the key, certificate, request and routes in %s%s' "$STATE_DIR" \
             "$([[ ! -d $STATE_DIR/letsencrypt ]] || printf ", and the Let's Encrypt accounts and certificates")")"
     if [[ -z $CONFIRM ]]; then
-        read_terminal CONFIRM 'Type yes to confirm: ' 'No terminal to confirm on: pass --confirm yes. Nothing was changed.' || die 'Cancelled'
+        read_terminal CONFIRM 'Type yes to confirm: ' 'A non-interactive run, or a run without a terminal, asks nothing: pass --confirm yes. Nothing was changed.' || die 'Cancelled'
     fi
     [[ $CONFIRM == yes ]] || die 'Not confirmed. Nothing was changed.'
     if [[ -f $NGINX_CONF ]]; then
@@ -2319,6 +2332,11 @@ case ${KIT_NON_INTERACTIVE:-} in
 esac
 ((NON_INTERACTIVE == 0)) || export KIT_NON_INTERACTIVE=1
 [[ $EUID -eq 0 ]] || die 'Run with sudo or as root.'
+protected_file() {  # $1 a secret file, $2 its option: root-owned, not a symlink, no group/other permissions
+    [[ -f $1 && ! -L $1 && $(stat -c %u "$1") == 0 ]] || die "$2 must be a root-owned regular file, not a symlink: $1"
+    (( (8#$(stat -c %a "$1") & 8#077) == 0 )) || die "$2 must have no group/other permissions (use chmod 600): $1"
+}
+[[ -z $KEY_PASS_FILE ]] || protected_file "$KEY_PASS_FILE" --key-pass-file
 command -v openssl > /dev/null || die 'openssl is required'
 TEMP_DIR=$(mktemp -d)
 
