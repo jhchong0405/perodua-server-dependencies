@@ -638,8 +638,9 @@ checks:
   `sha256` digest, the release name from its tag; `install` pulls exactly it
   (once), `compose.yml` names it with `pull_policy: never` and `up` never pulls;
   the usage text and every `oracle-view:grey-v...` tag of the README name that
-  release; the pin is exactly `grey-v1.0.4@sha256:cf9a9170...` and neither the
-  script nor the README names `grey-v1.0.1`, `8e82b47f`, `a5b48111` or `ed104afa`
+  release; the pin is exactly `grey-v1.0.5@sha256:9d3883e8...` and neither the
+  script nor the README names `grey-v1.0.1`, `8e82b47f`, `a5b48111`, `ed104afa`
+  or `cf9a9170`
   (`OracleViewDocsTest`,
   which needs no root, also checks the README sentences of the tests below and
   that only the lines `RP_DATABASE=perodua_oracle2` and
@@ -759,8 +760,12 @@ standard input and the user. It checks:
   role; with the hint for the membership, and only then), a right on another
   database (with the way to remove it, and the `REASSIGN OWNED BY` that keeps
   the objects of the role there), a `FAIL` line of `ovb_stage` (with the hint
-  for the schema, and only then) or a short answer (12, 14, 15, 16 or 17 lines,
-  not 18) stops before the `pg_hba.conf` check; the check SQL reads each direct
+  for the schema, and only then), a `FAIL` line of `temp_file_limit=8GB` or a
+  short answer (12, 14, 15, 16, 17 or 18 lines, also the 18 lines without the
+  line of `temp_file_limit`; not 19) stops before the `pg_hba.conf` check; the
+  role SQL sets `temp_file_limit = '8GB'` beside `statement_timeout` and
+  `idle_in_transaction_session_timeout`, and the check SQL reads it in the
+  settings of the role (line 16); the check SQL reads each direct
   grant and the paths through other roles (`pg_has_role` with `SET` and
   `MEMBER WITH ADMIN OPTION`), and shows each control character of a line as
   `\uXXXX`; the three `INFO` lines (objects of the role
@@ -821,16 +826,21 @@ database `perodua_oracle2` (a table and a view) and the old database
 `perodua_oracle` (a table), both without the rights of `PUBLIC` as `deploy-db.sh`
 makes them, and the role `oracle_view_ro` of an earlier bundle with rights in
 both. `role` sets exactly the verifier of the file, drops `oracle_view_ro`, and
-keeps the verifier out of the server log and the output (15 `OK` lines, and the
+keeps the verifier out of the server log and the output (16 `OK` lines, and the
 `INFO` lines: no object outside `ovb_stage`, and `perodua_oracle` as the other
 database of `odoo`). As the tool signs in (TCP, the made-up password), the
 role reads, is read-only by default, writes in a `READ WRITE` transaction (also
 in a table that the owner makes later), and with the rights of `odoo` can
 `TRUNCATE`, `ALTER` and `CREATE` (rolled back), but cannot `SET ROLE odoo`.
+A session of the role reads `temp_file_limit` = `8GB`, and `SET` or `SET
+LOCAL temp_file_limit = '-1'` fails with `permission denied to set parameter`
+(a superuser setting). Without the setting of the role (`RESET`) or with
+`4GB`, `role --check` shows `FAIL temporary files of a session up to 8GB
+(temp_file_limit=8GB)` and exits 1; `role` sets `8GB` again.
 The server also logs by sampling (`log_min_duration_sample = 0`,
 `log_statement_sample_rate = 1`, `log_transaction_sample_rate = 1`), and the
 verifier stays out of that log too. Without `DELETE` on one table, `role --check`
-shows `FAIL` for INSERT, UPDATE and DELETE (14 `OK` lines) and exits 1: each
+shows `FAIL` for INSERT, UPDATE and DELETE (15 `OK` lines) and exits 1: each
 right is checked alone. The membership in `odoo` gives every right on a table of
 `odoo`, so for this check the table has an unrelated owner (and `TRUNCATE` of
 the role on it, so that only that line fails); then `odoo` owns it again, with
@@ -874,7 +884,7 @@ role itself, it revokes the membership for that check:
   `INFO` line of the other databases of `odoo` (the tool reads it through the
   membership), and without the membership the tool cannot connect there and
   still reads `perodua_oracle2` (its own `CONNECT` and `TEMPORARY`); with the
-  printed line the run ends with exit 0 and 15 `OK` lines; a later grant in
+  printed line the run ends with exit 0 and 16 `OK` lines; a later grant in
   another database (`postgres`) gives the
   `FAIL` line with that name and exit 1 in `role --check`, and the hint prints
   the safe form `BEGIN; DROP OWNED BY oracle_view_rp; GRANT CONNECT, TEMPORARY
@@ -900,14 +910,14 @@ role itself, it revokes the membership for that check:
 - `perodua_oracle` without connections (`ALLOW_CONNECTIONS false`, and
   `datconnlimit = -2`, a database half dropped): with rights of the role in it,
   `role` skips the step and check 12 gives the `FAIL` line with
-  `perodua_oracle` (exit 1); without rights there, `role` gives 15 `OK` lines
+  `perodua_oracle` (exit 1); without rights there, `role` gives 16 `OK` lines
   and `drop-role` succeeds;
 - a grant on a third database (`GRANT CONNECT ON DATABASE made_up_third`, only
   in the ACL of that database): `role --check` gives the `FAIL` line of check
   12 with `made_up_third` and exit 1; the printed safe form, run in that
   database, removes the grant, the tool still reads `perodua_oracle2`, and the
   next `role --check` exits 0;
-- `perodua_oracle` renamed away: `role` skips the step (exit 0, 15 `OK` lines,
+- `perodua_oracle` renamed away: `role` skips the step (exit 0, 16 `OK` lines,
   `oracle_view_ro` dropped) and `drop-role` succeeds;
 - `drop-role` with rights of `oracle_view_rp` and `oracle_view_ro` in both
   databases drops both roles and keeps the rows;
@@ -928,7 +938,7 @@ The staging schema `ovb_stage` of Copy to RP, on the same cluster:
   index in `ovb_stage`; with the rights of `odoo`, `CREATE TABLE` in `public`
   (also without a schema name), `TRUNCATE` of an Odoo table, `CREATE SCHEMA`
   and `ALTER TABLE` of an Odoo table succeed (rolled back); the Odoo role
-  cannot read the staging table; `role --check` exits 0 with 15 `OK` lines and
+  cannot read the staging table; `role --check` exits 0 with 16 `OK` lines and
   lists the table with its size and owner;
 - a function of the role in `public` gives the `INFO` line `owns 1 objects
   outside the schema ovb_stage` with its name, and `role --check` exits 0;
@@ -944,7 +954,7 @@ The staging schema `ovb_stage` of Copy to RP, on the same cluster:
   table and the materialized view, and the table in `public` keeps its row;
 - a schema `ovb_stage` of the Odoo role, with a table, made before the role:
   `role` gives no right there and exits 1 with the `FAIL` line `owns the schema
-  ovb_stage` (with the owner `odoo`), 14 `OK` lines (`USAGE and CREATE` there
+  ovb_stage` (with the owner `odoo`), 15 `OK` lines (`USAGE and CREATE` there
   come through the membership in `odoo`) and the hint; with those rights the
   tool makes a staging table there; `drop-role` lists it and stops without
   `--drop-staging`; with it, it drops only that table and the role, and leaves
@@ -1003,7 +1013,7 @@ same cluster:
   rows stay and the role has its `LOGIN` again. Without that view, `drop-role`
   drops the 6 staging tables of the role and keeps the table of `odoo`;
 - a table of the tool in `public` with a line end and `OK   forged` in its
-  name: `role --check` exits 0 with 15 `OK` lines and names it in the `INFO`
+  name: `role --check` exits 0 with 16 `OK` lines and names it in the `INFO`
   line as `\u000a`, with no forged line.
 
 `StatementStatsOnPostgresTest` starts a second cluster (port 55433) with

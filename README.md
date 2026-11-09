@@ -2109,7 +2109,7 @@ The Oracle Field Browser is a web tool for the integration work. It shows the
 Oracle EBS objects, the RP database (`perodua_oracle2` on the DB server, the
 database of the grey App: owner decision of 2026-11-07) and the RP-to-Oracle
 mapping, and it has a SQL console. `oracle-view.sh` runs the pinned
-image `perodua-deploy.novutal.com/oracle-view:grey-v1.0.4` with Docker Compose on
+image `perodua-deploy.novutal.com/oracle-view:grey-v1.0.5` with Docker Compose on
 the App server, and on the DB server it makes the role that the tool signs in
 with. The tool is at `https://stgiss.perodua.com.my/dev/oracle-view/` through a
 route of [https.sh](#https). Every page and every API call needs a login.
@@ -2119,7 +2119,7 @@ route of [https.sh](#https). Every page and every API call needs a login.
 | Container `oracle-view` on `127.0.0.1:8797` only, run from `/opt/perodua-oracle-view` | App server |
 | Route `stgiss.perodua.com.my /dev/oracle-view/ 8797 strip,http` | App server, `/etc/perodua-https/routes.conf` |
 | Role `oracle_view_rp` on the database `perodua_oracle2`: read and write on the tables, read-only by default, every right of the owner of the database (DDL, `TRUNCATE`, `CREATE`), and the schema `ovb_stage` for the staging tables of Copy to RP | DB server (PostgreSQL 16) |
-| Image `perodua-deploy.novutal.com/oracle-view:grey-v1.0.4`, pulled by digest | Private registry |
+| Image `perodua-deploy.novutal.com/oracle-view:grey-v1.0.5`, pulled by digest | Private registry |
 
 The Code section of the tool shows the mapping that the RP code writes. The
 tool reads it from the RP database: `perodua_master_feed` stores it in the
@@ -2135,6 +2135,17 @@ no workspace: `https://stgissrp.perodua.com.my/dev/app/` for RESOURCES PLANNING
 (MASTER), (FORECAST) and (OPERATION), SYSTEM GENERATION and REPORTING,
 `https://stgisscp.perodua.com.my/dev/app/` for CUSTOMER PORTAL and
 `https://stgisssp.perodua.com.my/dev/app/` for SUPPLIER PORTAL.
+
+"Import file" in the SQL console (from `grey-v1.0.5`) imports one `.sql` or
+`.csv` file of at most 128 MB into an RP target, in Write mode, for the roles
+`editor` and `admin`. The import runs in one transaction: when one statement
+fails, PostgreSQL rolls back all of it. A rollback does not undo sequence values
+(`nextval`, `setval`) and writes outside the transaction (`dblink`, a function
+that commits on its own). The import has the rights of the role, so one file can
+change or drop every Odoo table. Its temporary files stay under the
+`temp_file_limit` of the role (8GB, below); the import shows that limit and warns
+when it is `-1` (no limit). The steps and all the limits are in the oracle-view
+README, section "Import a file".
 
 The image holds the Oracle settings file and the password of the role
 `oracle_view_rp` (owner decision of 2026-11-06). This repository holds no secret of
@@ -2172,8 +2183,11 @@ Do the steps in this order.
    DELETE` on all tables and views, `SELECT, USAGE, UPDATE` on all sequences, the
    same rights on new tables and sequences, `default_transaction_read_only = on`
    (the pages stay read-only; a Write run of the SQL console turns it off for its
-   own transaction), `statement_timeout = 30s` and
-   `idle_in_transaction_session_timeout = 60s`. It also gets the schema
+   own transaction), `statement_timeout = 30s`,
+   `idle_in_transaction_session_timeout = 60s` and `temp_file_limit = 8GB` (the
+   temporary files of one session, for example a large file import: owner choice
+   of 2026-11-09, when the DB server had 85 GB free of 99 GB). `temp_file_limit` is a
+   superuser setting, so a session of the role cannot change it. It also gets the schema
    `ovb_stage` for the staging tables of Copy to RP (see
    [The staging schema ovb_stage](#the-staging-schema-ovb_stage)).
 
@@ -2258,7 +2272,7 @@ Do the steps in this order.
 
    | Part | Expected |
    | --- | --- |
-   | `== Rights of oracle_view_rp` | Each line starts with `OK`, also `TRUNCATE on every table of public`, `CREATE in public`, `member of odoo, the owner of perodua_oracle2, with INHERIT TRUE, SET FALSE, ADMIN FALSE`, `no right on a database other than perodua_oracle2` (a right of the role itself) and the three lines of the schema `ovb_stage`. A `FAIL` line stops the command. The line of the membership also fails when the role can `SET ROLE` to the owner, or has `ADMIN` on it, through another role. The three last lines start with `INFO` and never stop it: `owns N objects outside the schema ovb_stage` (what the SQL console made, for example a table in `public`), `other databases of odoo, with its rights through the membership` and `other roles of which it is a member (also through odoo)` (`none`, or their names). A line end or another control character in a name shows as `\uXXXX` (for example `\u000a`), so each check stays on one line. |
+   | `== Rights of oracle_view_rp` | Each line starts with `OK`, also `TRUNCATE on every table of public`, `CREATE in public`, `member of odoo, the owner of perodua_oracle2, with INHERIT TRUE, SET FALSE, ADMIN FALSE`, `no right on a database other than perodua_oracle2` (a right of the role itself), the three lines of the schema `ovb_stage` and `temporary files of a session up to 8GB (temp_file_limit=8GB)`. A `FAIL` line stops the command. The line of the membership also fails when the role can `SET ROLE` to the owner, or has `ADMIN` on it, through another role. The three last lines start with `INFO` and never stop it: `owns N objects outside the schema ovb_stage` (what the SQL console made, for example a table in `public`), `other databases of odoo, with its rights through the membership` and `other roles of which it is a member (also through odoo)` (`none`, or their names). A line end or another control character in a name shows as `\uXXXX` (for example `\u000a`), so each check stays on one line. |
    | `== Staging tables of Copy to RP` | The tables and materialized views in `ovb_stage`, each with its size on disk, and the total. `none` on a new role. The list changes nothing. |
    | `== TLS: SHOW ssl` | `ssl = on`. With `off`, see [TLS to the RP database](#tls-to-the-rp-database). |
    | `== Extensions that can write in a Read run` | `none`. With `dblink` or `postgres_fdw` in `perodua_oracle2`, a Read run of the SQL console can write through them. The command changes no right: that is an owner decision. |
@@ -2474,7 +2488,7 @@ When asked, enter the registry username and password for
   container again: the tool reads the users file at its start only;
 - checks `http://127.0.0.1:8797/healthz` on the server.
 
-Wait for `Installed: oracle-view-grey-v1.0.4`. Then read the first passwords:
+Wait for `Installed: oracle-view-grey-v1.0.5`. Then read the first passwords:
 
 ```bash
 sudo cat /opt/perodua-oracle-view/initial-login.txt
@@ -2681,7 +2695,7 @@ Do the steps in this order.
 | Container (App server) | `sudo bash oracle-view.sh uninstall`, then type `oracle-view`. It removes the container, `initial-login.txt` and the files `install` made. The state volume, the users file and the image stay; `install` uses them again. `--purge` also removes the state volume (the mapping edits and the SQL audit), the users file and every local image of `perodua-deploy.novutal.com/oracle-view`. It lists what it removed. When a step fails, it also lists what it did not remove, keeps the deployment and exits 1: correct the cause, then run it again |
 | Role (DB server) | `sudo bash oracle-view.sh drop-role`, then type `oracle_view_rp`. It ends the sessions of the role, removes its rights in `perodua_oracle2` and in `perodua_oracle` (when it exists, so that an old grant cannot make the drop fail) and drops it (also `oracle_view_ro` of an earlier bundle). It skips a `perodua_oracle` that does not accept connections. It also drops the schema `ovb_stage` with the staging tables of Copy to RP and their data: when `ovb_stage` holds tables, it lists them and stops before any change; run it again with `--drop-staging` when they can go. It also stops when an object outside `ovb_stage` depends on an object in it ([The staging schema ovb_stage](#the-staging-schema-ovb_stage)). The other objects of the role in `perodua_oracle2` and `perodua_oracle` (what the SQL console made, for example a table in `public`) stay: it gives them to the owner of that database and names them. It stops before any change when `oracle_view_rp` owns one of these databases: a different owner is needed first. Rows that the SQL console changed stay changed |
 | `pg_hba.conf` line (DB server), if you added one | `sudo cp -p HBA_FILE.before-oracle-view HBA_FILE`, then `sudo -u postgres psql -X -d postgres -c 'SELECT pg_reload_conf()'` |
-| Registry | Delete the tag `oracle-view:grey-v1.0.4` and the tags of earlier releases when nobody needs them: each image holds the secrets |
+| Registry | Delete the tag `oracle-view:grey-v1.0.5` and the tags of earlier releases when nobody needs them: each image holds the secrets |
 
 `uninstall` and `drop-role` without a terminal need `--confirm oracle-view` and
 `--confirm oracle_view_rp`. `--drop-staging` is not a confirmation: `drop-role`

@@ -950,6 +950,8 @@ RIGHTS_OK = ["OK|the password is a SCRAM-SHA-256 verifier", "OK|LOGIN, CONNECTIO
              # The schema of the staging tables of Copy to RP (copy design, section 4.3).
              "OK|owns the schema ovb_stage", "OK|USAGE and CREATE on the schema ovb_stage",
              "OK|no right of PUBLIC on the schema ovb_stage",
+             # The limit of the temporary files of one session (owner choice of 2026-11-09).
+             "OK|temporary files of a session up to 8GB (temp_file_limit=8GB)",
              # Information only: never a stop.
              "INFO|owns 0 objects outside the schema ovb_stage",
              "INFO|other databases of odoo, with its rights through the membership: none",
@@ -1132,6 +1134,8 @@ class OracleViewRoleTest(unittest.TestCase):
                      "ALTER ROLE oracle_view_rp SET default_transaction_read_only = on;",
                      "ALTER ROLE oracle_view_rp SET statement_timeout = '30s';",
                      "ALTER ROLE oracle_view_rp SET idle_in_transaction_session_timeout = '60s';",
+                     # A superuser setting: a session of the role cannot lift it (owner choice of 2026-11-09).
+                     "ALTER ROLE oracle_view_rp SET temp_file_limit = '8GB';",
                      'GRANT CONNECT, TEMPORARY ON DATABASE :"ovb_db" TO oracle_view_rp;',
                      "\\connect :ovb_db\nGRANT USAGE ON SCHEMA public TO oracle_view_rp;",
                      "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO oracle_view_rp;",
@@ -1203,9 +1207,14 @@ class OracleViewRoleTest(unittest.TestCase):
                                  stage_hint),
                                 (RIGHTS_OK[:14] + ["FAIL|no right of PUBLIC on the schema ovb_stage"] + RIGHTS_OK[15:],
                                  stage_hint),
+                                (RIGHTS_OK[:15] + ["FAIL|temporary files of a session up to 8GB (temp_file_limit=8GB)"]
+                                 + RIGHTS_OK[16:], "does not have the rights above"),
                                 (RIGHTS_OK[:12], "unexpected answer"),  # the 12 checks of the releases before ovb_stage
                                 (RIGHTS_OK[:15], "unexpected answer"),  # the 15 checks of the releases before 2026-11-09
                                 (RIGHTS_OK[:16], "unexpected answer"), (RIGHTS_OK[:17], "unexpected answer"),
+                                (RIGHTS_OK[:18], "unexpected answer"),
+                                # the 18 lines of the releases before temp_file_limit
+                                (RIGHTS_OK[:15] + RIGHTS_OK[16:], "unexpected answer"),
                                 (RIGHTS_OK[4:], "unexpected answer")):
             with self.subTest(rights=rights):
                 self.set_state(rights=rights)
@@ -1221,7 +1230,7 @@ class OracleViewRoleTest(unittest.TestCase):
         info = ["INFO|owns 2 objects outside the schema ovb_stage (schema made_up_more, table public.mine)",
                 "INFO|other databases of odoo, with its rights through the membership: perodua_oracle",
                 "INFO|other roles of which it is a member (also through odoo): pg_read_all_data"]
-        self.set_state(rights=RIGHTS_OK[:15] + info)
+        self.set_state(rights=RIGHTS_OK[:16] + info)
         result = self.role()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("INFO owns 2 objects outside the schema ovb_stage (schema made_up_more, table public.mine)\n"
@@ -1244,7 +1253,11 @@ class OracleViewRoleTest(unittest.TestCase):
                      "coalesce(bool_or(m.inherit_option) AND NOT bool_or(m.set_option) AND NOT bool_or(m.admin_option), "
                      "false)", "LEFT JOIN pg_auth_members m ON m.roleid = d.datdba",
                      "AND pg_has_role('oracle_view_rp', x.oid, 'MEMBER')",
-                     "SELECT CASE WHEN n IN (16, 17, 18) THEN 'INFO' WHEN ok THEN 'OK' ELSE 'FAIL' END || '|' || shown",
+                     "SELECT CASE WHEN n IN (17, 18, 19) THEN 'INFO' WHEN ok THEN 'OK' ELSE 'FAIL' END || '|' || shown",
+                     # The limit of the temporary files: in the settings of the role, as role sets it.
+                     "SELECT 16, coalesce('temp_file_limit=8GB' = ANY (rolconfig), false),\n"
+                     "         'temporary files of a session up to 8GB (temp_file_limit=8GB)'\n"
+                     "    FROM pg_roles WHERE rolname = 'oracle_view_rp'",
                      # A control character in a name (a line end, for example) shows as \uXXXX: one line per check.
                      "CASE WHEN ch ~ '[[:cntrl:]]' THEN '\\u' || lpad(to_hex(ascii(ch)), 4, '0') ELSE ch END",
                      "FROM unnest(string_to_array(what, NULL)) WITH ORDINALITY AS c (ch, i)"):
@@ -1792,7 +1805,7 @@ class RoleOnPostgresTest(PostgresCluster, unittest.TestCase):
         # The ::1 line above is IPv6: it cannot match the App server, so this is NOT OK, not CHECK BY HAND.
         self.assertEqual(result.returncode, 3, output)
         self.assertIn("RESULT: NOT OK", result.stdout)
-        self.assertEqual(len(re.findall(r"^OK   ", result.stdout, re.M)), 15, result.stdout)
+        self.assertEqual(len(re.findall(r"^OK   ", result.stdout, re.M)), 16, result.stdout)
         self.assertIn("OK   no right on a database other than perodua_oracle2\n", result.stdout)
         # The two INFO lines: the role owns nothing outside ovb_stage, and odoo also owns perodua_oracle.
         self.assertIn("INFO owns 0 objects outside the schema ovb_stage\n"
@@ -1819,7 +1832,7 @@ class RoleOnPostgresTest(PostgresCluster, unittest.TestCase):
         missing = self.run_script("role", "--check", "--app-ip", self.APP)
         self.assertEqual(missing.returncode, 1, missing.stdout + missing.stderr)
         self.assertIn("FAIL INSERT, UPDATE and DELETE on every table of public (1 without)\n", missing.stdout)
-        self.assertEqual(len(re.findall(r"^OK   ", missing.stdout, re.M)), 14, missing.stdout)
+        self.assertEqual(len(re.findall(r"^OK   ", missing.stdout, re.M)), 15, missing.stdout)
         self.assertIn("Nothing in pg_hba.conf was checked", missing.stderr)
         self.assertNotIn("RESULT:", missing.stdout)
         self.sql(RP_DB, "GRANT DELETE ON res_partner TO oracle_view_rp; REVOKE TRUNCATE ON res_partner FROM oracle_view_rp;"
@@ -1847,6 +1860,29 @@ class RoleOnPostgresTest(PostgresCluster, unittest.TestCase):
         denied = self.tool("SET ROLE odoo")
         self.assertNotEqual(denied.returncode, 0)
         self.assertIn("permission denied to set role", denied.stderr)
+        # The temporary files of one session (owner choice of 2026-11-09): 8GB, and a superuser setting, so a
+        # session of the role cannot lift it (the file import of the SQL console reads it).
+        self.assertEqual(self.tool("SELECT current_setting('temp_file_limit')").stdout.strip(), "8GB")
+        for query in ("SET temp_file_limit = '-1'", "BEGIN READ WRITE; SET LOCAL temp_file_limit = '-1'; ROLLBACK"):
+            with self.subTest(query=query):
+                lifted = self.tool(query)
+                self.assertNotEqual(lifted.returncode, 0)
+                self.assertIn('permission denied to set parameter "temp_file_limit"', lifted.stderr)
+        # Without the setting the check fails, and role sets it again.
+        self.sql("postgres", "ALTER ROLE oracle_view_rp RESET temp_file_limit")
+        self.assertEqual(self.tool("SHOW temp_file_limit").stdout.strip(), "-1")
+        no_limit = self.run_script("role", "--check", "--app-ip", self.APP)
+        self.assertEqual(no_limit.returncode, 1, no_limit.stdout + no_limit.stderr)
+        self.assertIn("FAIL temporary files of a session up to 8GB (temp_file_limit=8GB)\n", no_limit.stdout)
+        self.assertEqual(len(re.findall(r"^OK   ", no_limit.stdout, re.M)), 15, no_limit.stdout)
+        self.assertNotIn("RESULT:", no_limit.stdout)
+        self.sql("postgres", "ALTER ROLE oracle_view_rp SET temp_file_limit = '4GB'")  # another value fails too
+        other = self.run_script("role", "--check", "--app-ip", self.APP)
+        self.assertEqual(other.returncode, 1, other.stdout + other.stderr)
+        self.assertIn("FAIL temporary files of a session up to 8GB (temp_file_limit=8GB)\n", other.stdout)
+        again = self.make_role()
+        self.assertIn("OK   temporary files of a session up to 8GB (temp_file_limit=8GB)\n", again.stdout)
+        self.assertEqual(self.tool("SHOW temp_file_limit").stdout.strip(), "8GB")
         # The printed line, at the top of the host lines, lets the App server in.
         line = HBA_LINE.format(self.APP)
         self.assertIn(line, result.stdout)
@@ -1913,7 +1949,7 @@ class RoleOnPostgresTest(PostgresCluster, unittest.TestCase):
         self.assertIn("RESULT: OK", result.stdout)
         self.assertIn("The rights of oracle_view_rp in perodua_oracle, the database of the earlier releases", result.stdout)
         self.assertIn("OK   no right on a database other than perodua_oracle2\n", result.stdout)
-        self.assertEqual(len(re.findall(r"^OK   ", result.stdout, re.M)), 15, result.stdout)
+        self.assertEqual(len(re.findall(r"^OK   ", result.stdout, re.M)), 16, result.stdout)
         # The session there ended; no grant, default privilege or object of the role is left there.
         deadline = time.monotonic() + 10
         while session.poll() is None and time.monotonic() < deadline:
@@ -2089,7 +2125,7 @@ echo "exit $?" >> {log}
                     self.sql("postgres", refuse)
                     result = self.make_role()
                     self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
-                    self.assertEqual(len(re.findall(r"^OK   ", result.stdout, re.M)), 15, result.stdout)
+                    self.assertEqual(len(re.findall(r"^OK   ", result.stdout, re.M)), 16, result.stdout)
                     result = self.run_script("drop-role", "--confirm", "oracle_view_rp")
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                     self.assertIn("role oracle_view_rp dropped", result.stdout)
@@ -2136,7 +2172,7 @@ echo "exit $?" >> {log}
         result = self.make_role()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn("The rights of oracle_view_rp in perodua_oracle", result.stdout)
-        self.assertEqual(len(re.findall(r"^OK   ", result.stdout, re.M)), 15, result.stdout)
+        self.assertEqual(len(re.findall(r"^OK   ", result.stdout, re.M)), 16, result.stdout)
         self.assertEqual(self.sql("postgres", "SELECT count(*) FROM pg_roles WHERE rolname = 'oracle_view_ro'"), "0")
         self.assertEqual(self.tool("SELECT count(*) FROM res_partner").stdout.strip(), "1")
         result = self.run_script("drop-role", "--confirm", "oracle_view_rp")
@@ -2507,7 +2543,7 @@ echo "exit $?" >> {log}
 
     def test_a_name_with_a_line_end_cannot_change_the_lines_of_the_rights_check(self):
         # The SQL console can name a table with a line end. The rights check shows it as \u000a: one line per check,
-        # so the count of 18 lines holds, and the name cannot add a line that looks like an OK line.
+        # so the count of 19 lines holds, and the name cannot add a line that looks like an OK line.
         self.drop_old_ro()
         self.with_the_line()
         self.assertEqual(self.make_role().returncode, 0)
@@ -2520,7 +2556,7 @@ echo "exit $?" >> {log}
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('INFO owns 1 objects outside the schema ovb_stage (table public."made_up\\u000aOK   forged")\n',
                       result.stdout)
-        self.assertEqual(len(re.findall(r"^OK   ", result.stdout, re.M)), 15, result.stdout)
+        self.assertEqual(len(re.findall(r"^OK   ", result.stdout, re.M)), 16, result.stdout)
         self.assertNotIn("\nOK   forged", result.stdout)
 
     def test_the_objects_of_the_role_in_the_old_database_stay(self):
@@ -2571,7 +2607,7 @@ echo "exit $?" >> {log}
         result = self.make_role()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.addCleanup(self.run_script, "drop-role", "--confirm", "oracle_view_rp", "--drop-staging")
-        self.assertEqual(len(re.findall(r"^OK   ", result.stdout, re.M)), 15, result.stdout)
+        self.assertEqual(len(re.findall(r"^OK   ", result.stdout, re.M)), 16, result.stdout)
         for line in ("INFO owns 0 objects outside the schema ovb_stage\n",
                      "OK   owns the schema ovb_stage\n", "OK   USAGE and CREATE on the schema ovb_stage\n",
                      "OK   no right of PUBLIC on the schema ovb_stage\n", "OK   CREATE in public\n",
@@ -2607,7 +2643,7 @@ echo "exit $?" >> {log}
             self.sql(RP_DB, "SET ROLE odoo; SELECT count(*) FROM ovb_stage.copy_parts")
         result = self.run_script("role", "--check", "--app-ip", self.APP)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(len(re.findall(r"^OK   ", result.stdout, re.M)), 15, result.stdout)
+        self.assertEqual(len(re.findall(r"^OK   ", result.stdout, re.M)), 16, result.stdout)
         self.assertRegex(result.stdout, r"\n1 tables, [0-9]+ kB on disk:\n    table +size  owner\n"
                                         r"    copy_parts +[0-9]+ kB  oracle_view_rp\nTo free the disk")
         # An object of the role outside ovb_stage is information: role --check names it and does not stop.
@@ -2617,7 +2653,7 @@ echo "exit $?" >> {log}
         result = self.run_script("role", "--check", "--app-ip", self.APP)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("INFO owns 1 objects outside the schema ovb_stage (function public.made_up_f())\n", result.stdout)
-        self.assertEqual(len(re.findall(r"^OK   ", result.stdout, re.M)), 15, result.stdout)
+        self.assertEqual(len(re.findall(r"^OK   ", result.stdout, re.M)), 16, result.stdout)
         self.assertIn("RESULT: OK", result.stdout)
         self.sql(RP_DB, "DROP FUNCTION public.made_up_f()")
         # drop-role stops before any change while ovb_stage holds tables, and names the choice.
@@ -2704,7 +2740,7 @@ echo "exit $?" >> {log}
         self.assertIn("FAIL owns the schema ovb_stage (the owner of ovb_stage is odoo)\n", result.stdout)
         # No grant there, but odoo owns that schema: the role has its USAGE and CREATE through the membership.
         self.assertIn("OK   USAGE and CREATE on the schema ovb_stage\n", result.stdout)
-        self.assertEqual(len(re.findall(r"^OK   ", result.stdout, re.M)), 14, result.stdout)
+        self.assertEqual(len(re.findall(r"^OK   ", result.stdout, re.M)), 15, result.stdout)
         self.assertIn("find out who made it before you change its owner or drop it", result.stderr)
         self.assertNotIn("RESULT:", result.stdout)
         self.assertEqual(self.sql(RP_DB, "SELECT pg_get_userbyid(nspowner) || ' ' || coalesce(nspacl::text, 'default')"
@@ -2882,11 +2918,11 @@ class OracleViewDocsTest(unittest.TestCase):
     """The README and the usage text name the pinned release and the steps that the script expects."""
 
     def test_the_pin_is_the_release_of_2026_11_09(self):
-        # grey-v1.0.4: linux/amd64, label org.opencontainers.image.version=grey-v1.0.4, revision 00df86f.
-        self.assertEqual(IMAGE, REPOSITORY + ":grey-v1.0.4@sha256:"
-                         "cf9a9170fb5642883b32386583501093f17ad77fefaaf592462849c0727818f1")
-        self.assertEqual(RELEASE, "oracle-view-grey-v1.0.4")
-        for old in ("grey-v1.0.1", "8e82b47f", "a5b48111", "ed104afa"):
+        # grey-v1.0.5: linux/amd64, label org.opencontainers.image.version=grey-v1.0.5, revision b4564e1.
+        self.assertEqual(IMAGE, REPOSITORY + ":grey-v1.0.5@sha256:"
+                         "9d3883e827e77b759a7796ea10fc68daa568cbd361b480d231ec4603a9660946")
+        self.assertEqual(RELEASE, "oracle-view-grey-v1.0.5")
+        for old in ("grey-v1.0.1", "8e82b47f", "a5b48111", "ed104afa", "cf9a9170"):
             self.assertNotIn(old, TEXT)
             self.assertNotIn(old, README)
 

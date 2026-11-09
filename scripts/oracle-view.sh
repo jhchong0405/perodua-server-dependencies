@@ -12,9 +12,9 @@ umask 077
 unset PGPASSWORD PGPASSFILE PGHOST PGHOSTADDR PGPORT PGUSER PGDATABASE PGOPTIONS \
     PGSERVICE PGSERVICEFILE PGSSLMODE || true
 
-RELEASE=oracle-view-grey-v1.0.4
+RELEASE=oracle-view-grey-v1.0.5
 # Published to the private registry only: every account that can pull it can read the secrets in it.
-IMAGE=perodua-deploy.novutal.com/oracle-view:grey-v1.0.4@sha256:cf9a9170fb5642883b32386583501093f17ad77fefaaf592462849c0727818f1
+IMAGE=perodua-deploy.novutal.com/oracle-view:grey-v1.0.5@sha256:9d3883e827e77b759a7796ea10fc68daa568cbd361b480d231ec4603a9660946
 REGISTRY=${IMAGE%%/*}
 REPOSITORY=${IMAGE%%[:@]*}
 IMAGE_UID=10001           # the image's unprivileged user: it reads the users file
@@ -903,12 +903,16 @@ CREATE ROLE oracle_view_rp LOGIN PASSWORD :'ovb_verifier' CONNECTION LIMIT 10;
 -- DROP and TRUNCATE on the Odoo tables, CREATE in public and in new schemas), but it
 -- cannot SET ROLE to the owner, so what it makes is its own. No superuser and no other
 -- role attribute. A membership is for the whole server: the role has the same rights on
--- the other databases of that owner (line 17 of the rights check names them), and it
--- gets the memberships of that owner too (line 18).
+-- the other databases of that owner (line 18 of the rights check names them), and it
+-- gets the memberships of that owner too (line 19).
 ALTER ROLE oracle_view_rp NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
 ALTER ROLE oracle_view_rp SET default_transaction_read_only = on;
 ALTER ROLE oracle_view_rp SET statement_timeout = '30s';
 ALTER ROLE oracle_view_rp SET idle_in_transaction_session_timeout = '60s';
+-- The temporary files of one session (the file import of the SQL console: a sort, a RETURNING or a
+-- set-returning function can spill to the temporary disk of the server). temp_file_limit is a
+-- superuser setting: a session of the role cannot change it (owner choice of 2026-11-09: 8 GB).
+ALTER ROLE oracle_view_rp SET temp_file_limit = '8GB';
 GRANT CONNECT, TEMPORARY ON DATABASE :"ovb_db" TO oracle_view_rp;
 -- The owner is read again here: an owner that became a superuser after the check at the
 -- start gets no member (check 11 then fails). A later run grants with the same grantor,
@@ -958,12 +962,12 @@ SQL
 }
 
 # One line per right, "OK|what" or "FAIL|what", in the database RP_DATABASE, then lines
-# 16 to 18, "INFO|what": they inform and never fail. A name in "what" (an object, a
+# 17 to 19, "INFO|what": they inform and never fail. A name in "what" (an object, a
 # database or a role that the SQL console can make) may hold a line end or another control
 # character: it shows as \uXXXX, so that it cannot add a line or change the count.
 # has_table_privilege with a list is true when ANY of the rights is held: each right is checked alone.
 ROLE_CHECK_SQL=$(cat <<'SQL'
-SELECT CASE WHEN n IN (16, 17, 18) THEN 'INFO' WHEN ok THEN 'OK' ELSE 'FAIL' END || '|' || shown FROM (
+SELECT CASE WHEN n IN (17, 18, 19) THEN 'INFO' WHEN ok THEN 'OK' ELSE 'FAIL' END || '|' || shown FROM (
   SELECT 1 AS n, left(rolpassword, 14) = 'SCRAM-SHA-256$' AS ok, 'the password is a SCRAM-SHA-256 verifier' AS what
     FROM pg_authid WHERE rolname = 'oracle_view_rp'
   UNION ALL
@@ -1046,7 +1050,7 @@ SELECT CASE WHEN n IN (16, 17, 18) THEN 'INFO' WHEN ok THEN 'OK' ELSE 'FAIL' END
                       WHERE a.grantee = (SELECT oid FROM pg_roles WHERE rolname = 'oracle_view_rp')))
   UNION ALL
   -- The schema of the staging tables of Copy to RP: the role owns it. Another schema of the
-  -- role (the SQL console can make one) is in line 16.
+  -- role (the SQL console can make one) is in line 17.
   SELECT 13, coalesce(bool_or(n.nspowner = (SELECT oid FROM pg_roles WHERE rolname = 'oracle_view_rp')), false),
          'owns the schema ovb_stage'
          || CASE WHEN count(*) = 0 THEN ' (there is no schema ovb_stage)'
@@ -1063,13 +1067,18 @@ SELECT CASE WHEN n IN (16, 17, 18) THEN 'INFO' WHEN ok THEN 'OK' ELSE 'FAIL' END
                          FROM pg_namespace WHERE nspname = 'ovb_stage'), false),
          'no right of PUBLIC on the schema ovb_stage'
   UNION ALL
+  -- The limit of the temporary files of one session (owner choice of 2026-11-09: 8 GB).
+  SELECT 16, coalesce('temp_file_limit=8GB' = ANY (rolconfig), false),
+         'temporary files of a session up to 8GB (temp_file_limit=8GB)'
+    FROM pg_roles WHERE rolname = 'oracle_view_rp'
+  UNION ALL
   -- INFO: every object the role owns in this database (pg_shdepend: also functions, types
   -- and schemas), but the schema ovb_stage and what is in it: what the SQL console made
   -- with the rights of the owner, for example a table in public, and the temporary tables
   -- of open sessions. An index or a TOAST table has no entry: it belongs to its table. A
   -- default privilege and a user mapping are no object of the role (DROP OWNED BY removes
   -- them; REASSIGN OWNED BY of drop-role does not move them).
-  SELECT 16, NULL, 'owns ' || count(*) || ' objects outside the schema ovb_stage'
+  SELECT 17, NULL, 'owns ' || count(*) || ' objects outside the schema ovb_stage'
          || coalesce(' (' || array_to_string((array_agg(o.type || ' ' || o.identity ORDER BY o.type, o.identity))[1:5], ', ')
                      || CASE WHEN count(*) > 5 THEN ', ' || count(*) - 5 || ' more' ELSE '' END || ')', '')
     FROM pg_shdepend s CROSS JOIN LATERAL pg_identify_object(s.classid, s.objid, s.objsubid) o
@@ -1083,7 +1092,7 @@ SELECT CASE WHEN n IN (16, 17, 18) THEN 'INFO' WHEN ok THEN 'OK' ELSE 'FAIL' END
   -- INFO: a membership is for the whole server. The role has the rights of the owner of
   -- this database on each other database of that owner too (CONNECT, ALTER DATABASE, DROP
   -- DATABASE); pg_hba.conf decides where it can log in.
-  SELECT 17, NULL, 'other databases of ' || o.rolname || ', with its rights through the membership: '
+  SELECT 18, NULL, 'other databases of ' || o.rolname || ', with its rights through the membership: '
          || coalesce(string_agg(x.datname, ', ' ORDER BY x.datname), 'none')
     FROM pg_database d JOIN pg_roles o ON o.oid = d.datdba
     LEFT JOIN pg_database x ON x.datdba = d.datdba AND x.oid <> d.oid
@@ -1093,7 +1102,7 @@ SELECT CASE WHEN n IN (16, 17, 18) THEN 'INFO' WHEN ok THEN 'OK' ELSE 'FAIL' END
   -- INFO: the other roles of which the role is a member, directly or through the owner (it
   -- also gets the memberships of the owner). pg_database_owner: the owner of this database
   -- is its member.
-  SELECT 18, NULL, 'other roles of which it is a member (also through ' || o.rolname || '): '
+  SELECT 19, NULL, 'other roles of which it is a member (also through ' || o.rolname || '): '
          || coalesce((SELECT string_agg(x.rolname, ', ' ORDER BY x.rolname) FROM pg_roles x
                        WHERE x.rolname NOT IN ('oracle_view_rp', 'pg_database_owner') AND x.oid <> o.oid
                          AND pg_has_role('oracle_view_rp', x.oid, 'MEMBER')), 'none')
@@ -1107,7 +1116,7 @@ SELECT CASE WHEN n IN (16, 17, 18) THEN 'INFO' WHEN ok THEN 'OK' ELSE 'FAIL' END
 SQL
 )
 
-ROLE_CHECKS=18   # the lines of ROLE_CHECK_SQL
+ROLE_CHECKS=19   # the lines of ROLE_CHECK_SQL
 role_checks() {   # prints each right and each INFO line; a missing or an extra right stops the command
     local out result what failed=0 elsewhere=0 stage=0 member=0
     out=$(pg_value "$RP_DATABASE" "$ROLE_CHECK_SQL") || die 'The check of the rights failed (above)'
