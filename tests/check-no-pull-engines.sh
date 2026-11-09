@@ -8,18 +8,23 @@
 # The servers are two throwaway docker:29-dind engines (linux/amd64): one on the
 # containerd image store, one on the classic store. A throwaway registry:2 gives three
 # tiny test images real digest pins (localhost:5055/kit-no-pull-check:a, :b and :c; a
-# root file system with the busybox of the dind image). The classic engine shares the
-# network of the registry, so a pull there reaches it under the same name. Copies of the
-# kit scripts pin these images: iss-api.sh a, rp-adapter.sh b, deploy-app.sh a and b
-# (the demo-uiux line b and a). stream-image.sh runs on this computer with an ssh that
-# runs each command in the engine of the server (docker exec, in /root); the --no-pull
-# runs run in the engines. The test images have no Odoo, API or adapter: a run that
-# passes the image check fails later, and a check reads only its image step. It prints
-# PASS or FAIL for each check and exits 1 when one fails. Every Docker resource is named
-# kit-no-pull-check-* and removed at the end, with its volumes.
-# Needs: docker:29-dind and registry:2 on this computer or from Docker Hub, and apk
-# downloads in the engines (bash, coreutils, util-linux, iproute2, findutils, diffutils,
-# curl, rsync).
+# root file system with the busybox of the dind image), and two index pins that BuildKit
+# on this computer builds from the same root file system with provenance: i (linux/amd64
+# and its attestation manifest, the form of the kit pins of iss-api.sh, rp-adapter.sh and
+# the Odoo images) and m (linux/amd64, linux/arm64 and their attestations). The classic
+# engine shares the network of the registry, so a pull there reaches it under the same
+# name. Copies of the kit scripts pin these images: iss-api.sh a, rp-adapter.sh b,
+# deploy-app.sh a and b (the demo-uiux line b and a), and in a second copy iss-api.sh i.
+# stream-image.sh runs on this computer with an ssh that runs each command in the engine
+# of the server (docker exec, in /root); the --no-pull runs run in the engines. The test
+# images have no Odoo, API or adapter: a run that passes the image check fails later, and
+# a check reads only its image step. It prints PASS or FAIL for each check and exits 1
+# when one fails. Every Docker resource is named kit-no-pull-check-* and removed at the
+# end, with its volumes.
+# Needs: docker:29-dind and registry:2 on this computer or from Docker Hub, docker buildx
+# on this computer (it builds the index pins; its build cache keeps their small layers),
+# and apk downloads in the engines (bash, coreutils, util-linux, iproute2, findutils,
+# diffutils, curl, rsync).
 set -Eeuo pipefail
 export LC_ALL=C
 KIT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
@@ -29,7 +34,7 @@ REG=$NAME-registry CTD=$NAME-ctd CLASSIC=$NAME-classic
 PORT=5055 REPO=localhost:5055/kit-no-pull-check
 FACTS='{{.Id}}{{range .RepoDigests}} {{.}}{{end}}'
 LAB=$(mktemp -d "${TMPDIR:-/tmp}/kit-no-pull-check.XXXXXX")
-PASSED=0 FAILED=0 PIN_A='' PIN_B='' PIN_C=''
+PASSED=0 FAILED=0 PIN_A='' PIN_B='' PIN_C='' PIN_I='' PIN_M=''
 
 cleanup() {
     local ref
@@ -37,7 +42,7 @@ cleanup() {
     for ref in $(docker image ls --format '{{.Repository}}:{{.Tag}}' "$REPO" 2> /dev/null); do
         docker image rm "$ref" > /dev/null 2>&1 || true
     done
-    for ref in "$PIN_A" "$PIN_B" "$PIN_C"; do
+    for ref in "$PIN_A" "$PIN_B" "$PIN_C" "$PIN_I" "$PIN_M"; do
         [[ -z $ref ]] || docker image rm "${ref%:*@*}@${ref##*@}" > /dev/null 2>&1 || true
     done
     rm -rf -- "$LAB"
@@ -119,7 +124,33 @@ for word in a b c; do
     docker image rm "$(pinned "$pin")" > /dev/null   # the helper pulls it
     case $word in a) PIN_A=$pin ;; b) PIN_B=$pin ;; c) PIN_C=$pin ;; esac
 done
-printf 'Pins: %s %s %s\n' "$PIN_A" "$PIN_B" "$PIN_C"
+# The index pins: built and pushed by BuildKit on this computer (docker driver, containerd
+# image store), then removed here, so that the helper pulls them. Their entries come from
+# the registry.
+mkdir -p "$LAB/index"
+docker exec "$CTD" sh -c "rm -rf /tmp/rootfs && mkdir -p /tmp/rootfs/bin /tmp/rootfs/lib /tmp/rootfs/etc \
+    && cp /bin/busybox /tmp/rootfs/bin/ && ln -s busybox /tmp/rootfs/bin/sh && cp -a /lib/*musl* /tmp/rootfs/lib/ \
+    && echo i > /tmp/rootfs/etc/kit-no-pull-check && tar -C /tmp/rootfs -cf - ." > "$LAB/index/rootfs.tar"
+printf 'FROM scratch\nADD rootfs.tar /\n' > "$LAB/index/Dockerfile"
+ENTRY_PLATFORMS='{{range .Manifest.Manifests}}{{with .Platform}}{{.OS}}/{{.Architecture}}{{end}} {{index .Annotations "vnd.docker.reference.type"}};{{end}}'
+for word in i m; do
+    platforms=linux/amd64
+    [[ $word == i ]] || platforms=linux/amd64,linux/arm64
+    docker buildx build -q --platform "$platforms" --provenance=mode=min -t "$REPO:$word" --push "$LAB/index" > /dev/null \
+        || stop "docker buildx build --push of the index test image $REPO:$word failed"
+    pin=$REPO:$word@sha256:$(docker buildx imagetools inspect --raw "$REPO:$word" | shasum -a 256 | cut -d' ' -f1)
+    entries=$(docker buildx imagetools inspect --format "$ENTRY_PLATFORMS" "$pin")
+    case $word in
+        i) [[ $entries == 'linux/amd64 ;unknown/unknown attestation-manifest;' ]] || stop "The index $pin holds: $entries"
+           PIN_I=$pin ;;
+        m) [[ $entries == 'linux/amd64 ;linux/arm64 ;unknown/unknown attestation-manifest;unknown/unknown attestation-manifest;' ]] \
+               || stop "The index $pin holds: $entries"
+           PIN_M=$pin ;;
+    esac
+    docker image rm "$REPO:$word" > /dev/null 2>&1 || true
+    docker image rm "$(pinned "$pin")" > /dev/null 2>&1 || true   # the helper pulls it
+done
+printf 'Pins: %s %s %s %s %s\n' "$PIN_A" "$PIN_B" "$PIN_C" "$PIN_I" "$PIN_M"
 
 # The kit with the test pins, on this computer and in the engines.
 cp -R "$KIT/scripts" "$LAB/kit/"
@@ -134,14 +165,18 @@ repin() {   # FILE KEY=VALUE...: the one line ^KEY= of FILE gets VALUE (a commen
 repin "$LAB/kit/scripts/iss-api.sh" "IMAGE=$PIN_A"
 repin "$LAB/kit/scripts/rp-adapter.sh" "IMAGE=$PIN_B"
 repin "$LAB/kit/scripts/deploy-app.sh" "ODOO_IMAGE=$PIN_A" "WEB_IMAGE=$PIN_B" "DEMO_ODOO_IMAGE=$PIN_B" "DEMO_WEB_IMAGE=$PIN_A"
+mkdir -p "$LAB/kit-index"
+cp -R "$LAB/kit/scripts" "$LAB/kit-index/"
+repin "$LAB/kit-index/scripts/iss-api.sh" "IMAGE=$PIN_I"
 printf 'made-up-password\n' > "$LAB/lab/db-password"
 printf 'DB_HOST=db.example.internal\nDB_SERVICE=ORCLPDB1\nDB_USER=APIUSR\nDB_PASSWORD_FILE=/lab/db-password\n' > "$LAB/lab/iss.conf"
 printf 'DB_HOST=10.1.119.26\nDB_SERVICE=ENTPP2\nDB_USER=RP_GATEWAY\nDB_PASSWORD_FILE=/lab/db-password\n' > "$LAB/lab/rp.conf"
 printf 'DB_HOST=192.0.2.20\nDB_PASSWORD_FILE=/lab/db-password\nBIND_IP=127.0.0.1\nHTTP_PORT=18110\nPROJECT_NAME=kit-no-pull-check\n' \
     > "$LAB/lab/app.env"
 for engine in "$CTD" "$CLASSIC"; do
-    docker exec "$engine" mkdir -p /kit
+    docker exec "$engine" mkdir -p /kit /kit-index
     docker cp "$LAB/kit/scripts" "$engine:/kit/" > /dev/null
+    docker cp "$LAB/kit-index/scripts" "$engine:/kit-index/" > /dev/null
     docker cp "$LAB/lab" "$engine:/" > /dev/null
 done
 # ssh OPTIONS [-n] HOST COMMAND... of the helper: COMMAND in the engine of HOST, in /root. With
@@ -317,11 +352,49 @@ if [[ -z $(ls "$LAB/tmp/stream-image-archives") && -z $(docker exec "$CTD" ls /r
 else
     fail 'stream-image.sh --file: no archive left on either side'
 fi
-run "$CTD" docker run --rm --pull never --network none --entrypoint sh "$PIN_C" -c 'cat /etc/kit-no-pull-check'
+# busybox sh runs no applet by its bare name: cat goes through busybox.
+run "$CTD" docker run --rm --pull never --network none --entrypoint sh "$PIN_C" -c 'busybox cat /etc/kit-no-pull-check'
 if ((CODE == 0)) && [[ $OUT == c ]]; then
     pass 'the image of --file starts on the server'
 else
     fail 'the image of --file starts on the server'
+fi
+
+# ---------------------------------------------------------------- index pins
+# docker save without --platform writes the index itself: the server finds the pinned digest.
+helper lab-ctd --image "$PIN_I"
+if ((CODE == 0)) && has "$OUT" "The pinned image is an index of one linux/amd64 image and its attestation manifests: $(pinned "$PIN_I")" \
+        && [[ $(facts "$CTD" "$(pinned "$PIN_I")") == "${PIN_I##*@} $(pinned "$PIN_I")"* ]]; then
+    pass 'stream-image.sh, an index of linux/amd64 and its attestation: the pinned digest as ID and registry digest on the server'
+else
+    fail 'stream-image.sh, an index of linux/amd64 and its attestation: the pinned digest as ID and registry digest on the server'
+fi
+run "$CTD" docker image inspect --format '{{json .Descriptor}}' "$(pinned "$PIN_I")"
+if ((CODE == 0)) && has "$OUT" '"mediaType":"application/vnd.oci.image.index.v1+json"'; then
+    pass 'on the server the image of the index pin is the index'
+else
+    fail 'on the server the image of the index pin is the index'
+fi
+run "$CTD" docker run --rm --pull never --network none --entrypoint sh "$PIN_I" -c 'busybox cat /etc/kit-no-pull-check; busybox uname -m'
+if ((CODE == 0)) && [[ $OUT == $'i\nx86_64' ]]; then
+    pass 'the index pin starts on the server with --pull never (its linux/amd64 image)'
+else
+    fail 'the index pin starts on the server with --pull never (its linux/amd64 image)'
+fi
+since=$(docker exec "$CTD" date +%s)
+run "$CTD" bash /kit-index/scripts/iss-api.sh install --no-pull --non-interactive --config /lab/iss.conf --dir /tmp/iss-index
+if has "$OUT" "Pinned image on this server (containerd image store), not pulled: $(pinned "$PIN_I")" \
+        && [[ $(pulls_since "$CTD" "$since") == 0 ]]; then
+    pass 'iss-api.sh install --no-pull with an index pin: checked, started and used, not pulled'
+else
+    fail 'iss-api.sh install --no-pull with an index pin: checked, started and used, not pulled'
+fi
+helper lab-ctd --image "$PIN_M"
+if ((CODE == 1)) && has "$OUT" "The pinned index $(pinned "$PIN_M") holds: linux/amd64, linux/arm64," \
+        && [[ -z $(facts "$CTD" "$(pinned "$PIN_M")") ]]; then
+    pass 'stream-image.sh, an index with another platform: refused after the pull, nothing loaded'
+else
+    fail 'stream-image.sh, an index with another platform: refused after the pull, nothing loaded'
 fi
 
 printf '%s passed, %s failed\n' "$PASSED" "$FAILED"

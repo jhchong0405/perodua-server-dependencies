@@ -1635,7 +1635,11 @@ bash tests/check-no-pull-engines.sh
 The servers are two throwaway `docker:29-dind` engines (linux/amd64), one on the
 containerd image store and one on the classic store. A throwaway `registry:2`
 on `localhost:5055` gives three tiny test images (the busybox of the dind image)
-real digest pins; the classic engine shares the network of the registry, so a
+real digest pins, and two index pins that `docker buildx build --provenance=mode=min
+--push` on the Mac makes from the same files: one of `linux/amd64` and its
+attestation manifest (the form of the kit pins of `iss-api.sh`, `rp-adapter.sh`
+and the Odoo images), and one of `linux/amd64`, `linux/arm64` and their
+attestations; the classic engine shares the network of the registry, so a
 pull there reaches it under the same name. Copies of the kit scripts pin these
 images, and `stream-image.sh` runs with an ssh that runs each command in the
 engine of the server (`docker exec`). It checks, on the real engines: a missing
@@ -1647,13 +1651,19 @@ stream (also `deploy-app.sh --line demo-uiux` and the `Local:` line of
 events`); a stream tag of another image on the Mac; the classic store (missing:
 refused by the script and by the helper; pulled: used); and `--file` with a link
 that breaks after 150000 bytes, then the resume from the kept archive and the
-part on the server, no archive left, and a start of the loaded image. The test
+part on the server, no archive left, and a start of the loaded image; the index
+pin of `linux/amd64` and its attestation streamed (its ID and registry digest
+on the server are the index digest, its descriptor is the index, it starts with
+`--pull never` as `x86_64`), `iss-api.sh install --no-pull` with that pin and no
+pull in the engine, and the index with `linux/arm64` refused after the pull with
+nothing loaded. The test
 images have no Odoo, API or adapter, so a run that passes the image check fails
 later: each check reads only its image step. It prints PASS or FAIL for each
 check and exits 1 when one fails. Its Docker resources are named
 `kit-no-pull-check-*` and are removed at the end, with their volumes. It needs
-`docker:29-dind` and `registry:2` (on the Mac or from Docker Hub) and apk
-downloads in the engines.
+`docker:29-dind` and `registry:2` (on the Mac or from Docker Hub), `docker
+buildx` on the Mac (its build cache keeps the small layers of the index pins)
+and apk downloads in the engines.
 
 `test_uat_guard.py` runs `uat_guard.py` against temporary addon trees shaped
 like the pinned image (literal manifests, code shipped as bare `.pyc`): direct,
