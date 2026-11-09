@@ -2199,11 +2199,11 @@ class OracleViewDocsTest(unittest.TestCase):
     """The README and the usage text name the pinned release and the steps that the script expects."""
 
     def test_the_pin_is_the_release_of_2026_11_09(self):
-        # grey-v1.0.3: linux/amd64, label org.opencontainers.image.version=grey-v1.0.3, revision 6f4983a.
-        self.assertEqual(IMAGE, REPOSITORY + ":grey-v1.0.3@sha256:"
-                         "ed104afa9ba6bb366c9c92339c7771e327f05b556a7ebb599906104c5cddec80")
-        self.assertEqual(RELEASE, "oracle-view-grey-v1.0.3")
-        for old in ("grey-v1.0.1", "8e82b47f", "a5b48111"):
+        # grey-v1.0.4: linux/amd64, label org.opencontainers.image.version=grey-v1.0.4, revision 00df86f.
+        self.assertEqual(IMAGE, REPOSITORY + ":grey-v1.0.4@sha256:"
+                         "cf9a9170fb5642883b32386583501093f17ad77fefaaf592462849c0727818f1")
+        self.assertEqual(RELEASE, "oracle-view-grey-v1.0.4")
+        for old in ("grey-v1.0.1", "8e82b47f", "a5b48111", "ed104afa"):
             self.assertNotIn(old, TEXT)
             self.assertNotIn(old, README)
 

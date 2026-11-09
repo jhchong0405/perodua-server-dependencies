@@ -2109,7 +2109,7 @@ The Oracle Field Browser is a web tool for the integration work. It shows the
 Oracle EBS objects, the RP database (`perodua_oracle2` on the DB server, the
 database of the grey App: owner decision of 2026-11-07) and the RP-to-Oracle
 mapping, and it has a SQL console. `oracle-view.sh` runs the pinned
-image `perodua-deploy.novutal.com/oracle-view:grey-v1.0.3` with Docker Compose on
+image `perodua-deploy.novutal.com/oracle-view:grey-v1.0.4` with Docker Compose on
 the App server, and on the DB server it makes the role that the tool signs in
 with. The tool is at `https://stgiss.perodua.com.my/dev/oracle-view/` through a
 route of [https.sh](#https). Every page and every API call needs a login.
@@ -2119,7 +2119,7 @@ route of [https.sh](#https). Every page and every API call needs a login.
 | Container `oracle-view` on `127.0.0.1:8797` only, run from `/opt/perodua-oracle-view` | App server |
 | Route `stgiss.perodua.com.my /dev/oracle-view/ 8797 strip,http` | App server, `/etc/perodua-https/routes.conf` |
 | Role `oracle_view_rp` on the database `perodua_oracle2`: read and write on the tables, read-only by default, and the schema `ovb_stage` for the staging tables of Copy to RP | DB server (PostgreSQL 16) |
-| Image `perodua-deploy.novutal.com/oracle-view:grey-v1.0.3`, pulled by digest | Private registry |
+| Image `perodua-deploy.novutal.com/oracle-view:grey-v1.0.4`, pulled by digest | Private registry |
 
 The Code section of the tool shows the mapping that the RP code writes. The
 tool reads it from the RP database: `perodua_master_feed` stores it in the
@@ -2128,6 +2128,13 @@ the module. The tool reads it at its start and again every 300 s, so a grey roll
 changes the Code section with no new release of the tool. While the RP database
 has no stored manifest, the tool shows the copy in the image (perodua commit
 `e6d8e2fae`, 183 rows) and gives the reason.
+
+The "Open in RP" links of the tool go to the site of the workspace of each
+screen, because the sign-in site `https://stgiss.perodua.com.my/dev/app/` lists
+no workspace: `https://stgissrp.perodua.com.my/dev/app/` for RESOURCES PLANNING
+(MASTER), (FORECAST) and (OPERATION), SYSTEM GENERATION and REPORTING,
+`https://stgisscp.perodua.com.my/dev/app/` for CUSTOMER PORTAL and
+`https://stgisssp.perodua.com.my/dev/app/` for SUPPLIER PORTAL.
 
 The image holds the Oracle settings file and the password of the role
 `oracle_view_rp` (owner decision of 2026-11-06). This repository holds no secret of
@@ -2394,7 +2401,7 @@ When asked, enter the registry username and password for
   container again: the tool reads the users file at its start only;
 - checks `http://127.0.0.1:8797/healthz` on the server.
 
-Wait for `Installed: oracle-view-grey-v1.0.3`. Then read the first passwords:
+Wait for `Installed: oracle-view-grey-v1.0.4`. Then read the first passwords:
 
 ```bash
 sudo cat /opt/perodua-oracle-view/initial-login.txt
@@ -2601,7 +2608,7 @@ Do the steps in this order.
 | Container (App server) | `sudo bash oracle-view.sh uninstall`, then type `oracle-view`. It removes the container, `initial-login.txt` and the files `install` made. The state volume, the users file and the image stay; `install` uses them again. `--purge` also removes the state volume (the mapping edits and the SQL audit), the users file and every local image of `perodua-deploy.novutal.com/oracle-view`. It lists what it removed. When a step fails, it also lists what it did not remove, keeps the deployment and exits 1: correct the cause, then run it again |
 | Role (DB server) | `sudo bash oracle-view.sh drop-role`, then type `oracle_view_rp`. It ends the sessions of the role, removes its rights in `perodua_oracle2` and in `perodua_oracle` (when it exists, so that an old grant cannot make the drop fail) and drops it (also `oracle_view_ro` of an earlier bundle). It skips a `perodua_oracle` that does not accept connections. It also drops the schema `ovb_stage` with the staging tables of Copy to RP and their data: when `ovb_stage` holds tables, it lists them and stops before any change; run it again with `--drop-staging` when they can go. It also stops when an object outside `ovb_stage` depends on an object in it ([The staging schema ovb_stage](#the-staging-schema-ovb_stage)). Rows that the SQL console changed stay changed |
 | `pg_hba.conf` line (DB server), if you added one | `sudo cp -p HBA_FILE.before-oracle-view HBA_FILE`, then `sudo -u postgres psql -X -d postgres -c 'SELECT pg_reload_conf()'` |
-| Registry | Delete the tag `oracle-view:grey-v1.0.3` and the tags of earlier releases when nobody needs them: each image holds the secrets |
+| Registry | Delete the tag `oracle-view:grey-v1.0.4` and the tags of earlier releases when nobody needs them: each image holds the secrets |
 
 `uninstall` and `drop-role` without a terminal need `--confirm oracle-view` and
 `--confirm oracle_view_rp`. `--drop-staging` is not a confirmation: `drop-role`
