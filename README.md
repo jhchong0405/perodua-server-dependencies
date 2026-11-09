@@ -1096,9 +1096,10 @@ removes the environment: put the variable after `sudo env`, as in
    stream tag, `REPOSITORY:sha256-HEX` (HEX: the 64 digits of the pinned
    digest), streams `docker save` of that tag to `sudo -n docker load` on the
    server, and then checks the image there as the `--no-pull` runs do. It stops
-   when a stream tag names another image on the Mac, and when `docker load` on
-   the server prints `Error unpacking`. An image that the server has already
-   gets nothing. It checks every image on the Mac before it connects to the
+   when a stream tag names another image on the Mac, when an index is not of
+   the form below, and when `docker load` on the server prints `Error
+   unpacking`. An image that the server has already gets nothing. It checks
+   every image on the Mac before it connects to the
    server, and it streams nothing when the server uses the classic image store
    and an image is missing there. `--dry-run` does the checks and prints the
    steps: it pulls, tags, saves, copies and loads nothing. ssh runs in batch
@@ -1170,14 +1171,36 @@ before, and otherwise stops with a message, before any change. The helper
 agrees: it streams nothing to such a server. To switch an engine to the
 containerd image store, see [Install from a streamed image](#install-from-a-streamed-image).
 
-Each pin must be one image manifest, not a multi-platform index: the pull on
-the Mac brings one platform of an index, and `docker save` cannot save the
-rest. The helper stops before the stream for an index. The demo-uiux Odoo pin
-of this kit (`demo-uiux-grey-v0.56.1`, `sha256:74286eb8...`) is an index
-(`docker image inspect --format '{{json .Descriptor}}'` on the Mac,
-2026-11-10), so the helper cannot stream it. The Odoo image (`cc0bc93d...`)
-and the web image (`468b48c3...`) of grey v0.60.0 and the adapter
-`v0.8.0-oracle2` (`9df3d38f...`) are each one manifest.
+A pin is one image manifest, or an index (a multi-platform pin). The helper
+streams an index only when its one image is the platform (`linux/amd64`) and
+each other entry is an attestation manifest (platform `unknown/unknown`,
+annotation `vnd.docker.reference.type: attestation-manifest`). BuildKit pushes
+that index for a build with provenance, and the pull on the Mac for
+`linux/amd64` brings the image and its attestation manifest. The helper reads
+the entries from the registry with the login of the Mac (`docker buildx
+imagetools inspect`, also in a dry run), and checks that the index there has
+the pinned digest. It stops before the stream for any other index, because
+`docker save` needs every entry of an index on the Mac.
+
+`docker save` of the stream tag has no `--platform`. Without it, the archive
+holds the index itself: on the server (containerd image store) `docker image
+inspect REPOSITORY@DIGEST` finds the image, its ID and its registry digest are
+the pinned digest, and the image starts. With `docker save --platform
+linux/amd64`, the archive holds the manifest of that platform instead of the
+index: the server has the image under the stream tag, but with the digest of
+that manifest as its ID, so the digest reference finds no image and a
+`--no-pull` run stops. Docker Compose with `--pull never` starts a loaded
+index by the pin. (A lab of throwaway engines, Docker 29.8.2 on the Mac and
+29.9.3 on the server, 2026-11-10.)
+
+Of the pins of the kit scripts (2026-11-10), these are an index of the
+`linux/amd64` image and its attestation manifest: `iss-api.sh`
+(`sha256:5b8a32cc...`), `rp-adapter.sh` (`sha256:6c5fc88a...`), and the Odoo
+image of each line of `deploy-app.sh` (`client-stable-uiux-v1.2.2`,
+`sha256:772500ec...`; `demo-uiux-grey-v0.56.1`, `sha256:74286eb8...`). The two
+web images of `deploy-app.sh`, the pin of `oracle-view.sh`, the Odoo image
+(`cc0bc93d...`) and the web image (`468b48c3...`) of grey v0.60.0 and the
+adapter `v0.8.0-oracle2` (`9df3d38f...`) are each one manifest.
 
 These paths of the kit still pull an image that is missing. No `--no-pull` run
 starts them:
@@ -2931,10 +2954,10 @@ oracle-view.sh`).
 (`perodua-deploy.novutal.com/oracle-view@sha256:` and the pinned digest), and
 checks that its registry digest, and on the containerd image store also its ID,
 is the pinned digest. On the containerd image store the ID of an image is the
-digest of its manifest, and Docker checks the content against it when it loads
-the image. Then it starts the image once, with no pull and no network
-(`docker run --rm --pull never --network none`), so that an image whose layers
-did not unpack stops the install. When the image is not there, or does not
+digest of its manifest (or of its index), and Docker checks the content against
+it when it loads the image. Then it starts the image once, with no pull and no
+network (`docker run --rm --pull never --network none`), so that an image whose
+layers did not unpack stops the install. When the image is not there, or does not
 start, `install` stops before any change (exit status 1) and prints what to do.
 `status` shows the result of the check of the digest in its `Local:` line.
 

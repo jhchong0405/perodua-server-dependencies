@@ -14,6 +14,11 @@ CONTAINERD='["driver-type","io.containerd.snapshotter.v1"]'   # in docker info: 
 FACTS='{{.Id}}{{range .RepoDigests}} {{.}}{{end}}'              # what the --no-pull runs check
 PIN_FORM='^[a-z0-9.-]+(:[0-9]{1,5})?/[a-z0-9._/-]+:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}$'   # the pin form of the kit
 PLATFORM_FORM='^linux/[a-z0-9]+$'
+MANIFEST_TYPES=' application/vnd.oci.image.manifest.v1+json application/vnd.docker.distribution.manifest.v2+json '
+INDEX_TYPES=' application/vnd.oci.image.index.v1+json application/vnd.docker.distribution.manifest.list.v2+json '
+# docker buildx imagetools inspect --format: one line for each entry of an index: its digest, its media type, its
+# platform (OS/ARCH[/VARIANT], - when it has none) and its vnd.docker.reference.type annotation (- when it has none).
+ENTRIES='{{range .Manifest.Manifests}}{{.Digest}} {{.MediaType}} {{with .Platform}}{{.OS}}/{{.Architecture}}{{with .Variant}}/{{.}}{{end}}{{else}}-{{end}} {{with .Annotations}}{{or (index . "vnd.docker.reference.type") "-"}}{{else}}-{{end}}{{"\n"}}{{end}}'
 KIT_SOURCES=' deploy-app.sh iss-api.sh rp-adapter.sh oracle-view.sh '
 LINES=' client-stable-uiux demo-uiux '
 # ssh never asks, never makes a terminal, forwards nothing and runs no local command; a dead link ends in about a minute.
@@ -71,10 +76,15 @@ REPOSITORY:sha256-HEX (HEX: the digits of the pinned digest), which no other
 image takes: an archive of a digest reference has no image name, and a release
 tag can move to a later image. It stops when a stream tag names another image
 here. The engine of this computer must use the containerd image store; on the
-server, a classic image store gets nothing either. Each pin must be one image
-manifest (one platform), not an index. An image that the server has already
-gets nothing. One run at a time for each server (the host name and port of
-ssh -G).
+server, a classic image store gets nothing either. Each pin is one image
+manifest, or an index whose one image is the platform (linux/amd64) and whose
+other entries are attestation manifests (platform unknown/unknown), as BuildKit
+pushes it. For an index it reads the entries from the registry (docker buildx
+imagetools inspect, also in a dry run) and checks that the index there has the
+pinned digest. docker save has no --platform, so the archive holds the index
+itself and the server finds the pinned digest. An image that the server has
+already gets nothing. One run at a time for each server (the host name and port
+of ssh -G).
 Exit codes: 0 done; 1 error; 2 usage.
 HELP
 }
@@ -166,12 +176,33 @@ read_pins() {   # the images of every source, from the kit scripts next to this 
     done
 }
 
-one_manifest() {   # docker save needs all the content of the image: of an index, a pull for one platform brings a part
-    local descriptor kind='' form='"mediaType":"([^"]+)"'
+streamable() {   # $1 platform: docker save writes the pin itself, with all its content, so the server can check its digest
+    # docker save has no --platform: with it, the archive holds the manifest of that platform instead of the pinned
+    # index, and on the server the digest reference finds no image (lab of 2026-11-10). Without it, docker save
+    # needs every entry of an index on this computer; a pull for one platform brings that image and its attestations.
+    local descriptor kind='' form='"mediaType":"([^"]+)"' sum entries verdict
     descriptor=$(docker image inspect --format '{{json .Descriptor}}' "$PINNED" 2> /dev/null) || descriptor=''
     [[ ! $descriptor =~ $form ]] || kind=${BASH_REMATCH[1]}
-    [[ $kind == application/vnd.oci.image.manifest.v1+json || $kind == application/vnd.docker.distribution.manifest.v2+json ]] \
-        || die "The pinned image $PINNED on this computer is ${kind:-of an unknown media type}, not one image manifest: docker save cannot save an index of which this computer has only the $1 part. This script streams a single-platform image only. Nothing was streamed."
+    [[ -z $kind || $MANIFEST_TYPES != *" $kind "* ]] || return 0
+    [[ -n $kind && $INDEX_TYPES == *" $kind "* ]] \
+        || die "The pinned image $PINNED on this computer is ${kind:-of an unknown media type}: this script streams one image manifest, or an index of one $1 image and its attestation manifests. Nothing was streamed."
+    # The entries of the index, from the registry with the login of this computer; the index there must have the pin.
+    sum=$(docker buildx imagetools inspect --raw "$PINNED" | shasum -a 256) \
+        || die "docker buildx imagetools inspect --raw $PINNED failed on this computer (above): the entries of an index come from the registry. When the registry wants a login, run docker login $REGISTRY on this computer first. Nothing was streamed."
+    [[ sha256:${sum%% *} == "$DIGEST" ]] \
+        || die "The registry gives another index for $PINNED (its digest is sha256:${sum%% *}). Nothing was streamed."
+    entries=$(docker buildx imagetools inspect --format "$ENTRIES" "$PINNED") \
+        || die "docker buildx imagetools inspect $PINNED failed on this computer (above). Nothing was streamed."
+    # The one image of the platform (any variant of it) and attestation manifests of BuildKit, nothing else.
+    verdict=$(printf '%s\n' "$entries" | awk -v platform="$1" -v manifests="$MANIFEST_TYPES" '
+        NF == 0 { next }
+        NF == 4 && ($3 == platform || index($3, platform "/") == 1) && index(manifests, " " $2 " ") { image++; next }
+        NF == 4 && $3 == "unknown/unknown" && $4 == "attestation-manifest" { attestation++; next }
+        { other++ }
+        END { printf "%d %d", image, other }')
+    [[ $verdict == '1 0' ]] \
+        || die "The pinned index $PINNED holds: $(printf '%s\n' "$entries" | awk 'NF { printf "%s%s", sep, ($4 == "-" ? $3 : $3 " " $4); sep = ", " }'). This script streams an index only when its one image is $1 and each other entry is an attestation manifest (unknown/unknown): docker save writes the whole index, and the pull of this computer brings that image and its attestations only. Nothing was streamed."
+    printf 'The pinned image is an index of one %s image and its attestation manifests: %s\n' "$1" "$PINNED"
 }
 server_has_pin() {   # the check of the --no-pull runs: found by the digest reference, with the pinned digest as
     local facts      # registry digest, and on the containerd image store as ID
@@ -330,7 +361,7 @@ while ((i < ${#IMAGES[@]})); do
     here=0
     id=$(docker image inspect --format '{{.Id}}' "$PINNED" 2> /dev/null) || id=''
     [[ $id != "$DIGEST" ]] || here=1
-    ((here == 0)) || one_manifest "${PLATFORMS[i]}"
+    ((here == 0)) || streamable "${PLATFORMS[i]}"
     tagged=$(docker image inspect --format '{{.Id}}' "$STREAM_TAG" 2> /dev/null) || tagged=''
     [[ -z $tagged || $tagged == "$DIGEST" ]] \
         || die "On this computer the stream tag $STREAM_TAG names another image (ID $tagged), not the pinned digest. Remove that tag (docker image rm $STREAM_TAG), then run this script again. Nothing was changed."
@@ -398,7 +429,7 @@ while ((i < ${#IMAGES[@]})); do
                 || die "The pull failed on this computer (above). When the registry wants a login, run docker login $REGISTRY on this computer first."
             id=$(docker image inspect --format '{{.Id}}' "$PINNED" 2> /dev/null) || id=''
             [[ $id == "$DIGEST" ]] || die "After the pull, $PINNED on this computer does not have the pinned digest as its ID (ID: ${id:-none}). Nothing was streamed."
-            one_manifest "${PLATFORMS[i]}"
+            streamable "${PLATFORMS[i]}"
         fi
         if [[ -z ${MAC_TAGGED[i]} ]]; then
             docker tag "$PINNED" "$STREAM_TAG" || die "docker tag $PINNED $STREAM_TAG failed on this computer (above). Nothing was streamed."

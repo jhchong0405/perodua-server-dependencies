@@ -911,6 +911,13 @@ SERVER_MKDIR = "mkdir -p -m 0700 stream-image && chmod 0700 stream-image"
 SERVER_TOOLS = "command -v rsync && command -v sha256sum"
 MANIFEST = "application/vnd.oci.image.manifest.v1+json"
 INDEX = "application/vnd.oci.image.index.v1+json"
+# docker buildx imagetools inspect --format of the helper: one line for each entry of an index.
+ENTRIES = ('{{range .Manifest.Manifests}}{{.Digest}} {{.MediaType}} {{with .Platform}}{{.OS}}/{{.Architecture}}'
+           '{{with .Variant}}/{{.}}{{end}}{{else}}-{{end}} {{with .Annotations}}'
+           '{{or (index . "vnd.docker.reference.type") "-"}}{{else}}-{{end}}{{"\\n"}}{{end}}')
+AMD64 = f"sha256:{'a' * 64} {MANIFEST} linux/amd64 -"  # the entries of an index, as ENTRIES prints them
+ARM64 = f"sha256:{'b' * 64} {MANIFEST} linux/arm64 -"
+ATTESTATION = f"sha256:{'d' * 64} {MANIFEST} unknown/unknown attestation-manifest"
 TERMINAL = "typed on the terminal\n"  # the standard input of the helper: no check on the server may read it
 # The pins of the kit scripts, and the rows 1-3 of the image table of the rebuild plan of .13 (section 3.1).
 KIT_PINS = {"iss-api.sh": [pin(ISS, "IMAGE")], "rp-adapter.sh": [pin(RP, "IMAGE")], "oracle-view.sh": [pin(OV, "IMAGE")],
@@ -923,6 +930,10 @@ REBUILD = ["perodua-deploy.novutal.com/perodua-odoo:demo-uiux-grey-v0.60.0-oracl
            "perodua-deploy.novutal.com/rp-adapter:v0.8.0-oracle2@sha256:"
            "9df3d38f91cf9ea110c152343b969f94997bef5a649e95a6a3b267a4b1f378fa"]
 ALL_PINS = sorted({image for images in KIT_PINS.values() for image in images} | set(REBUILD))
+# The pins that are an OCI index of two entries, the linux/amd64 image and its BuildKit attestation manifest
+# (docker buildx imagetools inspect --raw, 2026-11-10); the other pins are one image manifest each.
+INDEX_PINS = [KIT_PINS["iss-api.sh"][0], KIT_PINS["rp-adapter.sh"][0], KIT_PINS["client-stable-uiux"][0],
+              KIT_PINS["demo-uiux"][0]]
 
 
 def archive(image):  # what the fake docker save writes for the stream tag of a pin
@@ -938,6 +949,8 @@ FAKE_MAC_DOCKER = r'''#!/usr/bin/env python3
 import json, os, sys
 args = sys.argv[1:]
 MANIFEST = ''' + repr(MANIFEST) + r'''
+INDEX = ''' + repr(INDEX) + r'''
+ENTRIES = ''' + repr(ENTRIES) + r'''
 with open(os.environ["FAKE_STREAM_STATE"]) as f:
     state = json.load(f)
 mac = state["mac"]
@@ -972,9 +985,22 @@ elif args[:3] == ["image", "inspect", "--format"] and len(args) == 5 and args[3]
         out, err, status = missing(args[4])
 elif args[:2] == ["pull", "--platform"] and len(args) == 4:
     if mac["logged_in"]:
-        mac["images"][reference(args[3])] = {"id": mac["pull_ids"].get(args[3], args[3].split("@")[1]), "kind": mac["pull_kind"]}
+        kind = INDEX if reference(args[3]) in mac["registry"] else mac["pull_kind"]
+        mac["images"][reference(args[3])] = {"id": mac["pull_ids"].get(args[3], args[3].split("@")[1]), "kind": kind}
     else:
         err, status = "Error response from daemon: unauthorized: authentication required\n", 1
+elif args[:3] == ["buildx", "imagetools", "inspect"] and (len(args) == 5 and args[3] == "--raw"
+                                                          or len(args) == 6 and args[3:5] == ["--format", ENTRIES]):
+    # The index in the registry: its bytes (FAKE_SHASUM gives them the digest they name) or its entries.
+    index = mac["registry"].get(args[-1])
+    if not mac["logged_in"]:
+        err, status = "ERROR: failed to authorize: failed to fetch oauth token: 401 Unauthorized\n", 1
+    elif index is None:
+        err, status = f"ERROR: {args[-1]}: not found\n", 1
+    elif args[3] == "--raw":
+        out = f"raw index {index['digest']}\n"
+    else:
+        out = "".join(line + "\n" for line in index["entries"])
 elif args[:1] == ["tag"] and len(args) == 3:
     if mac["tag_error"]:
         err, status = mac["tag_error"] + "\n", 1
@@ -1132,14 +1158,20 @@ with open(os.environ["FAKE_STREAM_STATE"], "w") as f:
 sys.stderr.write(err)
 sys.exit(status)
 '''
+# shasum -a 256 FILE, or the standard input: the raw index of the fake buildx gets the digest that it names.
 FAKE_SHASUM = r'''#!/usr/bin/env python3
-import hashlib, json, os, sys
+import hashlib, json, os, re, sys
 args = sys.argv[1:]
-if len(args) != 3 or args[:2] != ["-a", "256"]:
+if len(args) not in (2, 3) or args[:2] != ["-a", "256"]:
     sys.exit(f"fake shasum: unexpected arguments {args}")
 with open(os.environ["FAKE_STREAM_LOG"], "a") as log:
     log.write(json.dumps({"tool": "shasum", "args": args}) + "\n")
-print(hashlib.sha256(open(args[2], "rb").read()).hexdigest() + "  " + args[2])
+if len(args) == 3:
+    print(hashlib.sha256(open(args[2], "rb").read()).hexdigest() + "  " + args[2])
+else:
+    data = sys.stdin.read()
+    named = re.fullmatch(r"raw index sha256:([0-9a-f]{64})\n", data)
+    print((named.group(1) if named else hashlib.sha256(data.encode()).hexdigest()) + "  -")
 '''
 
 
@@ -1164,7 +1196,10 @@ class StreamImageTest(unittest.TestCase):
         self.state.write_text(json.dumps({
             "mac": {"store": "containerd", "logged_in": True, "pull_ids": {}, "pull_kind": MANIFEST, "tag_error": "",
                     "save_error": "", "tags": {},
-                    "images": {pinned(image): {"id": parts(image)[1], "kind": MANIFEST} for image in ALL_PINS}},
+                    "images": {pinned(image): {"id": parts(image)[1], "kind": INDEX if image in INDEX_PINS else MANIFEST}
+                               for image in ALL_PINS},
+                    "registry": {pinned(image): {"digest": parts(image)[1], "entries": [AMD64, ATTESTATION]}
+                                 for image in INDEX_PINS}},
             "server": {"reachable": True, "sudo": True, "store": "containerd", "images": {}, "info_error": "",
                        "load_error": "", "load_output": "", "dangling": False, "names": {"grey-alias": "grey"},
                        "home": str(self.home), "tools": True, "rsync_breaks": 0, "rsync_corrupt": False}}))
@@ -1237,15 +1272,20 @@ class StreamImageTest(unittest.TestCase):
                 self.assertEqual(self.locks(), [])
 
     def test_the_order_of_the_checks_and_the_stream(self):
-        image = KIT_PINS["iss-api.sh"][0]
+        image = KIT_PINS["iss-api.sh"][0]  # an index: the linux/amd64 image and its attestation manifest
         _, digest, reference, tag = parts(image)
         result = self.stream("grey", "iss-api.sh")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.docker(), [["info", "--format", STORE_FORMAT],
                                          ["image", "inspect", "--format", "{{.Id}}", reference],
                                          ["image", "inspect", "--format", "{{json .Descriptor}}", reference],
+                                         ["buildx", "imagetools", "inspect", "--raw", reference],
+                                         ["buildx", "imagetools", "inspect", "--format", ENTRIES, reference],
                                          ["image", "inspect", "--format", "{{.Id}}", tag],
                                          ["tag", reference, tag], ["save", tag]])
+        self.assertEqual([call["args"] for call in self.calls("shasum")], [["-a", "256"]])
+        self.assertIn(f"The pinned image is an index of one linux/amd64 image and its attestation manifests: {reference}\n",
+                      result.stdout)
         self.assertEqual(self.server(), [SERVER_VERSION, SERVER_INFO, SERVER_INSPECT + reference, SERVER_LOAD,
                                          SERVER_INSPECT + reference])
         ssh = self.calls("ssh")
@@ -1430,7 +1470,7 @@ class StreamImageTest(unittest.TestCase):
                       "without --file. Nothing was changed.\n", result.stderr)
         self.assertNothingStreamed()
 
-    def test_the_server_store_an_index_and_a_stream_tag_of_another_image(self):
+    def test_the_server_store_and_a_stream_tag_of_another_image(self):
         image = KIT_PINS["iss-api.sh"][0]
         _, _, reference, tag = parts(image)
         self.set_state(server={"store": "classic"})
@@ -1447,17 +1487,8 @@ class StreamImageTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(f"The pinned image is already on grey (classic image store): {reference}. Nothing to stream.\n",
                       result.stdout)
-        # An index on the Mac stops before the server.
-        self.set_state(mac={"images": {reference: {"id": parts(image)[1], "kind": INDEX}}},
-                       server={"store": "containerd", "images": {}})
-        result = self.stream("grey", "iss-api.sh")
-        self.assertEqual(result.returncode, 1)
-        self.assertIn(f"ERROR: The pinned image {reference} on this computer is {INDEX}, not one image manifest: docker "
-                      "save cannot save an index of which this computer has only the linux/amd64 part. This script "
-                      "streams a single-platform image only. Nothing was streamed.\n", result.stderr)
-        self.assertEqual(self.server(), [])
         # A stream tag that names another image here stops before the server, also in a dry run.
-        self.set_state(mac={"images": {reference: {"id": parts(image)[1], "kind": MANIFEST}}, "tags": {tag: OTHER}})
+        self.set_state(mac={"tags": {tag: OTHER}}, server={"store": "containerd", "images": {}})
         for args in (["grey", "iss-api.sh"], ["--dry-run", "grey", "iss-api.sh"]):
             with self.subTest(args=args):
                 result = self.stream(*args)
@@ -1472,6 +1503,84 @@ class StreamImageTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("Docker on this computer does not use the containerd image store", result.stderr)
         self.assertEqual(self.server(), [])
+
+    def test_an_index_of_one_platform_and_its_attestations(self):
+        # docker save without --platform writes the index itself, so the server finds the pinned digest (lab of
+        # 2026-11-10). The helper reads the entries from the registry and accepts one image of the platform and
+        # attestation manifests only: the pull for that platform brings no other image, and docker save needs all.
+        image = KIT_PINS["rp-adapter.sh"][0]
+        _, digest, reference, tag = parts(image)
+        index = {"digest": digest, "entries": [AMD64, ATTESTATION]}
+        result = self.stream("grey", "rp-adapter.sh")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual([args for args in self.docker() if args[:1] == ["save"]], [["save", tag]])  # no --platform
+        self.assertEqual(self.get_state()["server"]["images"], {reference: f"{digest} {reference}"})
+        self.assertIn(f"On grey: {reference}, ID {digest}\n", result.stdout)
+        refused = (f"This script streams an index only when its one image is linux/amd64 and each other entry is an "
+                   "attestation manifest (unknown/unknown): docker save writes the whole index, and the pull of this "
+                   "computer brings that image and its attestations only. Nothing was streamed.\n")
+        other_type = f"sha256:{'a' * 64} {INDEX} linux/amd64 -"
+        for entries, held in (([AMD64, ARM64, ATTESTATION, ATTESTATION.replace("d" * 64, "f" * 64)],
+                               "linux/amd64, linux/arm64, unknown/unknown attestation-manifest, unknown/unknown "
+                               "attestation-manifest"),
+                              ([ARM64, ATTESTATION], "linux/arm64, unknown/unknown attestation-manifest"),
+                              ([AMD64, AMD64.replace("linux/amd64", "linux/amd64/v3")], "linux/amd64, linux/amd64/v3"),
+                              ([AMD64, ATTESTATION.replace("attestation-manifest", "-")], "linux/amd64, unknown/unknown"),
+                              ([other_type, ATTESTATION], "linux/amd64, unknown/unknown attestation-manifest"),
+                              ([], "")):
+            with self.subTest(entries=entries):
+                self.set_state(mac={"registry": {reference: dict(index, entries=entries)}, "tags": {}},
+                               server={"images": {}})
+                for args in (["grey", "rp-adapter.sh"], ["--dry-run", "grey", "rp-adapter.sh"]):
+                    result = self.stream(*args)
+                    self.assertEqual(result.returncode, 1, result.stdout)
+                    self.assertIn(f"ERROR: The pinned index {reference} holds: {held}. {refused}", result.stderr)
+                    self.assertEqual(self.server(), [])  # checked before the server
+                    self.assertNothingStreamed()
+        # The bytes of the index in the registry must have the pinned digest.
+        self.set_state(mac={"registry": {reference: dict(index, digest=OTHER)}})
+        result = self.stream("grey", "rp-adapter.sh")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(f"ERROR: The registry gives another index for {reference} (its digest is {OTHER}). Nothing was "
+                      "streamed.\n", result.stderr)
+        self.assertNotIn(["buildx", "imagetools", "inspect", "--format", ENTRIES, reference], self.docker())
+        self.assertEqual(self.server(), [])
+        # The entries come from the registry, with the login of this computer, also in a dry run.
+        self.set_state(mac={"registry": {reference: index}, "logged_in": False})
+        for args in (["grey", "rp-adapter.sh"], ["--dry-run", "grey", "rp-adapter.sh"]):
+            with self.subTest(args=args):
+                result = self.stream(*args)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("ERROR: failed to authorize: failed to fetch oauth token: 401 Unauthorized\nERROR: docker "
+                              f"buildx imagetools inspect --raw {reference} failed on this computer (above): the entries "
+                              "of an index come from the registry. When the registry wants a login, run docker login "
+                              "perodua-deploy.novutal.com on this computer first. Nothing was streamed.\n", result.stderr)
+                self.assertEqual(self.server(), [])
+        # Another media type is refused.
+        self.set_state(mac={"logged_in": True,
+                            "images": {reference: {"id": digest, "kind": "application/vnd.docker.container.image.v1+json"}}})
+        result = self.stream("grey", "rp-adapter.sh")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(f"ERROR: The pinned image {reference} on this computer is application/vnd.docker.container.image.v1"
+                      "+json: this script streams one image manifest, or an index of one linux/amd64 image and its "
+                      "attestation manifests. Nothing was streamed.\n", result.stderr)
+        self.assertNotIn(["buildx", "imagetools", "inspect", "--raw", reference], self.docker())
+        # An index that the Mac pulls now is checked after the pull, before the tag; any variant of the platform counts.
+        self.set_state(mac={"images": {}, "tags": {}})
+        result = self.stream("grey", "rp-adapter.sh")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([args[:2] for args in self.docker() if args[0] in ("pull", "buildx", "tag", "save")],
+                         [["pull", "--platform"], ["buildx", "imagetools"], ["buildx", "imagetools"], ["tag", reference],
+                          ["save", tag]])
+        arm = REBUILD[2]
+        self.set_state(mac={"images": {}, "tags": {}, "registry": {pinned(arm): {
+            "digest": parts(arm)[1], "entries": [ARM64.replace("linux/arm64", "linux/arm64/v8"), ATTESTATION]}}},
+            server={"images": {}})
+        result = self.stream("--platform", "linux/arm64", "grey", "--image", arm)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"The pinned image is an index of one linux/arm64 image and its attestation manifests: {pinned(arm)}\n",
+                      result.stdout)
+        self.assertEqual(self.saves(), [parts(arm)[3]])
 
     def test_errors_on_the_server_stop_it(self):
         image = KIT_PINS["rp-adapter.sh"][0]
@@ -1537,6 +1646,12 @@ class StreamImageTest(unittest.TestCase):
             self.assertTrue(command.startswith(allowed), command)
         self.assertEqual(re.findall(r'docker save (?:-o "\$archive\.part" )?"\$(\w+)"', code), ["STREAM_TAG", "STREAM_TAG"])
         self.assertEqual(len(re.findall(r"(^|[;&|(]|\$\()\s*docker save\b", code, re.M)), 2)
+        self.assertNotRegex(code, r"docker save[^\n]*--platform")  # it would save the manifest of the platform, not the pin
+        # An index: its bytes from the registry, checked against the pinned digest, and its entries.
+        self.assertIn('sum=$(docker buildx imagetools inspect --raw "$PINNED" | shasum -a 256)', code)
+        self.assertIn('[[ sha256:${sum%% *} == "$DIGEST" ]]', code)
+        self.assertIn('entries=$(docker buildx imagetools inspect --format "$ENTRIES" "$PINNED")', code)
+        self.assertIn(f"\nENTRIES='{ENTRIES}'\n", STREAM_TEXT)
         # The pins stay in the kit scripts.
         self.assertNotRegex(STREAM_TEXT, r"sha256:[0-9a-f]{64}|grey-v\d|v\d+\.\d+\.\d+")
         self.assertIn('values=$(sed -n "s/^$2=\\\\([^ ]*\\\\).*/\\\\1/p" "$HERE/$1")', STREAM_TEXT)

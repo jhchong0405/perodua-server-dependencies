@@ -306,8 +306,9 @@ pull_image() {   # asks for the registry account only when the registry wants on
 }
 
 # install --no-pull uses only an image that is on this server. On the containerd image
-# store the ID of an image is the digest of its manifest, checked against the content, and
-# docker load keeps it; on the classic store a loaded image has no registry digest.
+# store the ID of an image is the digest of its manifest (or of its index), checked against
+# the content, and docker load keeps it; on the classic store a loaded image has no registry
+# digest.
 image_store() {   # containerd, classic, or nothing when docker info does not answer
     local status
     status=$(docker info --format '{{json .DriverStatus}}' 2> /dev/null) || return 0

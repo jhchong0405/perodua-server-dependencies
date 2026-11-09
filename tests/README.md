@@ -726,17 +726,30 @@ home folder is a folder of the test), a fake `rsync` that can break half-way
   a kept archive whose SHA-256 changed is saved again; a copy with another
   SHA-256 is removed on the server and loads nothing; a server without `rsync`
   and `sha256sum` gets nothing;
+- an index (the pins of `iss-api.sh`, `rp-adapter.sh` and the two Odoo images
+  of `deploy-app.sh` are one, as measured on 2026-11-10): its bytes from the
+  registry (`docker buildx imagetools inspect --raw`, the fake `shasum` of the
+  standard input) must have the pinned digest, and its entries (`--format`) must
+  be one image of the platform (any variant of it) and attestation manifests
+  (`unknown/unknown`, `attestation-manifest`); then `docker save` of the stream
+  tag, without `--platform`, and the server finds the pinned digest. Another
+  platform, two images of the platform, an `unknown/unknown` entry that is no
+  attestation manifest, a nested index, no entry, another digest in the
+  registry, a registry that wants a login and another media type stop it before
+  the server, also in a dry run; an index that the Mac pulls now is checked
+  after the pull and before the tag;
 - the classic store on the server streams nothing (and a pin that a pull
-  brought there counts as there), an index on the Mac, a stream tag of another
-  image and the classic store on the Mac stop it before the server; a refused
+  brought there counts as there), a stream tag of another image and the
+  classic store on the Mac stop it before the server; a refused
   `sudo` or connection, a load that prints `Error unpacking` and a load that the
   server does not find by its digest stop it with exit 1;
 - one run at a time for each server, whatever name `ssh -G` resolves to it;
 - read from the helper: no `read`, ssh only with `-T -a -x`, batch mode, no
   forwarding and no local command (and `ssh -G` in batch mode), each command on
   the server `sudo -n docker` or one of the four commands of `--file`, `docker
-  save` only of the stream tag, and no pin in the helper: it reads them from the
-  kit scripts.
+  save` only of the stream tag and never with `--platform`, the template of the
+  entries of an index, and no pin in the helper: it reads them from the kit
+  scripts.
 
 `test_oracle_view.py` runs `oracle-view.sh` against fakes and, in the test image,
 its role SQL on a real throwaway PostgreSQL 16 cluster. Every password, key and

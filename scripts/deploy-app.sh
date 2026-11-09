@@ -1062,9 +1062,9 @@ if ((NON_INTERACTIVE)); then
         || fail 'SMTP_USER needs SMTP_PASSWORD_FILE for a non-interactive deployment'
 fi
 # --no-pull uses only the pinned images on this server, checked here, before the first
-# change. On the containerd image store the ID of an image is the digest of its manifest,
-# checked against the content, and docker load keeps it; on the classic store a loaded
-# image has no registry digest.
+# change. On the containerd image store the ID of an image is the digest of its manifest
+# (or of its index), checked against the content, and docker load keeps it; on the classic
+# store a loaded image has no registry digest.
 pin_parts() {  # $1 a pin: REPOSITORY (a registry port stays), DIGEST, PINNED and STREAM_TAG
     # PINNED finds the image by its digest, whatever its tag; STREAM_TAG is the tag the
     # Mac streams it under: one for each digest, never moved.
