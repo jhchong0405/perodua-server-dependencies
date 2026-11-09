@@ -984,15 +984,15 @@ pseudo-terminals. Thus an agent always sets the variable or the option.
 | `uninstall.sh` | Also delete their volumes? | `--delete-old-volumes`. Without it the volumes stay |
 | `deploy-app.sh` | Database settings, web port, who may open the page, outgoing email | `--config FILE` or `app.env` (`DB_HOST`, `BIND_IP`, the `SMTP_` settings, `MAIL_REDIRECT_TO`). `--mail` asks, and stops at once |
 | `deploy-app.sh` | Database password, SMTP password | `DB_PASSWORD_FILE`, `SMTP_PASSWORD_FILE`, or the saved secrets of an earlier run |
-| `deploy-app.sh` | Registry login | `docker login perodua-deploy.novutal.com` on the server first; there is no option |
+| `deploy-app.sh` | Registry login | `--no-pull` (or `KIT_NO_PULL=1`) with the images streamed from the Mac ([Install from streamed images](#install-from-streamed-images)), or `docker login perodua-deploy.novutal.com` on the server first |
 | `deploy-app.sh` | `--upgrade` with a module upgrade: type the database name | `--confirm DATABASE` |
 | `deploy-app.sh` | `--init-db`: delete the attachments volume that an earlier deployment of the project left files in | `--delete-old-attachments PROJECT_NAME_filestore`. Without it, the run stops before the volume or the database changes |
 | `iss-api.sh` | First install: the settings and the database password | `--config FILE` with `DB_PASSWORD_FILE`, or the saved `iss-api.env` |
-| `iss-api.sh` | Registry login | `docker login` first |
+| `iss-api.sh` | Registry login | `install --no-pull` (or `KIT_NO_PULL=1`) with the image streamed from the Mac ([Install from streamed images](#install-from-streamed-images)), or `docker login` first |
 | `iss-api.sh` | `uninstall`: type the project name | `--confirm PROJECT` |
 | `iss-api.sh` | `check --key`: the API key | `check --key-file FILE` (the key on the first line) |
 | `rp-adapter.sh` | First install: the settings and the secrets | `--config FILE` with `DB_PASSWORD_FILE` (and `API_KEY_FILE` with `API_URL`), or the saved `rp-adapter.env` |
-| `rp-adapter.sh` | Registry login | `docker login` first |
+| `rp-adapter.sh` | Registry login | `install --no-pull` (or `KIT_NO_PULL=1`, which also covers `health`, `survey`, `export`, `api-health` and `run`) with the image streamed from the Mac ([Install from streamed images](#install-from-streamed-images)), or `docker login` first |
 | `rp-adapter.sh` | `uninstall`: type the directory | `--confirm DIR` |
 | `https.sh` | `csr --key` with an encrypted key: its pass phrase | `--key-pass-file FILE` (the pass phrase on the first line). openssl never asks |
 | `https.sh` | `uninstall`: type yes | `--confirm yes` |
@@ -1005,6 +1005,10 @@ the same day changes it. Give it `--non-interactive` (install), `--confirm WORD`
 `iss-api.sh logs --follow` asks nothing, but it runs until it is stopped: an
 agent uses `logs` without `--follow`.
 
+A server that must not log in to the registry gets its images from the Mac:
+see [Install from streamed images](#install-from-streamed-images). `--no-pull`
+(or `KIT_NO_PULL=1`) also makes the run non-interactive.
+
 For example, a fresh UAT system on two servers:
 
 ```bash
@@ -1014,6 +1018,150 @@ sudo env KIT_NON_INTERACTIVE=1 bash deploy-db.sh --app-ip 10.0.0.20 --listen-ip 
 # App server: app.env holds DB_HOST=10.0.0.10, BIND_IP and DB_PASSWORD_FILE=/root/db.password
 sudo env KIT_NON_INTERACTIVE=1 bash deploy-app.sh --config /root/app.env --init-db
 ```
+
+## Install from streamed images
+
+Use this when a server must not log in to the registry. On grey, nobody types
+the registry password on a server (owner rule of 2026-11-10). The Mac has the
+registry login: it streams each pinned image to the server over ssh, and the
+kit scripts use those images with `--no-pull`. With `--no-pull`, a script never
+pulls, never logs in to the registry and never asks a question: it is also
+`--non-interactive`. The settings, Compose and the checks are the same as
+without it.
+
+| Script | `--no-pull` belongs to | The pinned images it checks |
+| --- | --- | --- |
+| `deploy-app.sh` | a deployment, also `--init-db`, `--upgrade` and `--replace` | the Odoo image and the web image of the line (`client-stable-uiux` or `demo-uiux`) |
+| `iss-api.sh` | `install` | `IMAGE` |
+| `rp-adapter.sh` | `install` | `IMAGE` |
+| `oracle-view.sh` | `install` | `IMAGE` (see [Install from a streamed image](#install-from-a-streamed-image)) |
+
+`KIT_NO_PULL=1` in the environment does the same as `--no-pull` (`0` or no
+value: the pull as before; another value stops the run at once). `sudo`
+removes the environment: put the variable after `sudo env`, as in
+`sudo env KIT_NO_PULL=1 bash iss-api.sh install --non-interactive`.
+`oracle-view.sh` reads `OVB_NO_PULL=1` instead.
+
+1. On the Mac, in this repository, with Docker Desktop on the containerd image
+   store, an ssh key that logs in to the server without a question, and
+   `sudo -n docker` (no password) for that user on the server:
+
+   ```bash
+   bash scripts/stream-image.sh --dry-run grey deploy-app.sh --line demo-uiux
+   bash scripts/stream-image.sh grey deploy-app.sh --line demo-uiux iss-api.sh rp-adapter.sh
+   ```
+
+   `grey` is the ssh name of the server. Each SOURCE is a kit script next to
+   the helper: `deploy-app.sh` (with `--line client-stable-uiux` or `--line
+   demo-uiux`; without it, the default line of `deploy-app.sh`), `iss-api.sh`,
+   `rp-adapter.sh` or `oracle-view.sh`. The helper reads the pins from these
+   files, so each pin stays in one place. For an image that no kit script pins,
+   give `--image REPOSITORY:TAG@sha256:HEX`, once for each image.
+   `--platform linux/ARCH` (default `linux/amd64`) applies to every `--image`:
+
+   ```bash
+   bash scripts/stream-image.sh grey \
+     --image perodua-deploy.novutal.com/rp-adapter:v0.8.0-oracle2@sha256:9df3d38f91cf9ea110c152343b969f94997bef5a649e95a6a3b267a4b1f378fa
+   ```
+
+   For each image, the helper does what `oracle-view-stream.sh` does. When the
+   pinned image is not on the Mac, it pulls it there. It gives the image its
+   stream tag, `REPOSITORY:sha256-HEX` (HEX: the 64 digits of the pinned
+   digest), streams `docker save` of that tag to `sudo -n docker load` on the
+   server, and then checks the image there as the `--no-pull` runs do. It stops
+   when a stream tag names another image on the Mac, and when `docker load` on
+   the server prints `Error unpacking`. An image that the server has already
+   gets nothing. It checks every image on the Mac before it connects to the
+   server, and it streams nothing when the server uses the classic image store
+   and an image is missing there. `--dry-run` does the checks and prints the
+   steps: it pulls, tags, saves, copies and loads nothing. ssh runs in batch
+   mode (also `-T -a -x`, no forwarding, no local command, `-n` on each check)
+   and sudo with `-n`, so the helper never asks. It runs one stream at a time
+   for each server: the host name and port that `ssh -G` gives for the ssh name.
+
+   `--file` is for a big image over a link that can break (the Odoo image is
+   3.42 GB). For each image, the helper saves the stream tag to an archive on
+   the Mac (in `$TMPDIR/stream-image-archives`, under the name of the stream
+   tag) and records its `shasum -a 256`. It copies the archive with `rsync
+   --partial` (the same ssh options) to the folder `~/stream-image` (0700) of
+   the ssh user on the server, and `sha256sum` there must give the same value.
+   Then it runs `sudo -n docker load -i` on that archive and the same check.
+   Only when the check passes does it remove the archive on both sides. A run
+   after a break resumes from the archive that it kept on the Mac, and rsync
+   uses the part on the server. The server needs `rsync` and `sha256sum`.
+
+   With Docker alone, the stream of one image is these commands; each
+   `--no-pull` run prints them with the values of its pins:
+
+   ```bash
+   docker pull --platform linux/amd64 IMAGE
+   docker tag REPOSITORY@DIGEST REPOSITORY:sha256-HEX
+   docker save REPOSITORY:sha256-HEX | ssh grey 'sudo -n docker load'
+   ```
+
+2. On the server, with the options of the run:
+
+   ```bash
+   sudo bash deploy-app.sh --no-pull --non-interactive --line demo-uiux --config /root/app.env --dir /opt/perodua-app-demo
+   sudo bash iss-api.sh install --no-pull --non-interactive
+   sudo bash rp-adapter.sh install --no-pull --non-interactive
+   ```
+
+Before the first change, each `--no-pull` run finds each pinned image by its
+digest reference (`REPOSITORY@sha256:` and the pinned digest). It checks that
+the registry digest of the image, and on the containerd image store also its
+ID, is the pinned digest. Then it starts the image once, with no pull and no
+network (`docker run --rm --pull never --network none --entrypoint sh IMAGE -c
+:`), so that an image whose layers did not unpack stops the run. Each image has
+a shell: the Odoo image and the web image start with a shell script, the
+`compose.yml` of `iss-api.sh` runs `sh`, and the adapter image has `sh` (the
+Odoo, web and adapter images of grey v0.60.0 started so on the Mac,
+2026-11-10). When an image is not there, or does not start, the run stops
+before any change (no file in `--dir`, no container, volume, network or
+database change, exit status 1, or 3 for `rp-adapter.sh`) and prints the
+commands for the Mac. `iss-api.sh status` and `rp-adapter.sh status` show the
+result of the check of the digest in their `Local:` line.
+
+- `deploy-app.sh`: each container that it starts through Compose gets `--pull
+  never`: the one-off containers of the checks, of the module upgrade and of
+  the backup of `--upgrade`, the App, and the App that starts again after a
+  failed `--upgrade` or `--replace`. `docker compose run` has `--pull` from
+  Docker Compose 2.32.2: with an older Compose the run stops before any change.
+  `KIT_NO_PULL=1` also gives `--release-queued-mail` and `--send-test-mail`
+  `--pull never` (the option `--no-pull` belongs to a deployment only). The
+  variable also reaches the `deploy-app.sh` that `service.sh reset` runs:
+  `sudo env KIT_NO_PULL=1 bash service.sh --role app reset --confirm DATABASE`.
+  `--mail` asks questions, so it stops with `--no-pull`.
+- `iss-api.sh`: `start`, `restart` and `gen-key` never pull (`up --pull never`).
+- `rp-adapter.sh`: `KIT_NO_PULL=1` also covers `health`, `survey`, `export`,
+  `api-health` and `run`: each checks the image the same way before it runs the
+  adapter. The adapter always runs with `--pull never`.
+
+The classic image store keeps no registry digest for an image from `docker
+load`. On that store a `--no-pull` run uses only an image that a pull brought
+before, and otherwise stops with a message, before any change. The helper
+agrees: it streams nothing to such a server. To switch an engine to the
+containerd image store, see [Install from a streamed image](#install-from-a-streamed-image).
+
+Each pin must be one image manifest, not a multi-platform index: the pull on
+the Mac brings one platform of an index, and `docker save` cannot save the
+rest. The helper stops before the stream for an index. The demo-uiux Odoo pin
+of this kit (`demo-uiux-grey-v0.56.1`, `sha256:74286eb8...`) is an index
+(`docker image inspect --format '{{json .Descriptor}}'` on the Mac,
+2026-11-10), so the helper cannot stream it. The Odoo image (`cc0bc93d...`)
+and the web image (`468b48c3...`) of grey v0.60.0 and the adapter
+`v0.8.0-oracle2` (`9df3d38f...`) are each one manifest.
+
+These paths of the kit still pull an image that is missing. No `--no-pull` run
+starts them:
+
+- `service.sh --role app start` and the checks of `service.sh reset` (Compose
+  pulls a missing image; it never asks).
+- The `rollback.sh` that `deploy-app.sh --replace` writes, and the steps in the
+  `restore.txt` of `deploy-app.sh --upgrade`.
+- `https.sh`: lego and acme.sh from Docker Hub, when they are not on the server.
+
+So keep the images on the server while a deployment uses them.
 
 ## Operations
 
@@ -2691,7 +2839,11 @@ types the registry password on a server (owner rule of 2026-11-10). The Mac has
 the registry login: it streams the pinned image to the server over ssh, and
 `install --no-pull` uses that image. With `--no-pull`, `install` never pulls,
 never logs in to the registry and never asks a question. The users, the
-settings, Compose and the health checks are the same as without it.
+settings, Compose and the health checks are the same as without it. For the
+other kit scripts and for images that no kit script pins, see [Install from
+streamed images](#install-from-streamed-images): `scripts/stream-image.sh`
+streams the pin of `oracle-view.sh` too (`bash scripts/stream-image.sh grey
+oracle-view.sh`).
 
 1. On the Mac, in this repository, with Docker Desktop on the containerd image
    store, an ssh key that logs in to the App server without a question, and
