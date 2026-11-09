@@ -948,6 +948,73 @@ sudo bash deploy-app.sh
 
 Sign in with the web login from the backup.
 
+## Run the kit without a person (agents)
+
+An agent, or another run that no person watches, gives each answer as an
+option or a setting. Then no kit script waits for a question.
+
+Set one of these two in each run:
+
+- `KIT_NON_INTERACTIVE=1` in the environment. `sudo` removes the environment:
+  put the variable after `sudo env`, as in
+  `sudo env KIT_NON_INTERACTIVE=1 bash uninstall.sh --role app --confirm perodua-client-uiux`.
+- `--non-interactive` on the command line of the script.
+
+With either one, a script never reads the terminal: not stdin and not
+`/dev/tty`, also when `ssh -t` gives it a pseudo-terminal. If no option or
+setting gives an answer, the run stops before it changes anything, and the
+error names the option. A script that starts another kit script passes the
+mode on: `service.sh reset` runs `deploy-app.sh --non-interactive`.
+`KIT_NON_INTERACTIVE` is `1` (never ask) or `0` or empty (ask on a terminal);
+another value stops the run at once.
+
+Without them, a script asks only when its stdin is a terminal. A script cannot
+tell the `ssh -t` session of a person from the session of an agent: both are
+pseudo-terminals. Thus an agent always sets the variable or the option.
+
+| Script | Question | Option or setting that answers it |
+| --- | --- | --- |
+| `deploy-db.sh` | Guided setup without `deploy.conf`: what to set up, where the App runs, this server's internal IP, a public IP, the App server's IP, save | `--app-ip ADDRESS[/PREFIX] --listen-ip ADDRESS` (the App on another server; `--allow-public-listen` accepts a public `--listen-ip`) or `--app-here` (the App on this server). They always set up a fresh UAT system (`DB_MODE=empty`) and save `deploy.conf`. For a restore, write `deploy.conf` (`deploy.conf.example`) |
+| `deploy-db.sh` | Database password | `--password-file FILE` (root-owned, `chmod 600`) |
+| `deploy-db.sh` | Cloud download password of `DOWNLOAD_USER` | `--cloud-password-file FILE` (root-owned, `chmod 600`). curl gets it on its stdin and never asks |
+| `service.sh` | `reset`: type the database name | `--confirm DATABASE` |
+| `uninstall.sh` | Type the database or project name | `--confirm NAME` |
+| `uninstall.sh` | `--role db --purge`: type PURGE | `--confirm-purge PURGE` |
+| `uninstall.sh` | Other containers with "perodua": delete them? | `--delete-old-containers PROJECT`, once for each Compose project (`-` for the containers without one). A project that it does not name stays |
+| `uninstall.sh` | Also delete their volumes? | `--delete-old-volumes`. Without it the volumes stay |
+| `deploy-app.sh` | Database settings, web port, who may open the page, outgoing email | `--config FILE` or `app.env` (`DB_HOST`, `BIND_IP`, the `SMTP_` settings, `MAIL_REDIRECT_TO`). `--mail` asks, and stops at once |
+| `deploy-app.sh` | Database password, SMTP password | `DB_PASSWORD_FILE`, `SMTP_PASSWORD_FILE`, or the saved secrets of an earlier run |
+| `deploy-app.sh` | Registry login | `docker login perodua-deploy.novutal.com` on the server first; there is no option |
+| `deploy-app.sh` | `--upgrade` with a module upgrade: type the database name | `--confirm DATABASE` |
+| `deploy-app.sh` | `--init-db`: delete the attachments volume that an earlier deployment of the project left files in | `--delete-old-attachments PROJECT_NAME_filestore`. Without it, the run stops before the volume or the database changes |
+| `iss-api.sh` | First install: the settings and the database password | `--config FILE` with `DB_PASSWORD_FILE`, or the saved `iss-api.env` |
+| `iss-api.sh` | Registry login | `docker login` first |
+| `iss-api.sh` | `uninstall`: type the project name | `--confirm PROJECT` |
+| `iss-api.sh` | `check --key`: the API key | `check --key-file FILE` (the key on the first line) |
+| `rp-adapter.sh` | First install: the settings and the secrets | `--config FILE` with `DB_PASSWORD_FILE` (and `API_KEY_FILE` with `API_URL`), or the saved `rp-adapter.env` |
+| `rp-adapter.sh` | Registry login | `docker login` first |
+| `rp-adapter.sh` | `uninstall`: type the directory | `--confirm DIR` |
+| `https.sh` | `csr --key` with an encrypted key: its pass phrase | `--key-pass-file FILE` (the pass phrase on the first line). openssl never asks |
+| `https.sh` | `uninstall`: type yes | `--confirm yes` |
+| `install-dependencies.sh` | None | apt-get runs with `-y`, `DEBIAN_FRONTEND=noninteractive`, and keeps a changed configuration file (`--force-confdef --force-confold`) |
+
+`oracle-view.sh` does not read `KIT_NON_INTERACTIVE` yet: another change of
+the same day changes it. Give it `--non-interactive` (install), `--confirm WORD`
+(`uninstall`, `drop-role`), and run it without `ssh -t`.
+
+`iss-api.sh logs --follow` asks nothing, but it runs until it is stopped: an
+agent uses `logs` without `--follow`.
+
+For example, a fresh UAT system on two servers:
+
+```bash
+# DB server (10.0.0.10), for the App server 10.0.0.20:
+sudo env KIT_NON_INTERACTIVE=1 bash deploy-db.sh --app-ip 10.0.0.20 --listen-ip 10.0.0.10 \
+  --password-file /root/db.password
+# App server: app.env holds DB_HOST=10.0.0.10, BIND_IP and DB_PASSWORD_FILE=/root/db.password
+sudo env KIT_NON_INTERACTIVE=1 bash deploy-app.sh --config /root/app.env --init-db
+```
+
 ## Operations
 
 Back up the database on the DB server and the filestore volume on the App server.
