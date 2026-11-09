@@ -717,8 +717,9 @@ standard input and the user. It checks:
   `log_transaction_sample_rate`, `pg_stat_statements.track_utility`,
   `VERBOSITY terse` and `SHOW_CONTEXT never` come before each statement with the
   verifier, also after `\connect postgres`; before any change, the script reads
-  the owner of `perodua_oracle2` and stops for a superuser owner or the role
-  itself; the grants of the owner decision are there, with one membership in the
+  the owner of `perodua_oracle2` and stops for a superuser owner, and stops when
+  the role owns `perodua_oracle2` or `perodua_oracle`; the grants of the owner
+  decision are there, with one membership in the
   owner of `perodua_oracle2` (read again, never a superuser or the role, `WITH
   INHERIT TRUE, SET FALSE`, without a `NOTICE` on a later run) after `CONNECT`
   and before `\connect` to that database; no `TRUNCATE`, `SUPERUSER`, `GRANT
@@ -728,17 +729,29 @@ standard input and the user. It checks:
   oracle_view_rp`, `REVOKE ALL ... FROM PUBLIC`, `GRANT USAGE, CREATE`), and that
   `GRANT` and that `REVOKE` are the only `CREATE ... ON SCHEMA` and the only
   `REVOKE` of the role SQL; in the old database, after the end of the sessions
-  of the role there, one transaction holds `DROP OWNED BY oracle_view_rp` and `GRANT CONNECT,
+  of the role there (each one waited for), one transaction holds the SQL that
+  gives the objects of the role there to the owner of that database and names
+  them, `DROP OWNED BY oracle_view_rp` right after it and `GRANT CONNECT,
   TEMPORARY ON DATABASE :"ovb_db"`, and only when that database exists;
   `oracle_view_ro` gets `DROP OWNED BY` in both databases before `DROP ROLE`;
+- that SQL (`REASSIGN_SQL`, read from the script) lists the objects of the role
+  from `pg_shdepend` (not its default privileges or user mappings), stops when
+  the role owns the database ("A different owner is needed first"), runs
+  `REASSIGN OWNED BY oracle_view_rp TO` the owner of the database, names the
+  objects, and drops nothing; the role SQL has it once and the drop SQL twice,
+  each time right before `DROP OWNED BY oracle_view_rp`;
 - a `FAIL` right (also `TRUNCATE on every table of public` and `CREATE in
   public`), a `FAIL` line of the membership in the owner of the database (not a
-  member, `SET TRUE`, a superuser owner; with the hint for the membership, and
-  only then), a right on another database (with the way to remove it), a `FAIL`
-  line of `ovb_stage` (with the hint for the schema, and only then) or a short
-  answer (12, 13, 15 or 16 lines, not 17) stops before the `pg_hba.conf` check;
-  the two `INFO` lines (objects of the role outside `ovb_stage`, the other
-  databases of the owner) never stop it, also with objects there;
+  member, `SET TRUE`, a superuser owner, `SET ROLE` or `ADMIN` through another
+  role; with the hint for the membership, and only then), a right on another
+  database (with the way to remove it, and the `REASSIGN OWNED BY` that keeps
+  the objects of the role there), a `FAIL` line of `ovb_stage` (with the hint
+  for the schema, and only then) or a short answer (12, 14, 15, 16 or 17 lines,
+  not 18) stops before the `pg_hba.conf` check; the check SQL reads each direct
+  grant and the paths through other roles (`pg_has_role` with `SET` and
+  `MEMBER WITH ADMIN OPTION`); the three `INFO` lines (objects of the role
+  outside `ovb_stage`, the other databases of the owner, the other roles of
+  which it is a member) never stop it, also with objects and roles there;
 - `role` and `role --check` list the staging tables of `ovb_stage` with their
   sizes and the total, after the rights and before TLS, and add the hint to free
   the disk; an answer that the script cannot read stops the command;
@@ -761,13 +774,20 @@ standard input and the user. It checks:
 - `drop-role` needs `--confirm oracle_view_rp` and sends the steps in order, for
   each role (`NOLOGIN`, end the sessions, `DROP OWNED BY` in `perodua_oracle2`
   and then in `perodua_oracle` when it exists, `DROP ROLE`); for
-  `oracle_view_rp`, between the end of the sessions and `DROP OWNED BY`, the
+  `oracle_view_rp`, first the stop (before `NOLOGIN`) when the role owns
+  `perodua_oracle2` or `perodua_oracle` ("A different owner is needed first"),
+  then the end of each session, waited for (`pg_terminate_backend(pid,
+  5000)`), and between it and `DROP OWNED BY` the
   count of the staging tables, the stop that gives the `LOGIN` back when they
   hold data without the choice (`-v ovb_drop_staging=off`), the count of the
   objects outside `ovb_stage` that depend on it and the stop that gives the
-  `LOGIN` back when there are any, and `DROP SCHEMA ovb_stage CASCADE`; tables,
+  `LOGIN` back when there are any, and `DROP SCHEMA ovb_stage CASCADE`; for a
+  schema `ovb_stage` of another owner, a `DROP` of each staging table of the
+  role there; then, in each database, the SQL that gives the other objects of
+  the role to the owner of the database right before `DROP OWNED BY`; tables,
   partitioned tables and materialized views count as staging tables; the output
-  says that the staging tables and their data are dropped;
+  says that the staging tables and their data are dropped, and that the other
+  objects of the role stay with the owner of their database;
 - `drop-role` with staging tables lists them and stops (exit 1, no SQL script)
   before the confirmation, with the `pg_dump` hint and `--drop-staging`;
   `--drop-staging` alone does not confirm; with both, the script sends
@@ -786,8 +806,8 @@ database `perodua_oracle2` (a table and a view) and the old database
 makes them, and the role `oracle_view_ro` of an earlier bundle with rights in
 both. `role` sets exactly the verifier of the file, drops `oracle_view_ro`, and
 keeps the verifier out of the server log and the output (15 `OK` lines, and the
-two `INFO` lines: no object outside `ovb_stage`, and `perodua_oracle` as the
-other database of `odoo`). As the tool signs in (TCP, the made-up password), the
+`INFO` lines: no object outside `ovb_stage`, and `perodua_oracle` as the other
+database of `odoo`). As the tool signs in (TCP, the made-up password), the
 role reads, is read-only by default, writes in a `READ WRITE` transaction (also
 in a table that the owner makes later), and with the rights of `odoo` can
 `TRUNCATE`, `ALTER` and `CREATE` (rolled back), but cannot `SET ROLE odoo`.
@@ -867,7 +887,11 @@ role itself, it revokes the membership for that check:
 - `perodua_oracle` renamed away: `role` skips the step (exit 0, 15 `OK` lines,
   `oracle_view_ro` dropped) and `drop-role` succeeds;
 - `drop-role` with rights of `oracle_view_rp` and `oracle_view_ro` in both
-  databases drops both roles and keeps the rows.
+  databases drops both roles and keeps the rows;
+- a table that the tool makes in `perodua_oracle` (through the membership in
+  `odoo`) survives the next `role` run: `role` names it, it is then owned by
+  `odoo` with its row, and the role has no right left there; a third run names
+  nothing; a later table there survives `drop-role` too, which names it.
 
 The staging schema `ovb_stage` of Copy to RP, on the same cluster:
 - `role` makes it, owned by `oracle_view_rp` with the ACL
@@ -898,8 +922,10 @@ The staging schema `ovb_stage` of Copy to RP, on the same cluster:
 - a schema `ovb_stage` of the Odoo role, with a table, made before the role:
   `role` gives no right there and exits 1 with the `FAIL` line `owns the schema
   ovb_stage` (with the owner `odoo`), 14 `OK` lines (`USAGE and CREATE` there
-  come through the membership in `odoo`) and the hint; `drop-role` drops the
-  role and leaves that schema and its table.
+  come through the membership in `odoo`) and the hint; with those rights the
+  tool makes a staging table there; `drop-role` lists it and stops without
+  `--drop-staging`; with it, it drops only that table and the role, and leaves
+  that schema and the table of `odoo`.
 
 The rights of the owner of the database (owner decision of 2026-11-09), on the
 same cluster:
@@ -910,15 +936,28 @@ same cluster:
   `public` (committed), and `ALTER TABLE` and `TRUNCATE` of an Odoo table
   succeed (rolled back); `SET ROLE odoo` and `ALTER TABLE ... OWNER TO odoo`
   fail; `role --check` exits 0 and names the table in the `INFO` line;
-- without the membership, and with a grant `WITH INHERIT TRUE, SET TRUE`,
-  `role --check` gives the `FAIL` line of the membership with what it has and
-  the hint, and exits 1; `role` sets `SET FALSE` again on its own grant;
-  `ADMIN` stays after `role` (exit 1) until `REVOKE ADMIN OPTION FOR` by hand;
+- without the membership, and with a grant `WITH INHERIT TRUE, SET TRUE` (the
+  tool can then `SET ROLE odoo`), `role --check` gives the `FAIL` line of the
+  membership with what it has and the hint, and exits 1; `role` sets `SET
+  FALSE` again on its own grant; with `ADMIN TRUE`, `role` exits 1 and `role
+  --check` gives the `FAIL` line until `REVOKE ADMIN OPTION FOR` by hand;
+- a bridge role between the role and `odoo`, with the direct grant still
+  right: `SET` on both links (the tool can `SET ROLE odoo`), or `ADMIN` on
+  `odoo` for the bridge; `role --check` gives the `FAIL` line ("through another
+  role"), names the bridge in the `INFO` line of the other roles, and exits 1;
+  without the bridge it exits 0 with `none` there;
+- `drop-role` gives the objects that the tool made outside `ovb_stage` (a table
+  in `public`, a schema with a table and its sequence) to `odoo`, names the
+  four, and drops the role; the objects keep their rows;
 - with `postgres` (a superuser) as the owner of `perodua_oracle2`, `role` stops
   with exit 1 before any change: no role is made, and `oracle_view_ro` stays;
   with `oracle_view_rp` as the owner, `role` stops too (its `CONNECTION LIMIT`
   stays as it was), and `role --check` names it in the `FAIL` line of the
-  membership.
+  membership; with `oracle_view_rp` as the owner of `perodua_oracle2`, or of
+  `perodua_oracle` (`role` stops then too), `drop-role` stops before any change
+  ("A different owner is needed first"): the role keeps its `LOGIN`, `ovb_stage`
+  stays and its table in `public` keeps its owner; with `odoo` as the owner
+  again, `drop-role` gives that table to `odoo` and succeeds.
 
 `StatementStatsOnPostgresTest` starts a second cluster (port 55433) with
 `pg_stat_statements` loaded and `track_utility` on: it records the utility

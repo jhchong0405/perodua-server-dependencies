@@ -92,14 +92,19 @@ role       Creates or updates the role oracle_view_rp on the database $RP_DATABA
            CREATE there). It makes the role a member of the owner of
            $RP_DATABASE WITH INHERIT TRUE, SET FALSE (owner decision of
            2026-11-09): every right of that owner (DDL, DROP and TRUNCATE on the
-           Odoo tables, CREATE in public), but no SET ROLE to it. It stops
-           before any change when that owner is a superuser or oracle_view_rp
-           itself. It ends the
+           Odoo tables, CREATE in public), but no SET ROLE to it. A membership
+           is for the whole server: the role also gets the rights of that owner
+           on its other databases (CONNECT, ALTER DATABASE, DROP DATABASE;
+           pg_hba.conf decides the logins) and the memberships of that owner. It
+           stops before any change when that owner is a superuser, or when
+           oracle_view_rp owns $RP_DATABASE or $OLD_RP_DATABASE. It ends the
            sessions of the role in $OLD_RP_DATABASE (the database of the earlier
-           releases) and removes its rights there. Then it checks the rights (also
-           that the role has no right of its own on another database), names
-           the objects of the role outside $STAGE_SCHEMA and the other databases
-           of the owner (INFO lines), lists the tables in $STAGE_SCHEMA with their
+           releases) and removes its rights there. The objects of the role there
+           go to the owner of that database and stay. Then it checks the rights
+           (also that the role has no right of its own on another database),
+           names the objects of the role outside $STAGE_SCHEMA, the other
+           databases of the owner and the other roles of which the role is a
+           member (INFO lines), lists the tables in $STAGE_SCHEMA with their
            sizes, shows SHOW ssl and whether dblink or postgres_fdw is
            installed, and checks pg_hba.conf for
            the App server (--app-ip, default 192.168.23.13). It never edits
@@ -109,7 +114,12 @@ drop-role  Ends the sessions of oracle_view_rp and drops the role and its grants
            in $RP_DATABASE and $OLD_RP_DATABASE. It also drops the schema
            $STAGE_SCHEMA with its staging tables and their data: when
            $STAGE_SCHEMA holds tables, it lists them and stops unless
-           --drop-staging is given. Rows that the SQL console changed stay
+           --drop-staging is given. The other objects of the role in
+           $RP_DATABASE and $OLD_RP_DATABASE (what the SQL console made, a table
+           in public for example) stay: it gives them to the owner of that
+           database and names them. It stops before any change when
+           oracle_view_rp owns one of these databases: a different owner is
+           needed first. Rows that the SQL console changed stay
            changed. Type the role name to confirm, or pass it with --confirm.
 Exit codes: 0 done; 1 error; 2 usage; role: 3 pg_hba.conf needs the printed line,
 4 pg_hba.conf needs a check by hand (a line the check cannot read, or an error).
@@ -663,6 +673,38 @@ read_verifier() {   # $1 file: one line, a SCRAM-SHA-256 verifier; its value is 
     VERIFIER=$text
 }
 
+# The objects of oracle_view_rp in the current database (what the SQL console made with the
+# rights of the owner of the database, for example a table in public) go to the owner of
+# that database and stay; psql names them. Each DROP OWNED BY oracle_view_rp of role and
+# drop-role comes right after it, so it drops none of them (owner decision of 2026-11-09).
+# pg_shdepend lists each object of the role (an index or a TOAST table belongs to its
+# table); REASSIGN OWNED BY does not move a default privilege or a user mapping, and DROP
+# OWNED BY removes them. When the role itself owns the database (a superuser, or a REASSIGN
+# OWNED BY of the console, can make it so), its objects have no other owner to go to: the
+# checks at the start of role and drop-role stop before any change, and this one stops too.
+REASSIGN_SQL=$(cat <<'SQL'
+SELECT count(*) AS ovb_kept, count(*) > 0 AS ovb_kept_any, current_database() AS ovb_kept_db,
+       (SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = current_database()) AS ovb_kept_owner,
+       (SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = current_database()) = 'oracle_view_rp'
+         AS ovb_kept_self,
+       coalesce(string_agg('    ' || o.type || ' ' || o.identity, E'\n' ORDER BY o.type, o.identity), '') AS ovb_kept_list
+  FROM pg_shdepend s CROSS JOIN LATERAL pg_identify_object(s.classid, s.objid, s.objsubid) o
+ WHERE s.dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+   AND s.deptype = 'o' AND s.refclassid = 'pg_authid'::regclass
+   AND s.refobjid = (SELECT oid FROM pg_roles WHERE rolname = 'oracle_view_rp')
+   AND s.classid NOT IN ('pg_default_acl'::regclass, 'pg_user_mapping'::regclass) \gset
+\if :ovb_kept_self
+\echo oracle_view_rp owns :ovb_kept_db: its objects there cannot go to another owner. A different owner is needed first.
+DO $$ BEGIN RAISE EXCEPTION 'oracle_view_rp owns the database: give it a different owner first'; END $$;
+\endif
+SELECT format('REASSIGN OWNED BY oracle_view_rp TO %I', :'ovb_kept_owner') \gexec
+\if :ovb_kept_any
+\echo :ovb_kept objects of oracle_view_rp stay in :ovb_kept_db, now owned by :ovb_kept_owner, the owner of the database:
+\echo :ovb_kept_list
+\endif
+SQL
+)
+
 role_sql() {   # after a \set ovb_verifier line: create or update the role and its grants
     cat <<'SQL'
 -- oracle-view.sh: role
@@ -680,17 +722,22 @@ SET log_transaction_sample_rate = 0;
 SET pg_stat_statements.track_utility = off;
 -- The role gets the rights of the owner of ovb_db through a membership in that owner
 -- (owner decision of 2026-11-09). The rights of a superuser owner would be every right
--- on the server, and a role cannot be a member of itself: then the run stops here,
--- before any change.
-SELECT r.rolname AS ovb_owner, r.rolsuper AS ovb_owner_super, r.rolname = 'oracle_view_rp' AS ovb_owner_self
+-- on the server. A role cannot be a member of itself, and the objects of the role in
+-- ovb_db and ovb_old_db go to the owner of the database (REASSIGN_SQL), never to the role
+-- itself. Then the run stops here, before any change.
+SELECT r.rolname AS ovb_owner, r.rolsuper AS ovb_owner_super
   FROM pg_database d JOIN pg_roles r ON r.oid = d.datdba WHERE d.datname = :'ovb_db' \gset
+SELECT count(*) > 0 AS ovb_owner_self, coalesce(string_agg(d.datname, ' and ' ORDER BY d.datname), '') AS ovb_owned
+  FROM pg_database d JOIN pg_roles r ON r.oid = d.datdba
+ WHERE d.datname IN (:'ovb_db', :'ovb_old_db') AND r.rolname = 'oracle_view_rp' \gset
 \if :ovb_owner_super
 \echo The owner of :ovb_db is :ovb_owner, a superuser. oracle_view_rp gets the rights of the owner of the database
 \echo (owner decision of 2026-11-09): the rights of a superuser are every right on the server. Nothing was changed.
 DO $$ BEGIN RAISE EXCEPTION 'the owner of the RP database is a superuser: give the database an owner that is not a superuser (the role of the App), then run role again'; END $$;
 \elif :ovb_owner_self
-\echo oracle_view_rp owns :ovb_db: a role cannot be a member of itself. Nothing was changed.
-DO $$ BEGIN RAISE EXCEPTION 'oracle_view_rp owns the RP database: give the database back to the role of the App, then run role again'; END $$;
+\echo oracle_view_rp owns :ovb_owned. A different owner is needed first (the role of the App, not a superuser): a role
+\echo cannot be a member of itself, and the objects of oracle_view_rp go to the owner of the database. Nothing was changed.
+DO $$ BEGIN RAISE EXCEPTION 'oracle_view_rp owns the RP database or the old database: give it a different owner first, then run role again'; END $$;
 \endif
 SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'oracle_view_ro') AS ovb_ro,
        EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'oracle_view_rp') AS ovb_rp,
@@ -711,13 +758,16 @@ SELECT count(pg_terminate_backend(pid)) AS ended_sessions FROM pg_stat_activity 
 -- after the COMMIT: a session that opened before it keeps its way in, and after it no new
 -- session can start with a right of the role (PUBLIC has no CONNECT there). When the owner
 -- of ovb_db owns ovb_old_db too, the role has the rights of that owner there through its
--- membership: line 17 of the rights check names such a database. No old database, or one
--- that does not accept connections (ALLOW_CONNECTIONS false, or a database half dropped):
--- nothing to do here, and check 12 still lists a right that stays there.
+-- membership: line 17 of the rights check names such a database, and the role can make
+-- objects there. They go to the owner of ovb_old_db before DROP OWNED BY (REASSIGN_SQL):
+-- the cleanup drops none of them. No old database, or one that does not accept connections
+-- (ALLOW_CONNECTIONS false, or a database half dropped): nothing to do here, and check 12
+-- still lists a right that stays there. Each session ends before the next step (up to 5 s
+-- for each), so that no temporary table of an ending session is an object of the role.
 \if :ovb_old
 \if :ovb_rp
 \echo The rights of oracle_view_rp in :ovb_old_db, the database of the earlier releases: its sessions there end and the rights are removed
-SELECT count(pg_terminate_backend(pid)) AS ended_sessions FROM pg_stat_activity
+SELECT count(pg_terminate_backend(pid, 5000)) AS ended_sessions FROM pg_stat_activity
  WHERE usename = 'oracle_view_rp' AND datname = :'ovb_old_db' \gset
 \endif
 \connect :ovb_old_db
@@ -732,6 +782,9 @@ BEGIN;
 DROP OWNED BY oracle_view_ro;
 \endif
 \if :ovb_rp
+SQL
+    printf '%s\n' "$REASSIGN_SQL"
+    cat <<'SQL'
 DROP OWNED BY oracle_view_rp;
 GRANT CONNECT, TEMPORARY ON DATABASE :"ovb_db" TO oracle_view_rp;
 \endif
@@ -769,7 +822,8 @@ CREATE ROLE oracle_view_rp LOGIN PASSWORD :'ovb_verifier' CONNECTION LIMIT 10;
 -- DROP and TRUNCATE on the Odoo tables, CREATE in public and in new schemas), but it
 -- cannot SET ROLE to the owner, so what it makes is its own. No superuser and no other
 -- role attribute. A membership is for the whole server: the role has the same rights on
--- the other databases of that owner (line 17 of the rights check names them).
+-- the other databases of that owner (line 17 of the rights check names them), and it
+-- gets the memberships of that owner too (line 18).
 ALTER ROLE oracle_view_rp NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
 ALTER ROLE oracle_view_rp SET default_transaction_read_only = on;
 ALTER ROLE oracle_view_rp SET statement_timeout = '30s';
@@ -823,10 +877,10 @@ SQL
 }
 
 # One line per right, "OK|what" or "FAIL|what", in the database RP_DATABASE, then lines
-# 16 and 17, "INFO|what": they inform and never fail.
+# 16 to 18, "INFO|what": they inform and never fail.
 # has_table_privilege with a list is true when ANY of the rights is held: each right is checked alone.
 ROLE_CHECK_SQL=$(cat <<'SQL'
-SELECT CASE WHEN n IN (16, 17) THEN 'INFO' WHEN ok THEN 'OK' ELSE 'FAIL' END || '|' || what FROM (
+SELECT CASE WHEN n IN (16, 17, 18) THEN 'INFO' WHEN ok THEN 'OK' ELSE 'FAIL' END || '|' || what FROM (
   SELECT 1 AS n, left(rolpassword, 14) = 'SCRAM-SHA-256$' AS ok, 'the password is a SCRAM-SHA-256 verifier' AS what
     FROM pg_authid WHERE rolname = 'oracle_view_rp'
   UNION ALL
@@ -872,21 +926,30 @@ SELECT CASE WHEN n IN (16, 17) THEN 'INFO' WHEN ok THEN 'OK' ELSE 'FAIL' END || 
   -- A member of the owner, never of a superuser owner: INHERIT (the rights of the owner),
   -- no SET (no SET ROLE to the owner) and no ADMIN (no grant of the owner to others). Each
   -- grantor of the membership has a row in pg_auth_members: each option counts for all.
+  -- pg_has_role also follows the paths through other roles: no SET ROLE to the owner and
+  -- no ADMIN on it through another role either.
   SELECT 11, coalesce(bool_or(m.inherit_option) AND NOT bool_or(m.set_option) AND NOT bool_or(m.admin_option), false)
-             AND NOT o.rolsuper,
+             AND NOT o.rolsuper AND o.rolname <> 'oracle_view_rp'
+             AND NOT pg_has_role('oracle_view_rp', o.oid, 'SET')
+             AND NOT pg_has_role('oracle_view_rp', o.oid, 'MEMBER WITH ADMIN OPTION'),
          'member of ' || o.rolname || ', the owner of ' || current_database()
          || ', with INHERIT TRUE, SET FALSE, ADMIN FALSE'
          || CASE WHEN o.rolsuper THEN ' (' || o.rolname || ' is a superuser)'
                  WHEN o.rolname = 'oracle_view_rp' THEN ' (oracle_view_rp owns the database)'
                  WHEN count(m.member) = 0 THEN ' (it is not a member)'
-                 WHEN bool_or(m.inherit_option) AND NOT bool_or(m.set_option) AND NOT bool_or(m.admin_option) THEN ''
-                 ELSE ' (it has INHERIT ' || upper(bool_or(m.inherit_option)::text) || ', SET '
-                      || upper(bool_or(m.set_option)::text) || ', ADMIN ' || upper(bool_or(m.admin_option)::text) || ')' END
+                 WHEN NOT (bool_or(m.inherit_option) AND NOT bool_or(m.set_option) AND NOT bool_or(m.admin_option))
+                 THEN ' (it has INHERIT ' || upper(bool_or(m.inherit_option)::text) || ', SET '
+                      || upper(bool_or(m.set_option)::text) || ', ADMIN ' || upper(bool_or(m.admin_option)::text) || ')'
+                 WHEN pg_has_role('oracle_view_rp', o.oid, 'SET')
+                 THEN ' (it can SET ROLE to ' || o.rolname || ' through another role)'
+                 WHEN pg_has_role('oracle_view_rp', o.oid, 'MEMBER WITH ADMIN OPTION')
+                 THEN ' (it has ADMIN on ' || o.rolname || ' through another role)'
+                 ELSE '' END
     FROM pg_database d JOIN pg_roles o ON o.oid = d.datdba
     LEFT JOIN pg_auth_members m ON m.roleid = d.datdba
                                AND m.member = (SELECT oid FROM pg_roles WHERE rolname = 'oracle_view_rp')
    WHERE d.datname = current_database()
-   GROUP BY o.rolname, o.rolsuper
+   GROUP BY o.oid, o.rolname, o.rolsuper
   UNION ALL
   -- A right in another database (a grant, a default privilege or an object there) or on it.
   SELECT 12, count(*) = 0, 'no right on a database other than ' || current_database()
@@ -935,19 +998,29 @@ SELECT CASE WHEN n IN (16, 17) THEN 'INFO' WHEN ok THEN 'OK' ELSE 'FAIL' END || 
      AND NOT (s.classid = 'pg_namespace'::regclass AND o.identity = 'ovb_stage')
   UNION ALL
   -- INFO: a membership is for the whole server. The role has the rights of the owner of
-  -- this database on each other database of that owner too; pg_hba.conf decides where it
-  -- can log in.
+  -- this database on each other database of that owner too (CONNECT, ALTER DATABASE, DROP
+  -- DATABASE); pg_hba.conf decides where it can log in.
   SELECT 17, NULL, 'other databases of ' || o.rolname || ', with its rights through the membership: '
          || coalesce(string_agg(x.datname, ', ' ORDER BY x.datname), 'none')
     FROM pg_database d JOIN pg_roles o ON o.oid = d.datdba
     LEFT JOIN pg_database x ON x.datdba = d.datdba AND x.oid <> d.oid
    WHERE d.datname = current_database()
    GROUP BY o.rolname
+  UNION ALL
+  -- INFO: the other roles of which the role is a member, directly or through the owner (it
+  -- also gets the memberships of the owner). pg_database_owner: the owner of this database
+  -- is its member.
+  SELECT 18, NULL, 'other roles of which it is a member (also through ' || o.rolname || '): '
+         || coalesce((SELECT string_agg(x.rolname, ', ' ORDER BY x.rolname) FROM pg_roles x
+                       WHERE x.rolname NOT IN ('oracle_view_rp', 'pg_database_owner') AND x.oid <> o.oid
+                         AND pg_has_role('oracle_view_rp', x.oid, 'MEMBER')), 'none')
+    FROM pg_database d JOIN pg_roles o ON o.oid = d.datdba
+   WHERE d.datname = current_database()
 ) checks ORDER BY n
 SQL
 )
 
-ROLE_CHECKS=17   # the lines of ROLE_CHECK_SQL
+ROLE_CHECKS=18   # the lines of ROLE_CHECK_SQL
 role_checks() {   # prints each right and each INFO line; a missing or an extra right stops the command
     local out result what failed=0 elsewhere=0 stage=0 member=0
     out=$(pg_value "$RP_DATABASE" "$ROLE_CHECK_SQL") || die 'The check of the rights failed (above)'
@@ -980,6 +1053,10 @@ role_checks() {   # prints each right and each INFO line; a missing or an extra 
             "$RP_ROLE" "$RP_DATABASE" "$RP_ROLE" >&2
         printf 'DROP OWNED BY alone also removes CONNECT on %s (a database is a shared object): then the tool cannot connect.\n' \
             "$RP_DATABASE" >&2
+        printf 'DROP OWNED BY also drops the objects of %s there (a table that the SQL console made, for example). To keep\n' \
+            "$RP_ROLE" >&2
+        printf 'them, run first in that database: REASSIGN OWNED BY %s TO OWNER; (OWNER: the owner of that database, see \\l).\n' \
+            "$RP_ROLE" >&2
         printf 'Then run role again.\n' >&2
     fi
     ((failed == 0)) || die "The role $RP_ROLE does not have the rights above. Nothing in pg_hba.conf was checked."
@@ -1266,6 +1343,10 @@ drop_sql() {
 -- and ovb_drop_staging off (a table made after the check of the script), it stops, gives
 -- the role its LOGIN back and drops nothing. It does the same when an object outside
 -- ovb_stage depends on an object in it (DROP SCHEMA ... CASCADE would drop that object).
+-- Then, in ovb_db and in ovb_old_db, it gives every other object of the role (what the SQL
+-- console made with the rights of the owner of the database, for example a table in
+-- public) to the owner of that database, names it, and drops none of it (owner decision of
+-- 2026-11-09).
 SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'oracle_view_rp') AS ovb_rp,
        coalesce((SELECT rolcanlogin FROM pg_roles WHERE rolname = 'oracle_view_rp'), false) AS ovb_rp_login,
        EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'oracle_view_ro') AS ovb_ro,
@@ -1273,8 +1354,23 @@ SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'oracle_view_rp') AS ovb_r
          AND EXISTS (SELECT 1 FROM pg_database WHERE datname = :'ovb_old_db'
                        AND datallowconn AND datconnlimit <> -2) AS ovb_old \gset
 \if :ovb_rp
+-- The objects of the role go to the owner of the database (REASSIGN_SQL): never to the
+-- role itself, so that DROP OWNED BY drops none of them. The role can own ovb_db or
+-- ovb_old_db when a superuser gives it, or after a REASSIGN OWNED BY of the SQL console
+-- from the owner to the role (PostgreSQL 16 checks the inherited rights there, not SET
+-- ROLE). Then the run stops here, before any change.
+SELECT count(*) > 0 AS ovb_rp_owner, coalesce(string_agg(d.datname, ' and ' ORDER BY d.datname), '') AS ovb_rp_owned
+  FROM pg_database d JOIN pg_roles r ON r.oid = d.datdba
+ WHERE d.datname IN (:'ovb_db', :'ovb_old_db') AND r.rolname = 'oracle_view_rp' \gset
+\if :ovb_rp_owner
+\echo oracle_view_rp owns :ovb_rp_owned. A different owner is needed first (the role of the App): drop-role gives the
+\echo objects of oracle_view_rp to the owner of the database and never drops them. Nothing was changed.
+DO $$ BEGIN RAISE EXCEPTION 'oracle_view_rp owns the RP database or the old database: give it a different owner first, then run drop-role again'; END $$;
+\endif
 ALTER ROLE oracle_view_rp NOLOGIN;
-SELECT count(pg_terminate_backend(pid)) AS ended_sessions FROM pg_stat_activity WHERE usename = 'oracle_view_rp' \gset
+-- Each session ends before the next step (up to 5 s for each): a temporary table of a
+-- session that is still ending would be an object of the role for REASSIGN OWNED BY below.
+SELECT count(pg_terminate_backend(pid, 5000)) AS ended_sessions FROM pg_stat_activity WHERE usename = 'oracle_view_rp' \gset
 \connect :ovb_db
 -- The tables that go: every table of ovb_stage when the role owns the schema, else the
 -- tables of the role there (DROP OWNED BY). A schema ovb_stage of another owner stays.
@@ -1313,11 +1409,27 @@ DO $$ BEGIN RAISE EXCEPTION 'objects outside ovb_stage depend on it: DROP SCHEMA
 DROP SCHEMA ovb_stage CASCADE;
 \echo schema ovb_stage dropped, with its :ovb_stage_tables staging tables and their data (:ovb_stage_size)
 \elif :ovb_stage_other
+-- The staging tables of the role there go, as before the REASSIGN OWNED BY below. A
+-- partition can go with its table first: IF EXISTS, and no NOTICE for it.
+SET client_min_messages = warning;
+SELECT format('DROP %s IF EXISTS ovb_stage.%I', CASE c.relkind WHEN 'm' THEN 'MATERIALIZED VIEW' ELSE 'TABLE' END,
+              c.relname)
+  FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_roles r ON r.oid = c.relowner
+ WHERE n.nspname = 'ovb_stage' AND r.rolname = 'oracle_view_rp' AND c.relkind IN ('r', 'p', 'm') \gexec
+RESET client_min_messages;
 \echo schema ovb_stage of another owner stays: :ovb_stage_tables staging tables of oracle_view_rp in it dropped (:ovb_stage_size)
 \endif
+SQL
+    # Every other object of the role, in ovb_db and in ovb_old_db, goes to the owner of that
+    # database and stays; DROP OWNED BY then removes the grants and default privileges.
+    printf '%s\n' "$REASSIGN_SQL"
+    cat <<'SQL'
 DROP OWNED BY oracle_view_rp;
 \if :ovb_old
 \connect :ovb_old_db
+SQL
+    printf '%s\n' "$REASSIGN_SQL"
+    cat <<'SQL'
 DROP OWNED BY oracle_view_rp;
 \endif
 \connect postgres
@@ -1382,7 +1494,9 @@ cmd_drop_role() {
         "$RP_ROLE" "$RP_DATABASE" "$OLD_RP_DATABASE"
     printf 'It also drops the schema %s of %s: the staging tables of Copy to RP and their data are dropped.\n' \
         "$STAGE_SCHEMA" "$RP_DATABASE"
-    printf 'Rows that the SQL console changed stay changed.\n'
+    printf 'The objects that the role made outside %s (a table in public, for example) stay: it gives them to the owner\n' \
+        "$STAGE_SCHEMA"
+    printf 'of their database and names them. Rows that the SQL console changed stay changed.\n'
     if [[ $(pg_value postgres "SELECT count(*) FROM pg_roles WHERE rolname = '$RP_ROLE'") == 1 ]]; then
         stage_tables
         stage_outside

@@ -2186,10 +2186,18 @@ Do the steps in this order.
    another role attribute (`NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION
    NOBYPASSRLS`). The command reads the owner from `pg_database` and stops before
    any change when the owner is a superuser (the rights of a superuser are every
-   right on the server) or `oracle_view_rp` itself. A membership is for the whole
-   server: the role has the same rights on each other database of that owner
-   (the `INFO` line `other databases of ...` of the rights check names them), and
-   `pg_hba.conf` decides where it can log in. See
+   right on the server), or when `oracle_view_rp` owns `perodua_oracle2` or
+   `perodua_oracle`: a different owner is needed first (the role of the App, not
+   a superuser).
+
+   A membership is for the whole server. On each other database of the same
+   owner, the role gets the rights of the owner too: `CONNECT` (`pg_hba.conf`
+   still decides where it can log in), `ALTER DATABASE` (for example
+   `ALLOW_CONNECTIONS false`) from a session in `perodua_oracle2`, and
+   `DROP DATABASE` from a direct client, outside a transaction. The role also
+   gets the memberships of the owner. The rights check names these as
+   information, never as a `FAIL`: the `INFO` lines `other databases of ...` and
+   `other roles of which it is a member ...`. See
    [Risks of the owner decisions](#risks-of-the-owner-decisions).
 
    The command drops the role `oracle_view_ro` of an earlier
@@ -2208,7 +2216,14 @@ Do the steps in this order.
    way in. After the `COMMIT`, the command ends the sessions of the role there
    again: a container of an earlier release can open a session before the
    `COMMIT`, and after it no new session can start, because `PUBLIC` has no
-   `CONNECT` there. When the server has no `perodua_oracle`, or when
+   `CONNECT` there. That is true for the rights of the role itself: when the
+   owner of `perodua_oracle2` (`odoo`) owns `perodua_oracle` too, the role keeps
+   the rights of that owner there through its membership, and the `INFO` line
+   `other databases of odoo` names `perodua_oracle`. So the role can also make
+   objects there: before `DROP OWNED BY`, the command gives each object of the
+   role there to the owner of `perodua_oracle` (`REASSIGN OWNED BY`) and names
+   it. Nothing that the role made there is dropped. When the server has no
+   `perodua_oracle`, or when
    `perodua_oracle` does not accept connections (`ALLOW_CONNECTIONS false`, or a
    database half dropped), the command skips this step.
    After the grants, the line `no right on a database other than
@@ -2223,12 +2238,16 @@ Do the steps in this order.
 
    `DROP OWNED BY` alone also removes `CONNECT` on `perodua_oracle2` (a database
    is a shared object): then the tool cannot connect until the next `role` run.
+   `DROP OWNED BY` also drops the objects of the role in that database (a table
+   that the SQL console made there, for example). To keep them, first run
+   `REASSIGN OWNED BY oracle_view_rp TO OWNER;` in that database, with the owner
+   of that database (`\l` in `psql`) as `OWNER`.
 
 3. Read the output:
 
    | Part | Expected |
    | --- | --- |
-   | `== Rights of oracle_view_rp` | Each line starts with `OK`, also `TRUNCATE on every table of public`, `CREATE in public`, `member of odoo, the owner of perodua_oracle2, with INHERIT TRUE, SET FALSE, ADMIN FALSE`, `no right on a database other than perodua_oracle2` (a right of the role itself) and the three lines of the schema `ovb_stage`. A `FAIL` line stops the command. The two last lines start with `INFO` and never stop it: `owns N objects outside the schema ovb_stage` (what the SQL console made, for example a table in `public`) and `other databases of odoo, with its rights through the membership` (`none`, or their names). |
+   | `== Rights of oracle_view_rp` | Each line starts with `OK`, also `TRUNCATE on every table of public`, `CREATE in public`, `member of odoo, the owner of perodua_oracle2, with INHERIT TRUE, SET FALSE, ADMIN FALSE`, `no right on a database other than perodua_oracle2` (a right of the role itself) and the three lines of the schema `ovb_stage`. A `FAIL` line stops the command. The line of the membership also fails when the role can `SET ROLE` to the owner, or has `ADMIN` on it, through another role. The three last lines start with `INFO` and never stop it: `owns N objects outside the schema ovb_stage` (what the SQL console made, for example a table in `public`), `other databases of odoo, with its rights through the membership` and `other roles of which it is a member (also through odoo)` (`none`, or their names). |
    | `== Staging tables of Copy to RP` | The tables and materialized views in `ovb_stage`, each with its size on disk, and the total. `none` on a new role. The list changes nothing. |
    | `== TLS: SHOW ssl` | `ssl = on`. With `off`, see [TLS to the RP database](#tls-to-the-rp-database). |
    | `== Extensions that can write in a Read run` | `none`. With `dblink` or `postgres_fdw` in `perodua_oracle2`, a Read run of the SQL console can write through them. The command changes no right: that is an owner decision. |
@@ -2365,6 +2384,23 @@ foreign key in `public` on a staging table. When there is such an object,
 `drop-role` names it and stops before any change (exit status 1), also with
 `--drop-staging`. Remove the dependency first (for example `DROP VIEW`, or
 `ALTER TABLE ... DROP CONSTRAINT`), then run `drop-role` again.
+
+`drop-role` never drops what the role made outside `ovb_stage` (owner decision
+of 2026-11-09): a table that the SQL console made in `public`, for example, is
+data. After `ovb_stage`, it gives every other object of the role in
+`perodua_oracle2` to the owner of the database (`REASSIGN OWNED BY
+oracle_view_rp TO odoo`) and names each one, then removes the grants of the
+role (`DROP OWNED BY`). It does the same in `perodua_oracle`, then drops the
+role.
+
+It stops before any change when `oracle_view_rp` owns `perodua_oracle2` or
+`perodua_oracle`: its objects there would have no other owner to go to. A
+different owner is needed first. A superuser can give the role a database, and
+so can the SQL console: in PostgreSQL 16, `REASSIGN OWNED BY odoo TO
+oracle_view_rp` checks the inherited rights, not `SET ROLE`. Then, as
+`postgres` in that database, give the objects back to the role of the App
+(`REASSIGN OWNED BY oracle_view_rp TO odoo`) and check the owner of the database
+(`\l`), then run `drop-role` again.
 
 #### TLS to the RP database
 
@@ -2621,7 +2657,7 @@ Do the steps in this order.
 | Port 80 rules (App server), if you added them | `sudo ufw delete allow from WAF_1 to any port 80 proto tcp`, the same for `WAF_2`, `sudo ufw delete deny 80/tcp`. When step 4 turned ufw on: `sudo ufw disable` and the default of before (`/root/ufw-status.before-oracle-view`) |
 | Route (App server) | `sudo cp -p /etc/perodua-https/routes.conf.before-oracle-view /etc/perodua-https/routes.conf`, then `sudo bash https.sh apply` |
 | Container (App server) | `sudo bash oracle-view.sh uninstall`, then type `oracle-view`. It removes the container, `initial-login.txt` and the files `install` made. The state volume, the users file and the image stay; `install` uses them again. `--purge` also removes the state volume (the mapping edits and the SQL audit), the users file and every local image of `perodua-deploy.novutal.com/oracle-view`. It lists what it removed. When a step fails, it also lists what it did not remove, keeps the deployment and exits 1: correct the cause, then run it again |
-| Role (DB server) | `sudo bash oracle-view.sh drop-role`, then type `oracle_view_rp`. It ends the sessions of the role, removes its rights in `perodua_oracle2` and in `perodua_oracle` (when it exists, so that an old grant cannot make the drop fail) and drops it (also `oracle_view_ro` of an earlier bundle). It skips a `perodua_oracle` that does not accept connections. It also drops the schema `ovb_stage` with the staging tables of Copy to RP and their data: when `ovb_stage` holds tables, it lists them and stops before any change; run it again with `--drop-staging` when they can go. It also stops when an object outside `ovb_stage` depends on an object in it ([The staging schema ovb_stage](#the-staging-schema-ovb_stage)). Rows that the SQL console changed stay changed |
+| Role (DB server) | `sudo bash oracle-view.sh drop-role`, then type `oracle_view_rp`. It ends the sessions of the role, removes its rights in `perodua_oracle2` and in `perodua_oracle` (when it exists, so that an old grant cannot make the drop fail) and drops it (also `oracle_view_ro` of an earlier bundle). It skips a `perodua_oracle` that does not accept connections. It also drops the schema `ovb_stage` with the staging tables of Copy to RP and their data: when `ovb_stage` holds tables, it lists them and stops before any change; run it again with `--drop-staging` when they can go. It also stops when an object outside `ovb_stage` depends on an object in it ([The staging schema ovb_stage](#the-staging-schema-ovb_stage)). The other objects of the role in `perodua_oracle2` and `perodua_oracle` (what the SQL console made, for example a table in `public`) stay: it gives them to the owner of that database and names them. It stops before any change when `oracle_view_rp` owns one of these databases: a different owner is needed first. Rows that the SQL console changed stay changed |
 | `pg_hba.conf` line (DB server), if you added one | `sudo cp -p HBA_FILE.before-oracle-view HBA_FILE`, then `sudo -u postgres psql -X -d postgres -c 'SELECT pg_reload_conf()'` |
 | Registry | Delete the tag `oracle-view:grey-v1.0.4` and the tags of earlier releases when nobody needs them: each image holds the secrets |
 
@@ -2648,11 +2684,19 @@ decisions. On the grey environment this means:
   dropped table back.
 - The membership in the owner (`odoo`) is for the whole server. The role has
   every right of `odoo` on each other database that `odoo` owns, also on the
-  database itself (`ALTER DATABASE ... SET`, and `DROP DATABASE` of another such
-  database from a session outside a transaction block). It can also end the
-  sessions of `odoo`, so those of the grey App (`pg_terminate_backend`).
-  `pg_hba.conf` limits only where the role logs in. The `INFO` line
-  `other databases of odoo` of `role --check` names these databases.
+  database itself: `ALTER DATABASE` (for example `ALLOW_CONNECTIONS false`)
+  from a session in `perodua_oracle2`, and `DROP DATABASE` of such a database
+  from a direct client, outside a transaction. It also gets the memberships of
+  `odoo`, and it can end the sessions of `odoo`, so those of the grey App
+  (`pg_terminate_backend`). `pg_hba.conf` limits only where the role logs in.
+  The `INFO` lines `other databases of odoo` and `other roles of which it is a
+  member` of `role --check` name them.
+- A Write run can give every object of `odoo` in `perodua_oracle2` to the role
+  (`REASSIGN OWNED BY odoo TO oracle_view_rp`: PostgreSQL 16 checks the
+  inherited rights there, not `SET ROLE`), also the databases that `odoo` owns.
+  The `INFO` line `owns N objects outside the schema ovb_stage` then shows them.
+  `drop-role` gives such objects back to the owner of the database, and stops
+  while the role owns the database itself.
 - The Oracle account of the image (ISSINTUSR) reaches 5 more databases through
   its DB links (ENTGP2, ENTJP2, ENTRP2, ENTCP2, CRMDB). The console can write
   where that account may write.
