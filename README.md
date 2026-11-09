@@ -2119,7 +2119,7 @@ route of [https.sh](#https). Every page and every API call needs a login.
 | Container `oracle-view` on `127.0.0.1:8797` only, run from `/opt/perodua-oracle-view` | App server |
 | Route `stgiss.perodua.com.my /dev/oracle-view/ 8797 strip,http` | App server, `/etc/perodua-https/routes.conf` |
 | Role `oracle_view_rp` on the database `perodua_oracle2`: read and write on the tables, read-only by default, every right of the owner of the database (DDL, `TRUNCATE`, `CREATE`), and the schema `ovb_stage` for the staging tables of Copy to RP | DB server (PostgreSQL 16) |
-| Image `perodua-deploy.novutal.com/oracle-view:grey-v1.0.5`, pulled by digest | Private registry |
+| Image `perodua-deploy.novutal.com/oracle-view:grey-v1.0.5`, pulled by digest, or streamed from the Mac ([Install from a streamed image](#install-from-a-streamed-image)) | Private registry |
 
 The Code section of the tool shows the mapping that the RP code writes. The
 tool reads it from the RP database: `perodua_master_feed` stores it in the
@@ -2473,9 +2473,13 @@ sudo bash oracle-view.sh install
 ```
 
 When asked, enter the registry username and password for
-`perodua-deploy.novutal.com`; the login is not kept on the server. The install:
+`perodua-deploy.novutal.com`; the login is not kept on the server. On grey,
+nobody types the registry password on the server (owner rule of 2026-11-10):
+stream the image from the Mac and add `--no-pull`
+([Install from a streamed image](#install-from-a-streamed-image)). The install:
 
-- pulls the pinned image by its digest;
+- pulls the pinned image by its digest (with `--no-pull`: uses the pinned image
+  that is on the server, and pulls nothing);
 - makes the users `perodua` (admin) and `pm` (editor, the PM who edits the
   mapping) when the users file does not hold them. Each gets a random password.
   The passwords go once to `/opt/perodua-oracle-view/initial-login.txt` (root
@@ -2504,8 +2508,9 @@ sudo rm /opt/perodua-oracle-view/initial-login.txt
 The settings are in `/opt/perodua-oracle-view/oracle-view.env` (root, 0600). To
 change one, edit the file and run `install` again. For an unattended install,
 pass the keys of [oracle-view.env.example](scripts/oracle-view.env.example) with
-`--config` and add `--non-interactive` (the registry login must then exist:
-`sudo docker login perodua-deploy.novutal.com`).
+`--config` and add `--non-interactive`, and `--no-pull` after a stream from the
+Mac. Without `--no-pull`, the registry login must then exist on the server
+(`sudo docker login perodua-deploy.novutal.com`).
 
 | Setting | Default | What |
 | --- | --- | --- |
@@ -2524,7 +2529,7 @@ such variable, and the default of the image applies. A key with no value
 
 | Command | What it does |
 | --- | --- |
-| `sudo bash oracle-view.sh status` | The image, the settings, the users (names and roles only), the state volume and the answer of `/healthz` |
+| `sudo bash oracle-view.sh status` | The image, whether the pinned image is on the server (`Local:`), the settings, the users (names and roles only), the state volume and the answer of `/healthz` |
 | `sudo docker logs oracle-view` | The log of the tool: the start lines, each login (` login `) and each SQL run (` sql-run `, never the statement) |
 
 Checks: the `Health:` line of `status` says `http://127.0.0.1:8797/healthz answers
@@ -2612,10 +2617,106 @@ volume (`/var/lib/oracle-view/mapping_edits.sqlite` in the container). A new ima
 keeps them. Back them up with
 `sudo docker cp oracle-view:/var/lib/oracle-view/mapping_edits.sqlite .`
 
+### Install from a streamed image
+
+Use this when the App server must not log in to the registry. On grey, nobody
+types the registry password on a server (owner rule of 2026-11-10). The Mac has
+the registry login: it streams the pinned image to the server over ssh, and
+`install --no-pull` uses that image. With `--no-pull`, `install` never pulls,
+never logs in to the registry and never asks a question. The users, the
+settings, Compose and the health checks are the same as without it.
+
+1. On the Mac, in this repository, with Docker Desktop on the containerd image
+   store, an ssh key that logs in to the App server without a question, and
+   `sudo -n docker` (no password) for that user on the server:
+
+   ```bash
+   bash scripts/oracle-view-stream.sh --dry-run grey
+   bash scripts/oracle-view-stream.sh grey
+   ```
+
+   `grey` is the ssh name of the App server. The script reads the pin from
+   `oracle-view.sh`. When the pinned image is not on the Mac, it pulls it there.
+   It gives the pinned image on the Mac its stream tag, `REPOSITORY:sha256-HEX`
+   (HEX: the 64 digits of the pinned digest), streams `docker save` of that tag
+   to `sudo -n docker load` on the server, and then checks the image there as
+   `install --no-pull` does. It stops when the stream tag names another image on
+   the Mac, and when `docker load` on the server prints `Error unpacking`. A
+   server that has the pinned image gets nothing. `--dry-run` does the checks
+   and prints the steps: it pulls, tags and loads nothing. ssh runs in batch
+   mode (also `-T -a -x`, no forwarding, no local command, `-n` on each check)
+   and sudo with `-n`, so the script never asks. It runs one stream at a time for
+   each server: the host name and port that `ssh -G` gives for the ssh name.
+
+   With Docker alone, the stream is these commands; `install --no-pull` prints
+   them with the values of the pin:
+
+   ```bash
+   docker pull --platform linux/amd64 IMAGE
+   docker tag REPOSITORY@DIGEST REPOSITORY:sha256-HEX
+   docker save REPOSITORY:sha256-HEX | ssh grey 'sudo -n docker load'
+   ```
+
+   Save the stream tag, not the digest reference and not the release tag. An
+   archive of a digest reference has no image name: `docker load` keeps it as a
+   dangling image, and the digest reference does not find it. A release tag
+   (`grey-v1.0.5`) can move to a later image: then the release before it becomes
+   a dangling image, and the switch back to the last good release (`--pull
+   never`) does not find it. Each digest has its own stream tag, so no later
+   pin moves it.
+
+   The pin must be one image manifest for linux/amd64, not a multi-platform
+   index: the pull on the Mac brings only the linux/amd64 part of an index, and
+   `docker save` stops for the missing parts (Docker 29.8). The pin of
+   grey-v1.0.5 is one manifest (`docker buildx imagetools inspect`,
+   2026-11-10). The script stops before the stream for an index.
+
+2. On the App server:
+
+   ```bash
+   sudo bash oracle-view.sh install --no-pull --non-interactive
+   ```
+
+   For a run that cannot add an option, the environment variable does the same:
+   `sudo env OVB_NO_PULL=1 bash oracle-view.sh install --non-interactive`
+   (`0` or no value: the pull as before; another value is a usage error).
+
+`install --no-pull` finds the image by its digest reference
+(`perodua-deploy.novutal.com/oracle-view@sha256:` and the pinned digest), and
+checks that its registry digest, and on the containerd image store also its ID,
+is the pinned digest. On the containerd image store the ID of an image is the
+digest of its manifest, and Docker checks the content against it when it loads
+the image. Then it starts the image once, with no pull and no network
+(`docker run --rm --pull never --network none`), so that an image whose layers
+did not unpack stops the install. When the image is not there, or does not
+start, `install` stops before any change (exit status 1) and prints what to do.
+`status` shows the result of the check of the digest in its `Local:` line.
+
+The classic image store (Docker without the containerd snapshotter) keeps no
+registry digest for an image from `docker load`. So `install --no-pull` cannot
+check such an image against the pin: on that store it uses only an image that a
+pull brought before, and otherwise stops with a message, before any change.
+`oracle-view-stream.sh` agrees: on a server with the classic store it streams
+nothing, and stops when that pulled image is not there; it also stops when the
+Mac uses the classic store. In `docker info`, the containerd image store shows the
+line `driver-type: io.containerd.snapshotter.v1`; grey has it (Docker 29.8.1,
+2026-11-10). To switch an engine, add `"features": {"containerd-snapshotter":
+true}` to `/etc/docker/daemon.json` and restart Docker. After the switch, Docker
+does not show the images and the containers of the classic store (they stay on
+the disk and come back when you switch back): make the containers of the server
+again.
+
+Do not switch the image store of the grey App server while owner rule C1
+applies: while the grey App runs on an Oracle DB, nobody runs `deploy-app.sh`,
+`service.sh`, `rollback.sh`, `restore.txt` or `grey-oracle-sync-wayback.sh`
+there, and a switch needs the containers of the App made again.
+
 ### Upgrade
 
-A later version of this repository pins a later image. Run its `install`: the
-users, the settings and the state volume stay. If the new image does not become
+A later version of this repository pins a later image. Run its `install`
+(with `--no-pull`, stream the new pin from the Mac first: [Install from a
+streamed image](#install-from-a-streamed-image)): the users, the settings and the
+state volume stay. If the new image does not become
 healthy, the last release that did runs again with its settings, and the settings
 that failed are kept in `oracle-view.env.failed`. Every user must log in again.
 
