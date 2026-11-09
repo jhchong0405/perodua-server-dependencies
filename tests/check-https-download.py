@@ -1,5 +1,8 @@
-"""Exercise real curl HTTPS Basic authentication through its terminal prompt.
+"""Exercise real curl HTTPS Basic authentication with the cloud download password.
 
+deploy-db.sh asks for the password on its terminal (curl itself never asks) or,
+in a non-interactive run (KIT_NON_INTERACTIVE=1), takes it from
+--cloud-password-file without a question; curl gets it on stdin either way.
 Only used by the disposable-container integration harness. No external cloud
 service, network connection, persistent credential, or production DB is used.
 """
@@ -76,7 +79,7 @@ server.socket = context.wrap_socket(server.socket, server_side=True)
 threading.Thread(target=server.serve_forever, daemon=True).start()
 
 
-def deployment(name, cloud_password):
+def deployment(name, cloud_password, password_file=None):
     template = (test_dir / "config_only.conf").read_text()
     lines = [
         line for line in template.splitlines()
@@ -90,12 +93,15 @@ def deployment(name, cloud_password):
     config = test_dir / f"{name}.conf"
     config.write_text("\n".join(lines) + "\n")
     config.chmod(0o600)
+    argv = ["bash", str(scripts_dir / "deploy-db.sh"), "--config", str(config),
+            "--password-file", str(test_dir / "app.password")]
+    env = {key: value for key, value in os.environ.items() if key != "KIT_NON_INTERACTIVE"}
+    if password_file:
+        argv += ["--cloud-password-file", str(password_file)]
+        env["KIT_NON_INTERACTIVE"] = "1"  # on a terminal, as ssh -t gives an agent: still no question
     child, terminal = pty.fork()
     if child == 0:
-        os.execv("/usr/bin/bash", [
-            "bash", str(scripts_dir / "deploy-db.sh"), "--config", str(config),
-            "--password-file", str(test_dir / "app.password"),
-        ])
+        os.execve("/usr/bin/bash", argv, env)
 
     output = bytearray()
     sent = False
@@ -109,7 +115,7 @@ def deployment(name, cloud_password):
                 except OSError:
                     chunk = b""
                 output.extend(chunk)
-                if b"password for user" in output.lower() and not sent:
+                if b"password for user" in output.lower() and not sent and not password_file:
                     os.write(terminal, cloud_password.encode() + b"\n")
                     sent = True
             exited, result = os.waitpid(child, os.WNOHANG)
@@ -123,7 +129,11 @@ def deployment(name, cloud_password):
     finally:
         os.close(terminal)
         (test_dir / f"{name}.log").write_bytes(output)
-    assert sent, f"{name} did not request the cloud password from its terminal"
+    if password_file:
+        assert b"password for user" not in output.lower(), f"{name} asked although --cloud-password-file gives the password"
+        cloud_password = password_file.read_text().strip()
+    else:
+        assert sent, f"{name} did not request the cloud password from its terminal"
     assert cloud_password.encode() not in output, "Cloud password appeared in terminal output"
     return os.waitstatus_to_exitcode(status)
 
@@ -131,6 +141,10 @@ def deployment(name, cloud_password):
 try:
     assert deployment("https_restored", download_password) == 0, "Authenticated HTTPS restore failed"
     assert deployment("https_refused", "incorrect-cloud-password") != 0, "Bad cloud credentials accepted"
+    cloud_file = test_dir / "cloud.password"
+    cloud_file.write_text(download_password + "\n")
+    cloud_file.chmod(0o600)
+    assert deployment("https_from_file", None, cloud_file) == 0, "Non-interactive restore with --cloud-password-file failed"
     assert True in accepted_requests and False in accepted_requests, "HTTPS auth checks were not exercised"
 finally:
     server.shutdown()
@@ -139,4 +153,4 @@ finally:
 for log in Path("/var/lib/perodua-db-deploy").rglob("*.log"):
     assert download_password.encode() not in log.read_bytes(), "Cloud password in deployment log"
 
-print("HTTPS fixture: correct and incorrect Basic-auth passwords exercised via PTY")
+print("HTTPS fixture: correct and incorrect Basic-auth passwords exercised via PTY, and --cloud-password-file without a question")
