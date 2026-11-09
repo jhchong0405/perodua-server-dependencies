@@ -8,7 +8,7 @@ export LC_ALL=C
 usage() {
     cat <<'EOF'
 Usage: sudo bash service.sh --role app [--dir PATH] stop|start|restart|status
-       sudo bash service.sh --role app [--dir PATH] reset [--confirm DATABASE]
+       sudo bash service.sh --role app [--dir PATH] reset [--confirm DATABASE] [--non-interactive]
        sudo bash service.sh --role db  [--cluster NAME] stop|start|restart|status
 
 stop, start, restart and status keep all data and settings. Stop the App before
@@ -31,12 +31,17 @@ gets its demo seed again, with new random passwords for the seeded accounts
 settings in app.env (--check-config); if it refuses them, nothing is changed.
 The plan is shown next: type the database name to confirm, or pass it with
 --confirm for unattended use.
+
+--non-interactive, or KIT_NON_INTERACTIVE=1 in the environment, never asks:
+reset then needs --confirm, and runs deploy-app.sh with --non-interactive,
+its settings check too, so that a password it would ask for stops the reset
+before anything is deleted.
 EOF
 }
 
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-ROLE='' ACTION='' DEPLOY_DIR=/opt/perodua-app CLUSTER='' CONFIRM=''
+ROLE='' ACTION='' DEPLOY_DIR=/opt/perodua-app CLUSTER='' CONFIRM='' NON_INTERACTIVE=0
 while (($#)); do
     case $1 in
         --role|--dir|--cluster|--confirm)
@@ -52,6 +57,7 @@ while (($#)); do
             [[ -z $ACTION ]] || die 'Give one action.'
             ACTION=$1
             shift ;;
+        --non-interactive) NON_INTERACTIVE=1; shift ;;
         --help|-h) usage; exit 0 ;;
         *) usage >&2; die "Unknown argument: $1" ;;
     esac
@@ -60,17 +66,37 @@ done
 [[ -n $ACTION ]] || { usage >&2; die 'Choose stop, start, restart, status or reset.'; }
 [[ $ACTION != reset || $ROLE == app ]] || die 'reset runs on the App server (--role app). The database server needs no step.'
 [[ -z $CONFIRM || $ACTION == reset ]] || die '--confirm only applies to reset.'
+# --non-interactive, or KIT_NON_INTERACTIVE=1 in the environment: no question
+# at all (README.md, "Run the kit without a person"). Each answer comes from an
+# option or a setting; a missing one stops the run before it changes anything.
+case ${KIT_NON_INTERACTIVE:-} in
+    ''|0) ;;
+    1) NON_INTERACTIVE=1 ;;
+    *) die 'KIT_NON_INTERACTIVE must be 1 (never ask) or 0 (ask on a terminal).' ;;
+esac
+((NON_INTERACTIVE == 0)) || export KIT_NON_INTERACTIVE=1
 [[ $EUID -eq 0 ]] || die 'Run with sudo or as root.'
 
-has_terminal() { { : </dev/tty; } 2>/dev/null; }
+# The only place that reads an answer from a person: stdin, and only when it is
+# a terminal and the run is not non-interactive. Never /dev/tty, which an agent
+# under ssh -t still has. $3 says how to give the answer without a person.
+read_terminal() {  # [-s hidden] [-k keep spaces] VAR PROMPT HOW
+    local read_options=() read_ifs=$' \t\n'
+    while [[ $1 == -[sk] ]]; do
+        if [[ $1 == -s ]]; then read_options+=(-s); else read_ifs=''; fi
+        shift
+    done
+    ((NON_INTERACTIVE == 0)) && [[ -t 0 ]] || die "$3"
+    IFS=$read_ifs read -r "${read_options[@]}" -p "$2" "$1"
+}
 confirm() {
-    local expected=$1 answer
+    local expected=$1 answer=''
     if [[ -n $CONFIRM ]]; then
         [[ $CONFIRM == "$expected" ]] || die "--confirm must be exactly $expected. Nothing was changed."
         return
     fi
-    has_terminal || die "No terminal to confirm on: pass --confirm $expected. Nothing was changed."
-    IFS= read -r -p "Type $expected to confirm: " answer </dev/tty || die 'Cancelled. Nothing was changed.'
+    read_terminal -k answer "Type $expected to confirm: " "No terminal to confirm on: pass --confirm $expected. Nothing was changed." \
+        || die 'Cancelled. Nothing was changed.'
     [[ $answer == "$expected" ]] || die 'The confirmation did not match. Nothing was changed.'
 }
 
@@ -108,7 +134,7 @@ app_start() {
 }
 
 app_reset() {
-    local helper release revision current status=0 listed ids=() mounted anonymous=() anon error LINE block
+    local helper release revision current status=0 listed ids=() mounted anonymous=() anon error LINE block deploy_options
     for helper in deploy-app.sh reset_database.py; do
         [[ -f $SCRIPT_DIR/$helper ]] || die "$helper is missing next to service.sh; run it from the complete release directory."
     done
@@ -131,7 +157,11 @@ app_reset() {
     # it check the settings first: one this release refuses (such as
     # PUBLIC_ROOT, which v1.0.3 does not support) stops the reset here.
     # Its reasons and warnings go to stderr; its "valid" line is not needed here.
-    bash "$SCRIPT_DIR/deploy-app.sh" --dir "$DEPLOY_DIR" --init-db --check-config </dev/null >/dev/null \
+    # A non-interactive reset runs both deploy-app.sh steps non-interactive:
+    # the check then also refuses a password that the deployment would ask for.
+    deploy_options=(--dir "$DEPLOY_DIR" --init-db)
+    ((NON_INTERACTIVE == 0)) || deploy_options+=(--non-interactive)
+    bash "$SCRIPT_DIR/deploy-app.sh" "${deploy_options[@]}" --check-config </dev/null >/dev/null \
         || die "deploy-app.sh of $release refuses $DEPLOY_DIR/app.env for the reason above. Nothing was changed."
 
     printf 'Reset the App deployment "%s" in %s:\n' "$PROJECT" "$DEPLOY_DIR"
@@ -173,7 +203,7 @@ app_reset() {
     # The directory is bound to the release it runs; the empty database may take another.
     sed -i -e "s/^release=.*/release=$release/" -e "s/^revision=.*/revision=$revision/" "$DEPLOY_DIR/.deployment-identity"
     exec 9>&-  # deploy-app.sh takes the lock itself
-    bash "$SCRIPT_DIR/deploy-app.sh" --dir "$DEPLOY_DIR" --init-db \
+    bash "$SCRIPT_DIR/deploy-app.sh" "${deploy_options[@]}" \
         || die 'deploy-app.sh did not finish. Solve the problem shown above, then run the reset again.'
 }
 
