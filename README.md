@@ -1092,21 +1092,21 @@ both have a value, the values must be the same (else a usage error).
      --image perodua-deploy.novutal.com/rp-adapter:v0.8.0-oracle2@sha256:9df3d38f91cf9ea110c152343b969f94997bef5a649e95a6a3b267a4b1f378fa
    ```
 
-   For each image, the helper does what `oracle-view-stream.sh` does. When the
-   pinned image is not on the Mac, it pulls it there. It gives the image its
-   stream tag, `REPOSITORY:sha256-HEX` (HEX: the 64 digits of the pinned
-   digest), streams `docker save` of that tag to `sudo -n docker load` on the
-   server, and then checks the image there as the `--no-pull` runs do. It stops
-   when a stream tag names another image on the Mac, when an index is not of
-   the form below, and when `docker load` on the server prints `Error
+   `oracle-view-stream.sh` runs this helper with the source `oracle-view.sh`.
+   When the pinned image is not on the Mac, the helper pulls it there. It gives
+   the image its stream tag, `REPOSITORY:sha256-HEX` (HEX: the 64 digits of the
+   pinned digest), streams `docker save` of that tag to `sudo -n docker load` on
+   the server, and then checks the image there as the `--no-pull` runs do. It
+   stops when a stream tag names another image on the Mac, when an index is not
+   of the form below, and when `docker load` on the server prints `Error
    unpacking`. An image that the server has already gets nothing. It checks
-   every image on the Mac before it connects to the
-   server, and it streams nothing when the server uses the classic image store
-   and an image is missing there. `--dry-run` does the checks and prints the
-   steps: it pulls, tags, saves, copies and loads nothing. ssh runs in batch
-   mode (also `-T -a -x`, no forwarding, no local command, `-n` on each check)
-   and sudo with `-n`, so the helper never asks. It runs one stream at a time
-   for each server: the host name and port that `ssh -G` gives for the ssh name.
+   every image on the Mac before it connects to the server, and it streams
+   nothing when the server uses the classic image store and an image is missing
+   there. `--dry-run` does the checks and prints the steps: it pulls, tags,
+   saves, copies and loads nothing. ssh runs in batch mode (also `-T -a -x`, no
+   forwarding, no local command, `-n` on each check) and sudo with `-n`, so the
+   helper never asks. It runs one stream at a time for each server: the host
+   name and port that `ssh -G` gives for the ssh name.
 
    `--file` is for a big image over a link that can break (the Odoo image is
    3.42 GB). For each image, the helper saves the stream tag to an archive on
@@ -2935,11 +2935,13 @@ oracle-view.sh`).
    never`) does not find it. Each digest has its own stream tag, so no later
    pin moves it.
 
-   The pin must be one image manifest for linux/amd64, not a multi-platform
-   index: the pull on the Mac brings only the linux/amd64 part of an index, and
-   `docker save` stops for the missing parts (Docker 29.8). The pin of
+   The pin must be one image manifest, or an index of one linux/amd64 image and
+   its attestation manifests, as [Install from streamed
+   images](#install-from-streamed-images) tells: the script runs
+   `stream-image.sh` (`bash scripts/stream-image.sh grey oracle-view.sh`), with
+   its checks, its lock for each server and its messages. The pin of
    grey-v1.0.5 is one manifest (`docker buildx imagetools inspect`,
-   2026-11-10). The script stops before the stream for an index.
+   2026-11-10).
 
 2. On the App server:
 

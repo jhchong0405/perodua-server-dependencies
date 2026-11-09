@@ -813,16 +813,21 @@ checks:
   `restore.txt` or `grey-oracle-sync-wayback` (owner rule C1: forbidden while
   the grey App runs on an Oracle DB);
 - `oracle-view-stream.sh` (`OracleViewStreamTest`, no root, run with
-  `/bin/bash`, which is bash 3.2 on the Mac; a fake `docker` of the Mac and a
-  fake `ssh` that refuses any call without the options of the helper, reads the
-  standard input like ssh unless `-n` is given, answers `ssh -G` and the
-  commands of the server): it gives the pin its stream tag
+  `/bin/bash`, which is bash 3.2 on the Mac; a fake `docker` of the Mac with
+  `docker buildx imagetools inspect` of an index, a fake `shasum` and a fake
+  `ssh` that refuses any call without the options of the helper, reads the
+  standard input like ssh unless `-n` is given, answers `ssh -G` in batch mode
+  and the commands of the server): the script runs `stream-image.sh` with the
+  source `oracle-view.sh`, so its messages, its lock (`stream-image-HOST_PORT`)
+  and its checks are those of `stream-image.sh`; it gives the pin its stream tag
   `REPOSITORY:sha256-HEX` and streams `docker save` of that tag to `sudo -n
   docker load`, then checks the server by the digest reference; each check on
   the server runs with `ssh -n` and reads nothing of the standard input, the
-  load reads the archive; a stream tag that already names the pin is not tagged
-  again, and one that names another image stops it before the server; an index
-  (not one manifest) stops it before the stream; it pulls on the Mac
+  load reads the archive; its output names no command of owner rule C1; a stream
+  tag that already names the pin is not tagged again, and one that names another
+  image stops it before the server; an index of one linux/amd64 image and its
+  attestation manifest streams, an index with another platform stops it before
+  the stream (also when the pull brings it now); it pulls on the Mac
   (`--platform linux/amd64`) only when the pin is missing there, and a failed
   pull (no login on the Mac) or a pull that brings another ID reaches no
   server; a failed `docker info`, `docker tag` (with its message) or `docker
@@ -836,10 +841,9 @@ checks:
   message of the server; one run at a time for each server, whatever name
   `ssh -G` resolves to it (a lock directory of a live process, or one with no
   process number yet, stops it; one of an ended process is taken over; a file or
-  a link there stops it); usage errors exit 2; the script has no `read`, ssh
-  only with `-T -a -x`, batch mode, no forwarding and no local command, each
-  command on the server through `sudo -n docker`, and it reads the pin from
-  `oracle-view.sh`;
+  a link there stops it); usage errors exit 2; the script has no `read` and no
+  `ssh`, `docker`, `sudo` or `rsync` of its own, runs `stream-image.sh` with
+  `exec`, and holds no pin (`stream-image.sh` reads it from `oracle-view.sh`);
 - the container of `deploy/grey/compose.yml`: read-only root file system, tmpfs
   `/tmp`, the state volume, the users file bound read-only without
   `create_host_path`, `127.0.0.1:8797` only, no capabilities, `no-new-privileges`,
@@ -1906,7 +1910,8 @@ Static checks, on any host:
 - Each server script accepts `--non-interactive`, checks `KIT_NON_INTERACTIVE`
   (1, 0 or empty), and passes the mode on to a kit script that it starts.
   `oracle-view-stream.sh` runs on the Mac and asks nothing: it has neither, but
-  the checks of the reads and of the external commands cover it.
+  the checks of the reads and of the external commands cover it (it runs
+  `stream-image.sh`, which accepts both and never asks).
 - No external command can ask: no `curl --user`, no `openssl pkey` without
   `-passin`, no `docker login` without `--password-stdin`, no `apt-get install`
   without `-y` and `--force-confold`, no `sudo` without `-n`, no `ssh` without

@@ -9,8 +9,10 @@ reads, so a test can match the line with initial-login.txt. For install
 --no-pull it also answers docker info (the image store) and the check of the
 pinned image by its digest reference. Fake ss and curl answer from the same
 state; mv and tar run the real programs unless a test asks one to fail.
-OracleViewStreamTest runs oracle-view-stream.sh (no root) against a fake docker
-of the Mac and a fake ssh that answers the commands of the server. On the DB
+OracleViewStreamTest runs oracle-view-stream.sh (no root), which runs
+stream-image.sh with the source oracle-view.sh, against a fake docker of the Mac
+(with docker buildx imagetools inspect of an index), a fake shasum and a fake ssh
+that answers the commands of the server. On the DB
 side, fake runuser, id and psql record each psql call with its standard input
 and answer from a state file. RoleOnPostgresTest runs
 the role SQL on a throwaway PostgreSQL 16 cluster (the test image has it) on its
@@ -3392,7 +3394,10 @@ class OracleViewDocsTest(unittest.TestCase):
                          "(`--pull never`) does not find it. Each digest has its own stream tag, so no later pin moves it.",
                          "It stops when the stream tag names another image on the Mac, and when `docker load` on the server "
                          "prints `Error unpacking`.",
-                         "The pin must be one image manifest for linux/amd64, not a multi-platform index",
+                         "The pin must be one image manifest, or an index of one linux/amd64 image and its attestation "
+                         "manifests, as [Install from streamed images](#install-from-streamed-images) tells: the script "
+                         "runs `stream-image.sh` (`bash scripts/stream-image.sh grey oracle-view.sh`), with its checks, its "
+                         "lock for each server and its messages.",
                          "`KIT_NO_PULL`, the variable of every kit script, works the same way; when both variables have a "
                          "value, the values must be the same.",
                          "Then it starts the image once, with no pull and no network (`docker run --rm --pull never "
@@ -3508,6 +3513,7 @@ class OracleViewNoPullCodeTest(unittest.TestCase):
 
 STREAM = SCRIPT.with_name("oracle-view-stream.sh")
 STREAM_TEXT = STREAM.read_text()
+STREAM_IMAGE = SCRIPT.with_name("stream-image.sh")  # the transport that oracle-view-stream.sh runs
 STREAM_BASH = "/bin/bash"  # on the Mac, the bash of macOS (3.2), as the owner runs the helper there
 SSH_OPTIONS = ["-T", "-a", "-x", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20", "-o", "ClearAllForwardings=yes",
                "-o", "PermitLocalCommand=no", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=4"]
@@ -3517,6 +3523,13 @@ SERVER_INSPECT = f"sudo -n docker image inspect --format '{FACTS}' {PINNED}"
 SERVER_LOAD = "sudo -n docker load"
 MANIFEST = "application/vnd.oci.image.manifest.v1+json"
 INDEX = "application/vnd.oci.image.index.v1+json"
+# docker buildx imagetools inspect --format of stream-image.sh: one line for each entry of an index.
+ENTRIES = ('{{range .Manifest.Manifests}}{{.Digest}} {{.MediaType}} {{with .Platform}}{{.OS}}/{{.Architecture}}'
+           '{{with .Variant}}/{{.}}{{end}}{{else}}-{{end}} {{with .Annotations}}'
+           '{{or (index . "vnd.docker.reference.type") "-"}}{{else}}-{{end}}{{"\\n"}}{{end}}')
+AMD64 = f"sha256:{'a' * 64} {MANIFEST} linux/amd64 -"  # the entries of an index, as ENTRIES prints them
+ARM64 = f"sha256:{'b' * 64} {MANIFEST} linux/arm64 -"
+ATTESTATION = f"sha256:{'d' * 64} {MANIFEST} unknown/unknown attestation-manifest"
 ARCHIVE = f"archive of {STREAM_TAG} -> {DIGEST}\n"  # what the fake docker save writes for the stream tag of the pin
 TERMINAL = "typed on the terminal\n"  # the standard input of the helper: no check on the server may read it
 MAC_INFO = ["info", "--format", STORE_FORMAT]
@@ -3526,11 +3539,15 @@ MAC_TAGGED = ["image", "inspect", "--format", "{{.Id}}", STREAM_TAG]
 MAC_PULL = ["pull", "--platform", "linux/amd64", IMAGE]
 MAC_TAG = ["tag", PINNED, STREAM_TAG]
 MAC_SAVE = ["save", STREAM_TAG]
+MAC_RAW = ["buildx", "imagetools", "inspect", "--raw", PINNED]
+MAC_ENTRIES = ["buildx", "imagetools", "inspect", "--format", ENTRIES, PINNED]
 # docker of the Mac: the IDs that the pin and the stream tag name ("" when missing); docker save of the stream tag
-# writes an archive with that name.
+# writes an archive with that name; buildx imagetools inspect gives the index in the registry (its bytes, which
+# FAKE_SHASUM gives the pinned digest, and its entries).
 FAKE_MAC_DOCKER = r'''#!/usr/bin/env python3
 import json, os, sys
 IMAGE = ''' + repr(IMAGE) + r'''
+ENTRIES = ''' + repr(ENTRIES) + r'''
 PINNED = ''' + repr(PINNED) + r'''
 STREAM_TAG = ''' + repr(STREAM_TAG) + r'''
 DRIVER_STATUS = ''' + repr(DRIVER_STATUS) + r'''
@@ -3569,6 +3586,10 @@ elif args == ["save", STREAM_TAG]:
         err, status = mac["save_error"] + "\n", 1
     else:
         out = f"archive of {STREAM_TAG} -> {mac['tag']}\n"
+elif args == ["buildx", "imagetools", "inspect", "--raw", PINNED]:
+    out = f"raw index {mac['pinned'] or mac['pull_id']}\n"
+elif args == ["buildx", "imagetools", "inspect", "--format", ENTRIES, PINNED]:
+    out = "".join(line + "\n" for line in mac["entries"])
 else:
     sys.exit(f"fake docker: unsupported command {args}")
 with open(os.environ["FAKE_STREAM_LOG"], "a") as log:
@@ -3596,8 +3617,8 @@ args = sys.argv[1:]
 with open(os.environ["FAKE_STREAM_STATE"]) as f:
     state = json.load(f)
 server = state["server"]
-if len(args) == 2 and args[0] == "-G":
-    host = args[1]
+if args[:1] == ["-G"] and args[1:-1] == ["-o", "BatchMode=yes"]:  # what stream-image.sh asks for its lock
+    host = args[-1]
     print(f"user {host.split('@')[0] if '@' in host else 'me'}\nhostname {server['names'].get(host, host.split('@')[-1])}\n"
           "port 22\nbatchmode no")
     sys.exit(0)
@@ -3645,10 +3666,22 @@ sys.stdout.write(out)
 sys.stderr.write(err)
 sys.exit(status)
 '''
+# shasum -a 256 of the standard input: the raw index of the fake buildx gets the digest that it names.
+FAKE_SHASUM = r'''#!/usr/bin/env python3
+import hashlib, re, sys
+if sys.argv[1:] != ["-a", "256"]:
+    sys.exit(f"fake shasum: unexpected arguments {sys.argv[1:]}")
+data = sys.stdin.read()
+named = re.fullmatch(r"raw index sha256:([0-9a-f]{64})\n", data)
+print((named.group(1) if named else hashlib.sha256(data.encode()).hexdigest()) + "  -")
+'''
 
 
 class OracleViewStreamTest(unittest.TestCase):
-    """oracle-view-stream.sh, run on the Mac, against a fake docker of the Mac and a fake ssh to the App server."""
+    """oracle-view-stream.sh, run on the Mac, against a fake docker of the Mac and a fake ssh to the App server.
+
+    It runs stream-image.sh with the source oracle-view.sh; StreamImageTest of test_no_pull_apps.py covers the rest
+    of that transport (the other sources, --file, the static checks of its commands)."""
 
     def setUp(self):
         self.tmp = Path(os.path.realpath(tempfile.mkdtemp()))
@@ -3657,14 +3690,14 @@ class OracleViewStreamTest(unittest.TestCase):
         self.state = self.tmp / "state.json"
         bin_dir = self.tmp / "bin"
         bin_dir.mkdir()
-        for name, text in (("docker", FAKE_MAC_DOCKER), ("ssh", FAKE_SSH)):
+        for name, text in (("docker", FAKE_MAC_DOCKER), ("ssh", FAKE_SSH), ("shasum", FAKE_SHASUM)):
             (bin_dir / name).write_text(text)
             (bin_dir / name).chmod(0o755)
         self.env = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}", TMPDIR=str(self.tmp),
                         FAKE_STREAM_STATE=str(self.state), FAKE_STREAM_LOG=str(self.log))
         self.state.write_text(json.dumps({
             "mac": {"store": "containerd", "pinned": DIGEST, "kind": MANIFEST, "tag": "", "logged_in": True,
-                    "pull_id": DIGEST, "tag_error": "", "save_error": ""},
+                    "pull_id": DIGEST, "tag_error": "", "save_error": "", "entries": [AMD64, ATTESTATION]},
             "server": {"reachable": True, "sudo": True, "store": "containerd", "image": "", "info_error": "",
                        "load_error": "", "load_output": "", "dangling": False, "names": {"grey-alias": "grey"}}}))
 
@@ -3710,6 +3743,10 @@ class OracleViewStreamTest(unittest.TestCase):
         self.assertIn(f"Streaming {STREAM_TAG} to grey...\nLoaded image: {STREAM_TAG}\nOn grey: {PINNED}, ID {DIGEST}\n"
                       "Next, on grey: sudo bash oracle-view.sh install --no-pull --non-interactive\n", result.stdout)
         self.assertEqual(self.locks(), [])
+        # Owner rule C1: the helper names no command that must not run on grey (stream-image.sh has deploy-app.sh as
+        # another source; the source here is oracle-view.sh only).
+        for name in ("deploy-app", "service.sh", "rollback.sh", "restore.txt", "iss-api", "rp-adapter"):
+            self.assertNotIn(name, result.stdout + result.stderr)
         # The server has it now: a second run streams nothing.
         result = self.stream("grey")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -3762,12 +3799,23 @@ class OracleViewStreamTest(unittest.TestCase):
                 self.assertEqual(self.docker(), [MAC_INFO, MAC_PINNED, MAC_KIND, MAC_TAGGED])
                 self.assertEqual(self.server(), [])
 
-    def test_an_index_is_refused(self):
-        # docker save of an index needs the content of every platform; a pull for linux/amd64 brings a part.
-        message = (f"ERROR: The pinned image on this computer is {INDEX}, not one image manifest: docker save cannot "
-                   "save an index of which this computer has only the linux/amd64 part. This script streams a "
-                   "single-platform image only. Nothing was streamed.\n")
+    def test_an_index_of_linux_amd64_and_its_attestations(self):
+        # docker save without --platform writes the index itself, so the server finds the pinned digest. The entries
+        # come from the registry: one linux/amd64 image and attestation manifests only.
         self.set_state(mac={"kind": INDEX})
+        result = self.stream("grey")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual(self.docker(), [MAC_INFO, MAC_PINNED, MAC_KIND, MAC_RAW, MAC_ENTRIES, MAC_TAGGED, MAC_TAG, MAC_SAVE])
+        self.assertIn(f"The pinned image is an index of one linux/amd64 image and its attestation manifests: {PINNED}\n",
+                      result.stdout)
+        self.assertIn(f"Streaming {STREAM_TAG} to grey...\nLoaded image: {STREAM_TAG}\nOn grey: {PINNED}, ID {DIGEST}\n",
+                      result.stdout)
+        # An index that holds another platform is refused before the server, also when the pull brings it now.
+        message = (f"ERROR: The pinned index {PINNED} holds: linux/amd64, linux/arm64, unknown/unknown "
+                   "attestation-manifest. This script streams an index only when its one image is linux/amd64 and each "
+                   "other entry is an attestation manifest (unknown/unknown): docker save writes the whole index, and the "
+                   "pull of this computer brings that image and its attestations only. Nothing was streamed.\n")
+        self.set_state(mac={"entries": [AMD64, ARM64, ATTESTATION], "tag": ""}, server={"image": ""})
         result = self.stream("grey")
         self.assertEqual(result.returncode, 1)
         self.assertIn(message, result.stderr)
@@ -3864,8 +3912,8 @@ class OracleViewStreamTest(unittest.TestCase):
         result = self.stream("grey")
         self.assertEqual(result.returncode, 1)
         self.assertIn("ERROR: The Docker engine of grey uses the classic image store: there an image from docker load "
-                      "has no registry digest, and install --no-pull does not use it. Switch that engine to the "
-                      "containerd image store first (README.md, Oracle Field Browser, Install from a streamed image). "
+                      f"has no registry digest, and the --no-pull runs do not use it ({PINNED} is not there). Switch "
+                      "that engine to the containerd image store first (README.md, \"Install from streamed images\"). "
                       "Nothing was changed.\n", result.stderr)
         self.assertEqual(self.server(), [SERVER_VERSION, SERVER_INFO, SERVER_INSPECT])
         self.assertNothingStreamed()
@@ -3898,41 +3946,31 @@ class OracleViewStreamTest(unittest.TestCase):
                 self.assertIn(f"ERROR: ssh grey (batch mode) with sudo -n docker failed: {message}. ssh must log in with "
                               "a key and no question, and the user must run docker with sudo -n.\n", result.stderr)
                 self.assertEqual(self.docker(), [MAC_INFO, MAC_PINNED, MAC_KIND, MAC_TAGGED])
-        # No read anywhere; ssh only with the options of the helper (or -G, which connects to nothing); every command
-        # on the server through sudo -n docker; ssh -n on each check.
+        # The wrapper reads nothing and runs no ssh, docker or sudo of its own: it runs stream-image.sh, which owns
+        # the transport (its commands: StreamImageTest.test_the_helper_never_asks_and_reads_the_pins_from_the_scripts).
         code = re.sub(r"cat <<'HELP'\n.*?\nHELP\n", "", STREAM_TEXT, flags=re.S)
         code = "\n".join(re.sub(r"\s{2,}# .*$", "", line) for line in code.splitlines()
                          if not line.lstrip().startswith("#"))  # without comments
         self.assertIsNone(re.search(r"\bread\b", code))
-        ssh = [line.strip() for line in code.splitlines()
-               if re.search(r"\bssh\b", line) and not re.search(r"\b(printf|die|usage_error)\b", line)]
-        self.assertEqual(ssh, ["SSH=(ssh -T -a -x -o BatchMode=yes -o ConnectTimeout=20 -o ClearAllForwardings=yes "
-                               "-o PermitLocalCommand=no", 'config=$(ssh -G "$HOST" 2> /dev/null) || config=\'\''])
-        self.assertIn("     -o ServerAliveInterval=15 -o ServerAliveCountMax=4)\n", STREAM_TEXT)
-        self.assertIn('remote() { "${SSH[@]}" -n "$HOST" "$1"; }', code)
-        self.assertIn('remote_load() { "${SSH[@]}" "$HOST" \'sudo -n docker load\'; }', code)
-        self.assertEqual(code.count('"${SSH[@]}"'), 2)
-        remote = re.findall(r"\bremote ([\"'])(.*?)\1", code)
-        self.assertEqual(len(remote), 3)  # version, info, the check of the pin
-        for _, command in remote:
-            self.assertTrue(command.startswith("sudo -n docker "), command)
-        # docker save names the stream tag, never the digest reference or the release tag.
-        self.assertIn('STREAM_TAG=$REPOSITORY:${DIGEST/:/-} ', STREAM_TEXT)
-        self.assertIn('if ! out=$(docker save "$STREAM_TAG" | remote_load 2>&1); then', code)
-        self.assertEqual(re.findall(r'docker save "\$(\w+)"', code), ["STREAM_TAG"])
-        # The pin stays in oracle-view.sh.
+        for word in ("ssh", "docker", "sudo", "rsync"):
+            self.assertIsNone(re.search(rf"(^|[;&|(]|\$\()\s*{word}\b", code, re.M), word)
+        self.assertEqual(re.findall(r"^\s*exec .*$", code, re.M),
+                         ['    exec "$BASH" "$HERE/stream-image.sh" --dry-run "$HOST" oracle-view.sh',
+                          'exec "$BASH" "$HERE/stream-image.sh" "$HOST" oracle-view.sh'])
+        # The pin stays in oracle-view.sh, and stream-image.sh reads it from there.
         self.assertNotRegex(STREAM_TEXT, r"sha256:[0-9a-f]{64}|grey-v\d")
-        self.assertIn("IMAGE=$(sed -n 's/^IMAGE=\\([^ ]*\\).*/\\1/p' \"$HERE/oracle-view.sh\")", STREAM_TEXT)
+        self.assertRegex(STREAM_IMAGE.read_text(), r"\nKIT_SOURCES='[^'\n]* oracle-view\.sh ")
+        self.assertIn('image=$(pin_value "$name" IMAGE)', STREAM_IMAGE.read_text())
 
     def test_one_run_at_a_time_for_each_server(self):
-        lock = self.tmp / "oracle-view-stream-grey_22.lock"
+        lock = self.tmp / "stream-image-grey_22.lock"  # the lock of stream-image.sh: one for each server, any source
         lock.mkdir()
         (lock / "pid").write_text(f"{os.getpid()}\n")  # a running process holds it
         for host in ("grey", "grey-alias", "admin@grey", "GREY"):  # one server, however ssh names it
             with self.subTest(host=host):
                 result = self.stream(host)
                 self.assertEqual(result.returncode, 1)
-                self.assertIn(f"ERROR: Another oracle-view-stream.sh run (process {os.getpid()}) streams to the server "
+                self.assertIn(f"ERROR: Another stream-image.sh run (process {os.getpid()}) streams to the server "
                               f"grey:22. If there is none, remove {lock}\n", result.stderr)
                 self.assertEqual(self.docker() + self.server(), [])
         self.assertEqual((lock / "pid").read_text(), f"{os.getpid()}\n")
@@ -3944,7 +3982,7 @@ class OracleViewStreamTest(unittest.TestCase):
         (lock / "pid").unlink()
         result = self.stream("grey")
         self.assertEqual(result.returncode, 1)
-        self.assertIn("ERROR: Another oracle-view-stream.sh run (process unknown) streams to the server grey:22.",
+        self.assertIn("ERROR: Another stream-image.sh run (process unknown) streams to the server grey:22.",
                       result.stderr)
         # The lock of a run that stopped is taken over, and removed at the end.
         ended = subprocess.Popen(["true"])
@@ -3959,7 +3997,7 @@ class OracleViewStreamTest(unittest.TestCase):
             with self.subTest(lock=os.path.islink(lock) and "link" or "file"):
                 result = self.stream("grey")
                 self.assertEqual(result.returncode, 1)
-                self.assertIn(f"ERROR: The lock {lock} is not a directory of oracle-view-stream.sh: remove it, then run "
+                self.assertIn(f"ERROR: The lock {lock} is not a directory of stream-image.sh: remove it, then run "
                               "again\n", result.stderr)
                 self.assertEqual(self.docker() + self.server(), [])
                 self.assertTrue(os.path.lexists(lock))
