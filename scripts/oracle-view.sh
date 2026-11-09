@@ -64,12 +64,12 @@ usage() {
     cat <<HELP
 Usage, on the App server:
        sudo bash oracle-view.sh install [--config PATH] [--non-interactive] [--no-pull] [--dir PATH]
-       sudo bash oracle-view.sh status [--dir PATH]
-       sudo bash oracle-view.sh uninstall [--purge] [--confirm oracle-view] [--dir PATH]
+       sudo bash oracle-view.sh status [--non-interactive] [--dir PATH]
+       sudo bash oracle-view.sh uninstall [--purge] [--confirm oracle-view] [--non-interactive] [--dir PATH]
 Usage, on the DB server:
-       sudo bash oracle-view.sh role --verifier-file FILE [--app-ip ADDRESS] [--pg-port PORT]
-       sudo bash oracle-view.sh role --check [--app-ip ADDRESS] [--pg-port PORT]
-       sudo bash oracle-view.sh drop-role [--confirm oracle_view_rp] [--drop-staging] [--pg-port PORT]
+       sudo bash oracle-view.sh role --verifier-file FILE [--app-ip ADDRESS] [--pg-port PORT] [--non-interactive]
+       sudo bash oracle-view.sh role --check [--app-ip ADDRESS] [--pg-port PORT] [--non-interactive]
+       sudo bash oracle-view.sh drop-role [--confirm oracle_view_rp] [--drop-staging] [--pg-port PORT] [--non-interactive]
 
 install    Pulls the pinned image ($RELEASE) from the private registry
            and runs it from --dir (default /opt/perodua-oracle-view, a new or empty
@@ -82,6 +82,12 @@ install    Pulls the pinned image ($RELEASE) from the private registry
            healthy, the last one that did runs again with its settings.
 --config   Literal KEY=VALUE lines (see oracle-view.env.example), never shell code,
            over the saved settings. Without settings the defaults apply.
+--non-interactive  Or KIT_NON_INTERACTIVE=1 in the environment (sudo env
+           KIT_NON_INTERACTIVE=1 bash ...), for every command: nothing is asked
+           and the terminal is never read. uninstall and drop-role then need
+           --confirm, and install stops when the registry wants a login (run
+           docker login first, or use --no-pull). KIT_NON_INTERACTIVE=0 or no
+           value: ask on a terminal; another value is a usage error.
 --no-pull  Or OVB_NO_PULL=1 in the environment (sudo env OVB_NO_PULL=1 bash ...).
            install never pulls, never logs in to the registry and never asks:
            the pinned image must already be on this server, streamed from the
@@ -175,10 +181,23 @@ claim_project() {   # one directory for the Compose project, and one command at 
     others=$(printf '%s\n' "$owners" | sort -u | grep -vxF -e "$DEPLOY_DIR" -e '' || true)
     [[ -z $others ]] || die "The Compose project $PROJECT already runs from $others. The manual install of the oracle-view repository (deploy/grey) runs from /opt/oracle-view: remove it with its uninstall-app.sh, without --purge, so that the state volume stays. Then run install again."
 }
+# The only place that reads an answer from a person: stdin, and only when it is
+# a terminal and the run is not non-interactive. Never /dev/tty, which an agent
+# under ssh -t still has. $3 says how to give the answer without a person.
+read_terminal() {  # [-s hidden] [-k keep spaces] VAR PROMPT HOW
+    local read_options=() read_ifs=$' \t\n'
+    while [[ $1 == -[sk] ]]; do
+        if [[ $1 == -s ]]; then read_options+=(-s); else read_ifs=''; fi
+        shift
+    done
+    { ((NON_INTERACTIVE == 0)) && [[ -t 0 ]]; } || die "$3"
+    IFS=$read_ifs read -r "${read_options[@]}" -p "$2" "$1"
+}
 confirm() {   # $1: the word to type
     if [[ -z $CONFIRM ]]; then
-        [[ -t 0 ]] || die "No terminal to confirm on: pass --confirm $1. Nothing was changed."
-        read -r -p "Type $1 to confirm: " CONFIRM || die 'Cancelled'
+        read_terminal CONFIRM "Type $1 to confirm: " \
+            "A non-interactive run, or a run without a terminal, asks nothing: pass --confirm $1. Nothing was changed." \
+            || die 'Cancelled'
     fi
     [[ $CONFIRM == "$1" ]] || die 'Not confirmed. Nothing was changed.'
 }
@@ -260,10 +279,12 @@ pull_image() {   # asks for the registry account only when the registry wants on
         ((attempts < 3)) || die 'The registry login failed three times'
         [[ -t 0 ]] || die "The registry login needs a terminal (or run docker login $REGISTRY first)"
         printf 'The registry %s requires a login. Use the deployment account issued for it.\n' "$REGISTRY"
-        read -r -p 'Registry username (blank cancels): ' username || die 'Cancelled'
+        read_terminal username 'Registry username (blank cancels): ' \
+            "The registry login needs a terminal (or run docker login $REGISTRY first)" || die 'Cancelled'
         [[ -n $username ]] || die 'Cancelled'
         [[ $username =~ $name ]] || die 'Invalid registry username'
-        IFS= read -r -s -p 'Registry password (hidden; blank cancels): ' token || die 'Cancelled'
+        read_terminal -s -k token 'Registry password (hidden; blank cancels): ' \
+            "The registry login needs a terminal (or run docker login $REGISTRY first)" || die 'Cancelled'
         printf '\n'
         [[ -n $token ]] || die 'Cancelled'
         if [[ -z $AUTH_DIR ]]; then
@@ -1734,7 +1755,7 @@ while (($#)); do
             esac
             GIVEN+=("$1")
             shift 2 ;;
-        --non-interactive) NON_INTERACTIVE=1; GIVEN+=("$1"); shift ;;
+        --non-interactive) NON_INTERACTIVE=1; shift ;;   # an option of every command
         --no-pull) NO_PULL=1; GIVEN+=("$1"); shift ;;
         --purge) PURGE=1; GIVEN+=("$1"); shift ;;
         --check) CHECK_ONLY=1; GIVEN+=("$1"); shift ;;
@@ -1742,6 +1763,15 @@ while (($#)); do
         *) usage_error "Unknown argument: $1" ;;
     esac
 done
+# --non-interactive, or KIT_NON_INTERACTIVE=1 in the environment: no question at
+# all (README.md, "Run the kit without a person"). A confirmation comes from
+# --confirm; without it the command stops before any change.
+case ${KIT_NON_INTERACTIVE:-} in
+    ''|0) ;;
+    1) NON_INTERACTIVE=1 ;;
+    *) usage_error 'KIT_NON_INTERACTIVE must be 1 (never ask) or 0 (ask on a terminal).' ;;
+esac
+((NON_INTERACTIVE == 0)) || export KIT_NON_INTERACTIVE=1
 allowed() {   # $@: the options of COMMAND
     local option
     for option in "${GIVEN[@]}"; do
@@ -1750,7 +1780,7 @@ allowed() {   # $@: the options of COMMAND
 }
 case $COMMAND in
     install)
-        allowed --config --non-interactive --no-pull --dir
+        allowed --config --no-pull --dir
         case ${OVB_NO_PULL:-} in   # --no-pull for a run that cannot add an option
             ''|0) ;;
             1) NO_PULL=1 ;;
