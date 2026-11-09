@@ -12,11 +12,16 @@ RELEASE=iss-oracle-api-v1.0.0
 # the server needs no Oracle client. The image holds no settings or secrets.
 IMAGE=perodua-deploy.novutal.com/iss-oracle-api:v1.0.0@sha256:5b8a32cc339217a6b6a9b35dd15b5d88253dedb74104389eeb69a3251e3c7843
 REGISTRY=${IMAGE%%/*}
+REPOSITORY=${IMAGE%:*@*}  # the name without the tag and the digest (a registry port stays)
+DIGEST=${IMAGE##*@}
+PINNED=$REPOSITORY@$DIGEST   # finds the pinned image by its digest, whatever its tag (install --no-pull)
+STREAM_TAG=$REPOSITORY:${DIGEST/:/-}   # the tag the Mac streams the pin under: one for each digest, never moved
+PLATFORM=linux/amd64      # the platform of the image and of the App server, for the pull on the Mac
 DEPLOY_DIR=/opt/perodua-iss-api
 SETTINGS=(DB_HOST DB_PORT DB_SERVICE DB_USER API_KEY_HASH PROJECT_NAME BIND_IP HTTP_PORT WORKERS)
 DB_HOST='' DB_PORT=1521 DB_SERVICE='' DB_USER='' DB_PASSWORD_FILE='' API_KEY_HASH=''
 PROJECT_NAME=perodua-iss-api BIND_IP=127.0.0.1 HTTP_PORT=8000 WORKERS=2
-COMMAND='' CONFIG='' NON_INTERACTIVE=0 CONFIRM='' PURGE=0 ASK_KEY=0 KEY_FILE='' FOLLOW=0
+COMMAND='' CONFIG='' NON_INTERACTIVE=0 NO_PULL=0 CONFIRM='' PURGE=0 ASK_KEY=0 KEY_FILE='' FOLLOW=0
 TEMP_DIR='' STAGE='' STAGED=0 AUTH_DIR='' CANDIDATE_KEY='' NEW_KEY=''
 # In the deployment directory, next to the generation it runs (GENERATION):
 GENERATION=(compose.yml iss-api.env secrets/db_password)
@@ -25,7 +30,7 @@ SNAPSHOT=.last-good.tar   # the generation that last started, to switch back to
 
 usage() {
     cat <<'HELP'
-Usage: sudo bash iss-api.sh install [--config PATH] [--non-interactive] [--dir PATH]
+Usage: sudo bash iss-api.sh install [--config PATH] [--non-interactive] [--no-pull] [--dir PATH]
        sudo bash iss-api.sh status|start|stop|restart [--dir PATH]
        sudo bash iss-api.sh logs [--follow] [--dir PATH]
        sudo bash iss-api.sh check [--key | --key-file FILE] [--dir PATH]
@@ -47,8 +52,20 @@ install    Pulls the pinned image (iss-oracle-api-v1.0.0) from the private regis
 --config   Literal KEY=VALUE lines (see iss-api.env.example), never shell code.
            The first install with --non-interactive needs DB_PASSWORD_FILE there.
            Without API_KEY_HASH the deployed key stays.
+--no-pull  Or KIT_NO_PULL=1 in the environment (sudo env KIT_NO_PULL=1 bash ...).
+           install never pulls, never logs in to the registry and never asks
+           (as --non-interactive): the pinned image must already be on this
+           server, streamed from the Mac (bash scripts/stream-image.sh SSH_HOST
+           iss-api.sh there). install finds it by its digest reference and
+           checks that its registry digest, and on the containerd image store
+           its ID, is the pinned digest; then it starts the image once, with no
+           network. When it is missing, or does not start, install stops before
+           any change and prints the command for the Mac. On the classic image
+           store an image from docker load has no registry digest: install
+           stops there too (README.md, "Install from streamed images").
 status, start, stop and restart keep the settings. A stopped API stays stopped
-           after a reboot until it is started again.
+           after a reboot until it is started again. status also shows whether
+           the pinned image is on this server (Local:).
 logs       The container's log; --follow keeps reading.
 check      Runs the check again; --key asks for an API key to test a query with it,
            --key-file FILE takes it from the first line of a file instead.
@@ -289,6 +306,63 @@ pull_image() {   # asks for the registry account only when the registry wants on
     printf 'Pulled pinned image: %s\n' "${IMAGE%@*}"
 }
 
+# install --no-pull uses only an image that is on this server. On the containerd image
+# store the ID of an image is the digest of its manifest, checked against the content, and
+# docker load keeps it; on the classic store a loaded image has no registry digest.
+image_store() {   # containerd, classic, or nothing when docker info does not answer
+    local status
+    status=$(docker info --format '{{json .DriverStatus}}' 2> /dev/null) || return 0
+    if [[ $status == *'["driver-type","io.containerd.snapshotter.v1"]'* ]]; then echo containerd; else echo classic; fi
+}
+pinned_here() {   # $1 store; 0: the pinned image is here, 1: no image has its digest, 2: one does, but not as pinned
+    local facts
+    facts=$(docker image inspect --format '{{.Id}}{{range .RepoDigests}} {{.}}{{end}}' "$PINNED" 2> /dev/null) || return 1
+    [[ " $facts " == *" $PINNED "* ]] || return 2
+    [[ $1 != containerd || ${facts%% *} == "$DIGEST" ]] || return 2
+}
+starts() {   # the pinned image starts a process, with no pull and no network: its layers are complete
+    # sh: the command of the service in compose.yml runs it too.
+    docker run --rm --pull never --network none --read-only --cap-drop ALL --security-opt no-new-privileges:true \
+        --entrypoint sh "$IMAGE" -c :
+}
+check_pinned_image() {   # --no-pull, before any change: no pull, no login and no question
+    local store found=0 out
+    store=$(image_store)
+    [[ -n $store ]] || die 'The Docker engine does not answer docker info. Nothing was changed.'
+    pinned_here "$store" || found=$?
+    case $found in
+        0) out=$(starts 2>&1) \
+               || die "The pinned image on this server does not start: $(printf '%s\n' "$out" | tail -n 1). Remove it (sudo docker image rm $PINNED), stream the pinned image again, then run this command again. Nothing was changed."
+           printf 'Pinned image on this server (%s image store), not pulled: %s\n' "$store" "$PINNED"
+           return 0 ;;
+        2) die "The image that $PINNED finds on this server does not have the pinned digest as its registry digest (and, on the containerd image store, as its ID). Remove it (sudo docker image rm $PINNED), stream the pinned image again, then run this command again. Nothing was changed." ;;
+    esac
+    [[ $store == containerd ]] || die "The pinned image is not on this server, and --no-pull does not pull it: $PINNED. The Docker engine of this server uses the classic image store: there an image from docker load has no registry digest, so install cannot check it against the pinned digest and does not use it. Switch the engine to the containerd image store first (README.md, \"Install from streamed images\"), then stream the image. Nothing was changed."
+    # docker save of a digest reference writes no image name, and docker load then keeps a
+    # dangling image that the digest reference does not find; a release tag moves to a later
+    # pin: the Mac saves the stream tag, one for each digest.
+    die "$(printf '%s\n' "The pinned image is not on this server, and --no-pull does not pull it: $PINNED" \
+        "Stream it from the Mac (it has the registry login and the containerd image store). There, SSH_HOST is the ssh name of this server (host name $(uname -n)):" \
+        "  bash scripts/stream-image.sh SSH_HOST iss-api.sh" \
+        'or with Docker alone:' \
+        "  docker pull --platform $PLATFORM $IMAGE && docker tag $PINNED $STREAM_TAG && docker save $STREAM_TAG | ssh SSH_HOST 'sudo -n docker load'" \
+        'Then run this command again. Nothing was changed.')"
+}
+local_line() {   # status: the check of install --no-pull, as one line
+    local store found=0
+    store=$(image_store)
+    if [[ -z $store ]]; then
+        printf 'Local:    not checked (docker info does not answer)\n'
+        return 0
+    fi
+    pinned_here "$store" || found=$?
+    case $found in
+        0) printf 'Local:    the pinned image is on this server (%s image store)\n' "$store" ;;
+        1) printf 'Local:    the pinned image is not on this server: install pulls it, install --no-pull needs it streamed first\n' ;;
+        *) printf 'Local:    the image that %s finds here does not have the pinned digest\n' "$PINNED" ;;
+    esac
+}
+
 # ---------------------------------------------------------------- generations
 # A generation (compose.yml, iss-api.env, secrets/db_password) is written to
 # $STAGE, on the deployment's filesystem, checked there, and published by renames.
@@ -510,6 +584,7 @@ cmd_install() {
     if is_ours; then same_project; fi
     check_settings
     claim_project
+    ((NO_PULL == 0)) || check_pinned_image
     install -d -m 0700 "$DEPLOY_DIR"
     is_ours || printf 'PROJECT_NAME=%s\nDIR=%s\n' "$PROJECT_NAME" "$DEPLOY_DIR" > "$DEPLOY_DIR/$IDENTITY"
     make_stage
@@ -517,7 +592,7 @@ cmd_install() {
     if [[ -n $(ss -ltnH "sport = :$HTTP_PORT") ]] && ! owns_port; then
         die "Port $HTTP_PORT is already used by another program: set HTTP_PORT in the settings"
     fi
-    pull_image
+    ((NO_PULL)) || pull_image
     [[ -n $API_KEY_HASH ]] || new_key
     deploy "$IMAGE"
     printf 'Checking the deployment\n'
@@ -536,9 +611,11 @@ cmd_install() {
 
 cmd_status() {
     open_deployment
-    printf 'Release:  %s\nListens:  %s:%s\nDatabase: %s:%s/%s as %s\nSettings: %s/iss-api.env\n\n' \
+    printf 'Release:  %s\nListens:  %s:%s\nDatabase: %s:%s/%s as %s\nSettings: %s/iss-api.env\n' \
         "$(sed -n 's/^    image: //p' "$DEPLOY_DIR/compose.yml")" "$BIND_IP" "$HTTP_PORT" \
         "$DB_HOST" "$DB_PORT" "$DB_SERVICE" "$DB_USER" "$DEPLOY_DIR"
+    local_line
+    printf '\n'
     compose ps --all
 }
 
@@ -603,6 +680,7 @@ while (($#)); do
             case $1 in --config) CONFIG=$2 ;; --confirm) CONFIRM=$2 ;; --dir) DEPLOY_DIR=$2 ;; esac
             shift 2 ;;
         --non-interactive) NON_INTERACTIVE=1; shift ;;
+        --no-pull) NO_PULL=1; shift ;;
         --purge) PURGE=1; shift ;;
         --key) ASK_KEY=1; shift ;;
         --key-file)
@@ -616,6 +694,16 @@ done
 [[ -z $CONFIRM && $PURGE == 0 ]] || [[ $COMMAND == uninstall ]] || die '--confirm and --purge belong to uninstall'
 [[ $ASK_KEY == 0 && -z $KEY_FILE ]] || [[ $COMMAND == check ]] || die '--key and --key-file belong to check'
 [[ $ASK_KEY == 0 || -z $KEY_FILE ]] || die 'Use --key or --key-file, not both'
+[[ $NO_PULL == 0 || $COMMAND == install ]] || die '--no-pull belongs to install'
+# --no-pull, or KIT_NO_PULL=1 in the environment (README.md, "Install from streamed
+# images"): install uses only the pinned image on this server, streamed from the Mac. It
+# never pulls, never logs in to the registry and never asks: no-pull is non-interactive.
+case ${KIT_NO_PULL:-} in
+    ''|0) ;;
+    1) [[ $COMMAND != install ]] || NO_PULL=1 ;;
+    *) die 'KIT_NO_PULL must be 1 (never pull: use the image streamed from the Mac) or 0 (pull as before).' ;;
+esac
+((NO_PULL == 0)) || NON_INTERACTIVE=1
 # --non-interactive, or KIT_NON_INTERACTIVE=1 in the environment: no question
 # at all (README.md, "Run the kit without a person"). Each answer comes from an
 # option or a setting; a missing one stops the run before it changes anything.
