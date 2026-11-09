@@ -7,8 +7,11 @@ export LC_ALL=C
 
 usage() {
     cat <<'EOF'
-Usage: sudo bash uninstall.sh --role db  [--config FILE | --database NAME] [--confirm NAME] [--purge]
+Usage: sudo bash uninstall.sh --role db  [--config FILE | --database NAME] [--confirm NAME]
+                                [--purge [--confirm-purge PURGE]] [--non-interactive]
        sudo bash uninstall.sh --role app [--dir PATH] [--confirm PROJECT] [--purge]
+                                [--delete-old-containers PROJECT]... [--delete-old-volumes]
+                                [--non-interactive]
 
 --role db removes what deploy-db.sh created for one database: the database and
 any staging copy left by a failed run, the login role (unless another database
@@ -17,7 +20,8 @@ or deployment still uses it), its access rules, the listen address it added
 written by the guided setup. The database is taken from deploy.conf next to this
 script, --config, --database, or the only deployment recorded on this server.
 PostgreSQL stays installed. --purge also uninstalls PostgreSQL 16 and deletes
-every database on this server; it needs a terminal.
+every database on this server; type PURGE to confirm, or pass --confirm-purge
+PURGE.
 
 --role app stops and removes the App containers, their anonymous volumes and
 the network, and deletes the deployment directory (default /opt/perodua-app),
@@ -25,19 +29,29 @@ including its copies of the database password and the SMTP password. The
 attachments volume and the images are kept; --purge removes them too. Other
 containers with "perodua" in their name or image, such as the App of the earlier
 perodua-odoo package, are listed afterwards, or when there is no deployment, and
-deleted after a "y" on a terminal.
+deleted after a "y" on a terminal. --delete-old-containers PROJECT (- for the
+containers without a Compose project; once per project) deletes the containers
+of that project without a question and keeps the others; --delete-old-volumes
+deletes the volumes they used too.
 
 The plan is shown first. Type the database or project name to confirm, or pass
 it with --confirm for unattended use.
+
+--non-interactive, or KIT_NON_INTERACTIVE=1 in the environment, never asks:
+--confirm is then required (and --confirm-purge PURGE with --role db --purge),
+and other containers are deleted only with --delete-old-containers.
 EOF
 }
 
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-ROLE='' CONFIG='' DATABASE='' DEPLOY_DIR=/opt/perodua-app CONFIRM='' PURGE=0
+ROLE='' CONFIG='' DATABASE='' DEPLOY_DIR=/opt/perodua-app CONFIRM='' PURGE=0 NON_INTERACTIVE=0 CONFIRM_PURGE=''
+# The other containers with "perodua" (other_perodua_containers) to delete
+# without a question: Compose projects, - for those without one.
+DELETE_OLD=() DELETE_OLD_VOLUMES=0
 while (($#)); do
     case $1 in
-        --role|--config|--database|--dir|--confirm)
+        --role|--config|--database|--dir|--confirm|--confirm-purge|--delete-old-containers)
             (($# >= 2)) || die "Missing value for $1"
             case $1 in
                 --role) ROLE=$2 ;;
@@ -45,34 +59,72 @@ while (($#)); do
                 --database) DATABASE=$2 ;;
                 --dir) DEPLOY_DIR=$2 ;;
                 --confirm) CONFIRM=$2 ;;
+                --confirm-purge) CONFIRM_PURGE=$2 ;;
+                --delete-old-containers)
+                    [[ $2 == - || $2 =~ ^[a-z0-9][a-z0-9_-]*$ ]] || die '--delete-old-containers needs a Compose project name, or - for the containers without one.'
+                    DELETE_OLD+=("$2") ;;
             esac
             shift 2 ;;
         --purge) PURGE=1; shift ;;
+        --delete-old-volumes) DELETE_OLD_VOLUMES=1; shift ;;
+        --non-interactive) NON_INTERACTIVE=1; shift ;;
         --help|-h) usage; exit 0 ;;
         *) usage >&2; die "Unknown argument: $1" ;;
     esac
 done
 [[ $ROLE == db || $ROLE == app ]] || { usage >&2; die 'Choose --role db or --role app.'; }
+# --non-interactive, or KIT_NON_INTERACTIVE=1 in the environment: no question
+# at all (README.md, "Run the kit without a person"). Each answer comes from an
+# option or a setting; a missing one stops the run before it changes anything.
+case ${KIT_NON_INTERACTIVE:-} in
+    ''|0) ;;
+    1) NON_INTERACTIVE=1 ;;
+    *) die 'KIT_NON_INTERACTIVE must be 1 (never ask) or 0 (ask on a terminal).' ;;
+esac
+((NON_INTERACTIVE == 0)) || export KIT_NON_INTERACTIVE=1
+if [[ -n $CONFIRM_PURGE ]]; then
+    [[ $ROLE == db && $PURGE == 1 ]] || die '--confirm-purge belongs to --role db --purge. Nothing was changed.'
+    [[ $CONFIRM_PURGE == PURGE ]] || die '--confirm-purge must be exactly PURGE. Nothing was changed.'
+fi
+((${#DELETE_OLD[@]} == 0 && DELETE_OLD_VOLUMES == 0)) || [[ $ROLE == app ]] \
+    || die '--delete-old-containers and --delete-old-volumes belong to --role app. Nothing was changed.'
+((DELETE_OLD_VOLUMES == 0 || ${#DELETE_OLD[@]})) \
+    || die '--delete-old-volumes deletes the volumes of the containers that --delete-old-containers names: give that too. Nothing was changed.'
+if ((NON_INTERACTIVE && PURGE)) && [[ $ROLE == db && -z $CONFIRM_PURGE ]]; then
+    die 'A non-interactive run never asks: --purge needs --confirm-purge PURGE. Nothing was changed.'
+fi
 [[ $EUID -eq 0 ]] || die 'Run with sudo or as root.'
 # shellcheck source=/dev/null
 source /etc/os-release
 [[ ${ID:-} == ubuntu && ${VERSION_ID:-} == 24.04 ]] || die 'This script supports Ubuntu 24.04.'
 
-has_terminal() { { : </dev/tty; } 2>/dev/null; }
+# The only place that reads an answer from a person: stdin, and only when it is
+# a terminal and the run is not non-interactive. Never /dev/tty, which an agent
+# under ssh -t still has. $3 says how to give the answer without a person.
+read_terminal() {  # [-s hidden] [-k keep spaces] VAR PROMPT HOW
+    local read_options=() read_ifs=$' \t\n'
+    while [[ $1 == -[sk] ]]; do
+        if [[ $1 == -s ]]; then read_options+=(-s); else read_ifs=''; fi
+        shift
+    done
+    ((NON_INTERACTIVE == 0)) && [[ -t 0 ]] || die "$3"
+    IFS=$read_ifs read -r "${read_options[@]}" -p "$2" "$1"
+}
 confirm() {
-    local expected=$1 answer
+    local expected=$1 answer=''
     if [[ -n $CONFIRM ]]; then
         [[ $CONFIRM == "$expected" ]] || die "--confirm must be exactly $expected. Nothing was changed."
         return
     fi
-    has_terminal || die "No terminal to confirm on: pass --confirm $expected. Nothing was changed."
-    IFS= read -r -p "Type $expected to confirm: " answer </dev/tty || die 'Cancelled. Nothing was changed.'
+    read_terminal -k answer "Type $expected to confirm: " "No terminal to confirm on: pass --confirm $expected. Nothing was changed." \
+        || die 'Cancelled. Nothing was changed.'
     [[ $answer == "$expected" ]] || die 'The confirmation did not match. Nothing was changed.'
 }
 confirm_purge() {
-    local answer
-    has_terminal || die '--purge needs a terminal. Nothing was changed.'
-    IFS= read -r -p 'Type PURGE to uninstall PostgreSQL 16 and delete every database on this server: ' answer </dev/tty \
+    local answer=''
+    [[ -z $CONFIRM_PURGE ]] || return 0   # exactly PURGE, checked with the options
+    read_terminal -k answer 'Type PURGE to uninstall PostgreSQL 16 and delete every database on this server: ' \
+        '--purge needs a terminal, or --confirm-purge PURGE. Nothing was changed.' \
         || die 'Cancelled. Nothing was changed.'
     [[ $answer == PURGE ]] || die 'The confirmation did not match. Nothing was changed.'
 }
@@ -83,17 +135,28 @@ confirm_purge() {
 # (Compose project perodua-odoo), or a copy started by hand. They are listed by
 # Compose project, and each project is deleted only after a "y" on a terminal.
 # The volumes its containers used are asked about separately; the images stay.
+# With --delete-old-containers (or in a non-interactive run) nothing is asked:
+# the projects it names are deleted, with their volumes only after
+# --delete-old-volumes, and the others are kept.
 # $1: the project this uninstall removes, $2: a line to print first. Returns 1
 # when there are none, and sets OTHERS_DELETED=1 once any are deleted.
 OTHERS_DELETED=0
 other_perodua_containers() {
-    local skip=$1 intro=$2 rows=() groups=() ids=() lines=() images=() volumes=() listed
-    local row id project dir name image status ports group from answer volume error
+    local skip=$1 intro=$2 rows=() groups=() ids=() lines=() images=() volumes=() listed ask=0 named
+    local row id project dir name image status ports group from answer volume error remove
     local format='{{.ID}}|{{.Label "com.docker.compose.project"}}|{{.Label "com.docker.compose.project.working_dir"}}'
     format+='|{{.Names}}|{{.Image}}|{{.Status}}|{{.Ports}}'
+    # Questions only from a person: no option given, not non-interactive, a terminal.
+    if ((${#DELETE_OLD[@]} == 0 && NON_INTERACTIVE == 0)) && [[ -t 0 ]]; then ask=1; fi
     mapfile -t rows < <(docker ps -a --format "$format" 2>/dev/null \
         | awk -F'|' -v skip="$skip" 'tolower($4 "|" $5) ~ /perodua/ && (skip == "" || $2 != skip)')
-    ((${#rows[@]})) || return 1
+    if ((${#rows[@]} == 0)); then
+        for named in "${DELETE_OLD[@]}"; do
+            [[ $named == "$skip" ]] \
+                || printf 'No other container of %s has "perodua" in its name or image: --delete-old-containers %s deletes nothing.\n' "$named" "$named"
+        done
+        return 1
+    fi
     [[ -z $intro ]] || printf '%s\n' "$intro"
     printf '\nOther containers with "perodua" in their name or image are on this server. The earlier\n'
     printf 'perodua-odoo package deployed its App as the Compose project perodua-odoo.\n'
@@ -101,8 +164,13 @@ other_perodua_containers() {
         IFS='|' read -r id project dir name image status ports <<< "$row"
         [[ " ${groups[*]} " == *" ${project:--} "* ]] || groups+=("${project:--}")
     done
+    for named in "${DELETE_OLD[@]}"; do
+        [[ " ${groups[*]} " == *" $named "* || $named == "$skip" ]] \
+            || printf 'No other container of %s has "perodua" in its name or image: --delete-old-containers %s deletes nothing.\n' "$named" "$named"
+    done
     for group in "${groups[@]}"; do
-        ids=() lines=() images=() volumes=() from=''
+        ids=() lines=() images=() volumes=() from='' remove=''
+        [[ " ${DELETE_OLD[*]} " != *" $group "* ]] || remove=1
         for row in "${rows[@]}"; do
             IFS='|' read -r id project dir name image status ports <<< "$row"
             [[ ${project:--} == "$group" ]] || continue
@@ -116,15 +184,25 @@ other_perodua_containers() {
             printf '\nCompose project %s%s:\n' "$group" "${from:+ (from $from)}"
         fi
         printf '%s\n' "${lines[@]}"
-        if ! has_terminal; then
-            if [[ -n $group ]]; then
-                printf 'Not deleted without a terminal. To delete them: sudo docker compose --project-name %s down\n' "$group"
+        if ((ask == 0)) && [[ -z $remove ]]; then
+            if ((${#DELETE_OLD[@]} || NON_INTERACTIVE)); then
+                printf 'Not deleted: --delete-old-containers does not name them.'
             else
-                printf 'Not deleted without a terminal. To delete them: sudo docker rm -f %s\n' "${ids[*]}"
+                printf 'Not deleted without a terminal.'
             fi
+            if [[ -n $group ]]; then
+                printf ' To delete them: sudo docker compose --project-name %s down\n' "$group"
+            else
+                printf ' To delete them: sudo docker rm -f %s\n' "${ids[*]}"
+            fi
+            printf 'Or run this again with --delete-old-containers %s.\n' "${group:--}"
             continue
         fi
-        IFS= read -r -p 'Is this an old deployment? Delete these containers [y/N]: ' answer </dev/tty || answer=''
+        answer=y
+        if ((ask)); then
+            read_terminal -k answer 'Is this an old deployment? Delete these containers [y/N]: ' \
+                "Pass --delete-old-containers ${group:--} to delete them." || answer=''
+        fi
         if [[ $answer != [Yy]* ]]; then
             printf 'Kept them.\n'
             continue
@@ -145,8 +223,15 @@ other_perodua_containers() {
         OTHERS_DELETED=1
         printf 'Deleted the containers.\n'
         if ((${#volumes[@]})); then
-            IFS= read -r -p "Also delete the volumes they used (${volumes[*]})? Attachments in them cannot be recovered. [y/N]: " \
-                answer </dev/tty || answer=''
+            if ((ask)); then
+                read_terminal -k answer "Also delete the volumes they used (${volumes[*]})? Attachments in them cannot be recovered. [y/N]: " \
+                    'Pass --delete-old-volumes to delete them.' || answer=''
+            elif ((DELETE_OLD_VOLUMES)); then
+                answer=y
+            else
+                answer=''
+                printf 'Kept the volumes they used (%s): --delete-old-volumes deletes them.\n' "${volumes[*]}"
+            fi
             if [[ $answer == [Yy]* ]]; then
                 for volume in "${volumes[@]}"; do
                     if error=$(docker volume rm "$volume" 2>&1 >/dev/null); then
@@ -155,7 +240,7 @@ other_perodua_containers() {
                         printf 'Kept volume %s: %s\n' "$volume" "$error"
                     fi
                 done
-            else
+            elif ((ask)); then
                 printf 'Kept the volumes.\n'
             fi
         fi
@@ -389,6 +474,9 @@ uninstall_db() {
     db_name=${db_name:-perodua} PG_CLUSTER=${PG_CLUSTER:-main}
     [[ $db_name =~ ^[a-z][a-z0-9_]{0,39}$ && $db_name != postgres && $db_name != template[01] ]] || die 'Invalid database name.'
     [[ $PG_CLUSTER =~ ^[a-z][a-z0-9_]{0,29}$ ]] || die 'Invalid PG_CLUSTER.'
+    # Before PostgreSQL is started for the plan: a non-interactive run never asks.
+    ((NON_INTERACTIVE == 0)) || [[ -n $CONFIRM ]] \
+        || die "A non-interactive run never asks: pass --confirm $db_name to remove the database deployment $db_name. Nothing was changed."
     [[ -x $PG_BIN/psql ]] || die 'PostgreSQL 16 is not installed, so there is no database to remove.'
     PG_PORT=$(pg_conftool 16 "$PG_CLUSTER" show port 2>/dev/null | awk '{print $NF}') || true
     [[ $PG_PORT =~ ^[1-9][0-9]{0,4}$ ]] || die "PostgreSQL 16 cluster $PG_CLUSTER does not exist."
