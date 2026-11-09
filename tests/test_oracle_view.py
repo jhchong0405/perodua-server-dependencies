@@ -935,12 +935,19 @@ RIGHTS_OK = ["OK|the password is a SCRAM-SHA-256 verifier", "OK|LOGIN, CONNECTIO
              "OK|read-only by default (default_transaction_read_only=on)", "OK|CONNECT on perodua_oracle2",
              "OK|SELECT on every table and view of public (0 without)",
              "OK|INSERT, UPDATE and DELETE on every table of public (0 without)",
-             "OK|USAGE and UPDATE on every sequence of public (0 without)", "OK|no TRUNCATE",
-             "OK|no CREATE in public", "OK|owns nothing outside the schema ovb_stage (DDL on the Odoo tables fails)",
+             "OK|USAGE and UPDATE on every sequence of public (0 without)",
+             # The rights of the owner of the database (owner decision of 2026-11-09).
+             "OK|TRUNCATE on every table of public (0 without)", "OK|CREATE in public",
+             "OK|member of odoo, the owner of perodua_oracle2, with INHERIT TRUE, SET FALSE, ADMIN FALSE",
              "OK|no right on a database other than perodua_oracle2",
              # The schema of the staging tables of Copy to RP (copy design, section 4.3).
-             "OK|owns one schema, ovb_stage", "OK|USAGE and CREATE on the schema ovb_stage",
-             "OK|no right of PUBLIC on the schema ovb_stage"]
+             "OK|owns the schema ovb_stage", "OK|USAGE and CREATE on the schema ovb_stage",
+             "OK|no right of PUBLIC on the schema ovb_stage",
+             # Information only: never a stop.
+             "INFO|owns 0 objects outside the schema ovb_stage",
+             "INFO|other databases of odoo, with its rights through the membership: none"]
+MEMBER_HINT = ("oracle_view_rp gets the rights of the owner of perodua_oracle2 through a membership in that owner "
+               "(owner decision of\n2026-11-09): INHERIT TRUE, SET FALSE, ADMIN FALSE, and the owner is not a superuser.")
 STAGE_SQL = ("CREATE SCHEMA IF NOT EXISTS ovb_stage AUTHORIZATION oracle_view_rp;\n", "REVOKE ALL ON SCHEMA ovb_stage FROM PUBLIC;\n",
              "GRANT USAGE, CREATE ON SCHEMA ovb_stage TO oracle_view_rp;\n")
 # Two staging tables, as the list of the script shows them.
@@ -1074,7 +1081,21 @@ class OracleViewRoleTest(unittest.TestCase):
             for setting in ("\\set VERBOSITY terse\n", "\\set SHOW_CONTEXT never\n"):
                 self.assertLess(sql.index(setting), at)
             self.assertLess(at, sql.index("\\unset ovb_verifier\n"))
-        # The rights of the owner decision of 2026-11-06.
+        # The owner of ovb_db, read before any change: a superuser owner or the role itself stops the run.
+        guard = ["SELECT r.rolname AS ovb_owner, r.rolsuper AS ovb_owner_super, r.rolname = 'oracle_view_rp' AS "
+                 "ovb_owner_self\n  FROM pg_database d JOIN pg_roles r ON r.oid = d.datdba WHERE d.datname = :'ovb_db' "
+                 "\\gset\n", "\\if :ovb_owner_super\n", "RAISE EXCEPTION", "\\elif :ovb_owner_self\n",
+                 "RAISE EXCEPTION", "\\endif\n"]
+        self.assertNotIn(-1, in_order(start, guard), start)
+        self.assertLess(sql.index(guard[0]), sql.index("ALTER ROLE oracle_view_ro NOLOGIN;"))
+        # The rights of the owner decision of 2026-11-09: the grants of 2026-11-06, and the membership in the owner
+        # of ovb_db, read again (never a superuser, never the role), with INHERIT and without SET.
+        membership = ("SELECT format('GRANT %I TO oracle_view_rp WITH INHERIT TRUE, SET FALSE', r.rolname)\n"
+                      "  FROM pg_database d JOIN pg_roles r ON r.oid = d.datdba\n"
+                      " WHERE d.datname = :'ovb_db' AND NOT r.rolsuper AND r.rolname <> 'oracle_view_rp' \\gexec\n")
+        self.assertNotIn(-1, in_order(sql, ['GRANT CONNECT, TEMPORARY ON DATABASE :"ovb_db" TO oracle_view_rp;\n',
+                                            "SET client_min_messages = warning;\n", membership,
+                                            "RESET client_min_messages;\n", "\\connect :ovb_db\n"]))
         for line in ("ALTER ROLE oracle_view_rp NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;",
                      "ALTER ROLE oracle_view_rp SET default_transaction_read_only = on;",
                      "ALTER ROLE oracle_view_rp SET statement_timeout = '30s';",
@@ -1088,8 +1109,11 @@ class OracleViewRoleTest(unittest.TestCase):
                      "DROP ROLE oracle_view_ro;"):
             self.assertIn(line, sql)
         statements = "\n".join(line for line in sql.splitlines() if not line.startswith("--"))
-        for word in ("TRUNCATE", "ALTER SYSTEM", "pg_reload_conf", "OWNER TO", "GRANT CREATE", "GRANT ALL"):
+        # The rights of the owner come with the membership only: no other grant of them, no SET and no ADMIN.
+        for word in ("TRUNCATE", "ALTER SYSTEM", "pg_reload_conf", "OWNER TO", "GRANT CREATE", "GRANT ALL", "SET TRUE",
+                     "ADMIN"):
             self.assertNotIn(word, statements)
+        self.assertEqual(statements.count("WITH INHERIT TRUE"), 1)
         self.assertIsNone(re.search(r"(?<!NO)SUPERUSER", statements))
         # Copy to RP: the schema ovb_stage of the role in ovb_db, after the grants there; CREATE only there.
         self.assertNotIn(-1, in_order(sql, ["\\connect :ovb_db\nGRANT USAGE ON SCHEMA public TO oracle_view_rp;", *STAGE_SQL]))
@@ -1124,19 +1148,26 @@ class OracleViewRoleTest(unittest.TestCase):
 
     def test_a_missing_right_stops_before_the_pg_hba_check(self):
         elsewhere = "FAIL|no right on a database other than perodua_oracle2 (it has rights on: perodua_oracle)"
-        owner = "FAIL|owns one schema, ovb_stage (it owns: no schema; the owner of ovb_stage is odoo)"
-        outside = "FAIL|owns nothing outside the schema ovb_stage (DDL on the Odoo tables fails) (it owns: public.x)"
+        owner = "FAIL|owns the schema ovb_stage (the owner of ovb_stage is odoo)"
+        member = "FAIL|member of odoo, the owner of perodua_oracle2, with INHERIT TRUE, SET FALSE, ADMIN FALSE"
         stage_hint = ("The schema ovb_stage of perodua_oracle2 holds the staging tables of Copy to RP: oracle_view_rp "
                       "must own it, with USAGE and CREATE there,\n")
-        for rights, message in ((RIGHTS_OK[:8] + ["FAIL|no TRUNCATE"] + RIGHTS_OK[9:], "does not have the rights above"),
+        for rights, message in ((RIGHTS_OK[:8] + ["FAIL|TRUNCATE on every table of public (3 without)"] + RIGHTS_OK[9:],
+                                 "does not have the rights above"),
+                                (RIGHTS_OK[:9] + ["FAIL|CREATE in public"] + RIGHTS_OK[10:], "does not have the rights above"),
+                                (RIGHTS_OK[:10] + [member + " (it is not a member)"] + RIGHTS_OK[11:], MEMBER_HINT),
+                                (RIGHTS_OK[:10] + [member + " (it has INHERIT TRUE, SET TRUE, ADMIN FALSE)"] + RIGHTS_OK[11:],
+                                 MEMBER_HINT),
+                                (RIGHTS_OK[:10] + [member + " (odoo is a superuser)"] + RIGHTS_OK[11:], MEMBER_HINT),
                                 (RIGHTS_OK[:11] + [elsewhere] + RIGHTS_OK[12:], SAFE_FORM_HINT),
                                 (RIGHTS_OK[:12] + [owner] + RIGHTS_OK[13:], stage_hint),
                                 (RIGHTS_OK[:13] + ["FAIL|USAGE and CREATE on the schema ovb_stage"] + RIGHTS_OK[14:],
                                  stage_hint),
-                                (RIGHTS_OK[:14] + ["FAIL|no right of PUBLIC on the schema ovb_stage"], stage_hint),
-                                (RIGHTS_OK[:10] + [outside] + RIGHTS_OK[11:], "does not have the rights above"),
+                                (RIGHTS_OK[:14] + ["FAIL|no right of PUBLIC on the schema ovb_stage"] + RIGHTS_OK[15:],
+                                 stage_hint),
                                 (RIGHTS_OK[:12], "unexpected answer"),  # the 12 checks of the releases before ovb_stage
-                                (RIGHTS_OK[:14], "unexpected answer"), (RIGHTS_OK[4:], "unexpected answer")):
+                                (RIGHTS_OK[:15], "unexpected answer"),  # the 15 checks of the releases before 2026-11-09
+                                (RIGHTS_OK[:16], "unexpected answer"), (RIGHTS_OK[4:], "unexpected answer")):
             with self.subTest(rights=rights):
                 self.set_state(rights=rights)
                 result = self.role()
@@ -1145,6 +1176,17 @@ class OracleViewRoleTest(unittest.TestCase):
                 self.assertEqual(self.scripts("hba-check"), [])
                 if message is not stage_hint:  # the hint of ovb_stage only for a FAIL line of ovb_stage
                     self.assertNotIn("staging tables", result.stderr)
+                if message is not MEMBER_HINT:  # the hint of the membership only for its FAIL line
+                    self.assertNotIn("through a membership", result.stderr)
+        # An INFO line never stops the command, also with objects of the role outside ovb_stage.
+        info = ["INFO|owns 2 objects outside the schema ovb_stage (schema made_up_more, table public.mine)",
+                "INFO|other databases of odoo, with its rights through the membership: perodua_oracle"]
+        self.set_state(rights=RIGHTS_OK[:15] + info)
+        result = self.role()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("INFO owns 2 objects outside the schema ovb_stage (schema made_up_more, table public.mine)\n"
+                      "INFO other databases of odoo, with its rights through the membership: perodua_oracle\n", result.stdout)
+        self.assertIn("The role is ready", result.stdout)
 
     def test_role_lists_the_staging_tables_with_their_sizes(self):
         self.set_state(role_exists=True, stage_total="2|1168 kB", stage_list=STAGE_LIST)
@@ -1575,6 +1617,9 @@ class RoleOnPostgresTest(PostgresCluster, unittest.TestCase):
         self.assertIn("RESULT: NOT OK", result.stdout)
         self.assertEqual(len(re.findall(r"^OK   ", result.stdout, re.M)), 15, result.stdout)
         self.assertIn("OK   no right on a database other than perodua_oracle2\n", result.stdout)
+        # The two INFO lines: the role owns nothing outside ovb_stage, and odoo also owns perodua_oracle.
+        self.assertIn("INFO owns 0 objects outside the schema ovb_stage\n"
+                      "INFO other databases of odoo, with its rights through the membership: perodua_oracle\n", result.stdout)
         self.assertEqual(self.sql("postgres", "SELECT rolpassword FROM pg_authid WHERE rolname = 'oracle_view_rp'"), VERIFIER)
         # oracle_view_ro had rights in both databases: both are cleaned, so it could be dropped.
         self.assertEqual(self.sql("postgres", "SELECT count(*) FROM pg_roles WHERE rolname = 'oracle_view_ro'"), "0")
@@ -1605,9 +1650,15 @@ class RoleOnPostgresTest(PostgresCluster, unittest.TestCase):
         written = self.tool("BEGIN READ WRITE; UPDATE res_partner SET name = name; INSERT INTO later_table VALUES (1);"
                             " SELECT nextval('res_partner_id_seq'); ROLLBACK")
         self.assertEqual(written.returncode, 0, written.stderr)
+        # The rights of odoo, the owner of the database (owner decision of 2026-11-09), but no SET ROLE to it.
         for query in ("TRUNCATE res_partner", "ALTER TABLE res_partner ADD COLUMN x int", "CREATE TABLE mine (id int)"):
             with self.subTest(query=query):
-                self.assertNotEqual(self.tool(f"BEGIN READ WRITE; {query}; ROLLBACK").returncode, 0)
+                done = self.tool(f"BEGIN READ WRITE; {query}; ROLLBACK")
+                self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(self.tool("SELECT count(*) FROM res_partner").stdout.strip(), "1")
+        denied = self.tool("SET ROLE odoo")
+        self.assertNotEqual(denied.returncode, 0)
+        self.assertIn("permission denied to set role", denied.stderr)
         # The printed line, at the top of the host lines, lets the App server in.
         line = HBA_LINE.format(self.APP)
         self.assertIn(line, result.stdout)
@@ -1683,14 +1734,22 @@ class RoleOnPostgresTest(PostgresCluster, unittest.TestCase):
         self.assertNotEqual(session.returncode, 0)
         self.assertIn("terminating connection due to administrator command", session.stderr.read())
         self.assertEqual(self.rights_in(OLD_DB), (0, 0))
+        # odoo owns perodua_oracle too: the role has the rights of odoo there through its membership (owner decision
+        # of 2026-11-09), and the INFO line names that database. No right of the role itself lets it in there.
+        self.assertIn("INFO other databases of odoo, with its rights through the membership: perodua_oracle\n",
+                      result.stdout)
+        self.assertEqual(self.tool("SELECT count(*) FROM old_partner", OLD_DB).stdout.strip(), "1")
+        self.sql("postgres", "REVOKE odoo FROM oracle_view_rp")
         self.assertEqual(self.sql(OLD_DB, "SELECT has_table_privilege('oracle_view_rp', 'old_partner', 'SELECT')"), "f")
         denied = self.tool("SELECT 1", OLD_DB)
         self.assertNotEqual(denied.returncode, 0)
         self.assertIn("permission denied for database", denied.stderr)
-        # perodua_oracle2 has CONNECT and TEMPORARY, and the tool reads it.
+        # perodua_oracle2 has CONNECT and TEMPORARY of the role itself (also without the membership), and the tool
+        # reads it.
         self.assertEqual(self.sql("postgres", "SELECT has_database_privilege('oracle_view_rp', 'perodua_oracle2', 'CONNECT')"
                                               " AND has_database_privilege('oracle_view_rp', 'perodua_oracle2', 'TEMPORARY')"), "t")
         self.assertEqual(self.tool("SELECT count(*) FROM res_partner").stdout.strip(), "1")
+        self.sql("postgres", "GRANT odoo TO oracle_view_rp WITH INHERIT TRUE, SET FALSE")
         # A right that another change gives the role later, in another database, stops role --check.
         self.sql("postgres", "CREATE TABLE made_up_elsewhere (id int); GRANT SELECT ON made_up_elsewhere TO oracle_view_rp")
         self.addCleanup(self.sql, "postgres", "DROP TABLE IF EXISTS made_up_elsewhere")
@@ -1727,6 +1786,9 @@ os.execv(real, [real, *sys.argv[1:]])
         # perodua_oracle2: DROP OWNED BY also revokes it there.
         self.assertEqual(self.make_role().returncode, 3)
         self.addCleanup(self.run_script, "drop-role", "--confirm", "oracle_view_rp")
+        # Without the membership in odoo, the owner of perodua_oracle2: CONNECT there is then the grant of the role
+        # itself. Both stops come before the grant of the membership; the last run grants it again.
+        self.sql("postgres", "REVOKE odoo FROM oracle_view_rp")
         self.old_release_rights()
         result = self.make_role(path=self.stop_after("DROP OWNED BY oracle_view_rp;\n"))
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
@@ -1748,10 +1810,13 @@ os.execv(real, [real, *sys.argv[1:]])
         self.assertEqual(self.make_role().returncode, 3)
         self.assertEqual(self.rights_in(OLD_DB), (0, 0))
         self.assertEqual(self.tool("SELECT count(*) FROM res_partner").stdout.strip(), "1")
+        self.assertEqual(self.sql("postgres", "SELECT count(*) FROM pg_auth_members WHERE member = 'oracle_view_rp'::regrole"
+                                              " AND roleid = 'odoo'::regrole"), "1")
 
     def test_the_old_database_session_that_opens_before_the_commit_ends(self):
         # A container of an earlier release can open a session in the old database while the transaction
-        # runs. The sessions there end again after the COMMIT, and after it no new one can start.
+        # runs. The sessions there end again after the COMMIT, and after it no new one can start with a right
+        # of the role (the membership in odoo, the owner of both databases, is taken away for that check).
         self.drop_old_ro()
         self.assertEqual(self.make_role().returncode, 3)
         self.addCleanup(self.run_script, "drop-role", "--confirm", "oracle_view_rp")
@@ -1782,9 +1847,11 @@ touch {started}
                          "a session of oracle_view_rp that opened before the COMMIT still runs in perodua_oracle")
         self.assertIn("terminating connection due to administrator command", log.read_text())
         self.assertEqual(self.rights_in(OLD_DB), (0, 0))
+        self.sql("postgres", "REVOKE odoo FROM oracle_view_rp")
         denied = self.tool("SELECT 1", OLD_DB)
         self.assertNotEqual(denied.returncode, 0)
         self.assertIn("permission denied for database", denied.stderr)
+        self.sql("postgres", "GRANT odoo TO oracle_view_rp WITH INHERIT TRUE, SET FALSE")
         self.assertEqual(self.tool("SELECT count(*) FROM res_partner").stdout.strip(), "1")
 
     def test_the_old_database_without_connections_is_skipped(self):
@@ -1888,6 +1955,104 @@ touch {started}
         self.assertEqual(self.sql(RP_DB, "SELECT count(*) FROM res_partner"), "1")
         self.assertEqual(self.sql(OLD_DB, "SELECT count(*) FROM old_partner"), "1")
 
+    def membership(self):
+        """Each grant of odoo to oracle_view_rp (pg_auth_members): "grantor inherit set admin"."""
+        return self.sql("postgres", "SELECT coalesce(string_agg(pg_get_userbyid(grantor) || ' ' || inherit_option::text"
+                                    " || ' ' || set_option::text || ' ' || admin_option::text, ', '), 'none')"
+                                    " FROM pg_auth_members WHERE roleid = 'odoo'::regrole"
+                                    " AND member = (SELECT oid FROM pg_roles WHERE rolname = 'oracle_view_rp')")
+
+    def test_the_role_has_the_rights_of_the_owner_of_the_database(self):
+        # Owner decision of 2026-11-09: oracle_view_rp is a member of odoo, the owner of perodua_oracle2, with INHERIT
+        # and without SET and ADMIN. The tool makes tables of its own in public and changes the Odoo tables, but it
+        # cannot SET ROLE to odoo.
+        self.drop_old_ro()
+        self.with_the_line()
+        result = self.make_role()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.addCleanup(self.run_script, "drop-role", "--confirm", "oracle_view_rp")
+        self.assertIn("OK   member of odoo, the owner of perodua_oracle2, with INHERIT TRUE, SET FALSE, ADMIN FALSE\n",
+                      result.stdout)
+        self.assertEqual(self.membership(), "postgres true false false")
+        # A second run keeps the one grant, and prints no NOTICE for it.
+        result = self.make_role()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.membership(), "postgres true false false")
+        self.assertNotIn("already been granted", result.stdout + result.stderr)
+        self.addCleanup(self.sql, RP_DB, "DROP TABLE IF EXISTS public.console_made")
+        made = self.tool("BEGIN READ WRITE; CREATE TABLE public.console_made (id int); INSERT INTO console_made VALUES (1);"
+                         " COMMIT")
+        self.assertEqual(made.returncode, 0, made.stderr)
+        self.assertEqual(self.sql(RP_DB, "SELECT pg_get_userbyid(relowner) FROM pg_class WHERE relname = 'console_made'"),
+                         "oracle_view_rp")
+        changed = self.tool("BEGIN READ WRITE; ALTER TABLE res_partner ADD COLUMN made_up int; TRUNCATE res_partner;"
+                            " ROLLBACK")
+        self.assertEqual(changed.returncode, 0, changed.stderr)
+        self.assertEqual(self.tool("SELECT count(*) FROM res_partner").stdout.strip(), "1")
+        for query in ("SET ROLE odoo", "ALTER TABLE console_made OWNER TO odoo"):
+            with self.subTest(query=query):
+                denied = self.tool(f"BEGIN READ WRITE; {query}; ROLLBACK")
+                self.assertNotEqual(denied.returncode, 0)
+        result = self.run_script("role", "--check", "--app-ip", self.APP)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("INFO owns 1 objects outside the schema ovb_stage (table public.console_made)\n", result.stdout)
+        # role --check fails without the membership, with SET or with ADMIN.
+        self.sql("postgres", "REVOKE odoo FROM oracle_view_rp")
+        member = "member of odoo, the owner of perodua_oracle2, with INHERIT TRUE, SET FALSE, ADMIN FALSE"
+        for grant, has in (("", "it is not a member"), ("GRANT odoo TO oracle_view_rp WITH INHERIT TRUE, SET TRUE",
+                                                         "it has INHERIT TRUE, SET TRUE, ADMIN FALSE")):
+            with self.subTest(grant=grant):
+                if grant:
+                    self.sql("postgres", grant)
+                result = self.run_script("role", "--check", "--app-ip", self.APP)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn(f"FAIL {member} ({has})\n", result.stdout)
+                self.assertIn(MEMBER_HINT, result.stderr)
+                self.assertNotIn("RESULT:", result.stdout)
+        self.assertEqual(self.tool("SET ROLE odoo").returncode, 0)  # what SET TRUE allows
+        # role sets SET FALSE again on its own grant (the same grantor).
+        self.assertEqual(self.make_role().returncode, 0)
+        self.assertEqual(self.membership(), "postgres true false false")
+        # It does not change ADMIN: role --check names it until it is revoked by hand.
+        self.sql("postgres", "GRANT odoo TO oracle_view_rp WITH ADMIN TRUE")
+        self.assertEqual(self.make_role().returncode, 1)
+        result = self.run_script("role", "--check", "--app-ip", self.APP)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(f"FAIL {member} (it has INHERIT TRUE, SET FALSE, ADMIN TRUE)\n", result.stdout)
+        self.sql("postgres", "REVOKE ADMIN OPTION FOR odoo FROM oracle_view_rp")
+        self.assertEqual(self.run_script("role", "--check", "--app-ip", self.APP).returncode, 0)
+
+    def test_role_stops_when_the_owner_of_the_database_is_a_superuser_or_the_role(self):
+        # The role gets the rights of the owner of perodua_oracle2: of a superuser, that is every right on the server,
+        # and a role cannot be a member of itself. role stops before any change.
+        self.run_script("drop-role", "--confirm", "oracle_view_rp", "--drop-staging")  # each test can run alone
+        self.make_old_ro()
+        self.addCleanup(self.drop_old_ro)
+        self.addCleanup(self.run_script, "drop-role", "--confirm", "oracle_view_rp")
+        self.addCleanup(self.sql, "postgres", "ALTER DATABASE perodua_oracle2 OWNER TO odoo")  # the first cleanup
+        self.sql("postgres", "ALTER DATABASE perodua_oracle2 OWNER TO postgres")
+        result = self.make_role()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("The owner of perodua_oracle2 is postgres, a superuser.", result.stdout)
+        self.assertIn("Nothing was changed.", result.stdout)
+        self.assertIn("Creating or updating the role oracle_view_rp failed (above)", result.stderr)
+        self.assertEqual(self.sql("postgres", "SELECT count(*) FROM pg_roles WHERE rolname = 'oracle_view_rp'"), "0")
+        self.assertEqual(self.sql("postgres", "SELECT count(*) FROM pg_roles WHERE rolname = 'oracle_view_ro'"), "1")
+        # The role itself as the owner (only a superuser can give it the database).
+        self.sql("postgres", "ALTER DATABASE perodua_oracle2 OWNER TO odoo")
+        self.assertEqual(self.make_role().returncode, 3)
+        self.sql("postgres", "ALTER ROLE oracle_view_rp CONNECTION LIMIT 3")
+        self.sql("postgres", "ALTER DATABASE perodua_oracle2 OWNER TO oracle_view_rp")
+        result = self.make_role()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("oracle_view_rp owns perodua_oracle2: a role cannot be a member of itself. Nothing was changed.",
+                      result.stdout)
+        self.assertEqual(self.sql("postgres", "SELECT rolconnlimit FROM pg_roles WHERE rolname = 'oracle_view_rp'"), "3")
+        result = self.run_script("role", "--check", "--app-ip", self.APP)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("FAIL member of oracle_view_rp, the owner of perodua_oracle2, with INHERIT TRUE, SET FALSE, ADMIN "
+                      "FALSE (oracle_view_rp owns the database)\n", result.stdout)
+
     def stage_tables(self):
         return self.sql(RP_DB, "SELECT coalesce(string_agg(relname, ' ' ORDER BY relname), '') FROM pg_class"
                                " WHERE relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'ovb_stage')"
@@ -1895,16 +2060,18 @@ touch {started}
 
     def test_the_staging_schema_of_copy_to_rp(self):
         # Copy to RP (copy design, section 4.3): the role owns the schema ovb_stage and makes its staging tables
-        # there; it still has no CREATE in public, no TRUNCATE on a table of public and owns nothing else.
+        # there. With the rights of the owner of the database (owner decision of 2026-11-09) it can also make
+        # tables in public and new schemas: those are no staging tables, and only an INFO line counts them.
         self.drop_old_ro()
         self.with_the_line()
         result = self.make_role()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.addCleanup(self.run_script, "drop-role", "--confirm", "oracle_view_rp", "--drop-staging")
         self.assertEqual(len(re.findall(r"^OK   ", result.stdout, re.M)), 15, result.stdout)
-        for line in ("OK   owns nothing outside the schema ovb_stage (DDL on the Odoo tables fails)\n",
-                     "OK   owns one schema, ovb_stage\n", "OK   USAGE and CREATE on the schema ovb_stage\n",
-                     "OK   no right of PUBLIC on the schema ovb_stage\n", "OK   no CREATE in public\n", "OK   no TRUNCATE\n",
+        for line in ("INFO owns 0 objects outside the schema ovb_stage\n",
+                     "OK   owns the schema ovb_stage\n", "OK   USAGE and CREATE on the schema ovb_stage\n",
+                     "OK   no right of PUBLIC on the schema ovb_stage\n", "OK   CREATE in public\n",
+                     "OK   TRUNCATE on every table of public (0 without)\n",
                      "== Staging tables of Copy to RP: the schema ovb_stage of perodua_oracle2\nnone: ovb_stage holds no table\n"):
             self.assertIn(line, result.stdout)
         self.assertEqual(self.sql(RP_DB, "SELECT pg_get_userbyid(nspowner) || ' ' || nspacl::text FROM pg_namespace"
@@ -1921,7 +2088,8 @@ touch {started}
         self.assertEqual(self.stage_tables(), "made_late")
         self.assertEqual(self.tool("SELECT count(*) FROM res_partner").stdout.strip(), "1")
         self.sql(RP_DB, "DROP TABLE ovb_stage.made_late")
-        # The tool makes a staging table in a READ WRITE transaction; nowhere else.
+        # The tool makes a staging table in a READ WRITE transaction. It can also write outside ovb_stage, with the
+        # rights of odoo (rolled back here).
         made = self.tool("BEGIN READ WRITE; CREATE TABLE ovb_stage.copy_parts AS SELECT g AS id, repeat('x', 200) AS name"
                          " FROM generate_series(1, 2000) g; CREATE INDEX ON ovb_stage.copy_parts (id); COMMIT")
         self.assertEqual(made.returncode, 0, made.stderr)
@@ -1929,7 +2097,8 @@ touch {started}
         for query in ("CREATE TABLE public.mine (id int)", "CREATE TABLE mine (id int)", "TRUNCATE res_partner",
                       "CREATE SCHEMA made_up_more", "ALTER TABLE res_partner ADD COLUMN x int"):
             with self.subTest(query=query):
-                self.assertNotEqual(self.tool(f"BEGIN READ WRITE; {query}; ROLLBACK").returncode, 0)
+                done = self.tool(f"BEGIN READ WRITE; {query}; ROLLBACK")
+                self.assertEqual(done.returncode, 0, done.stderr)
         with self.assertRaises(subprocess.CalledProcessError):  # PUBLIC, and so Odoo, has no right there
             self.sql(RP_DB, "SET ROLE odoo; SELECT count(*) FROM ovb_stage.copy_parts")
         result = self.run_script("role", "--check", "--app-ip", self.APP)
@@ -1937,15 +2106,15 @@ touch {started}
         self.assertEqual(len(re.findall(r"^OK   ", result.stdout, re.M)), 15, result.stdout)
         self.assertRegex(result.stdout, r"\n1 tables, [0-9]+ kB on disk:\n    table +size  owner\n"
                                         r"    copy_parts +[0-9]+ kB  oracle_view_rp\nTo free the disk")
-        # An object of the role outside ovb_stage stops role --check.
+        # An object of the role outside ovb_stage is information: role --check names it and does not stop.
         self.sql(RP_DB, "CREATE FUNCTION public.made_up_f() RETURNS int LANGUAGE sql AS 'SELECT 1';"
                         " ALTER FUNCTION public.made_up_f() OWNER TO oracle_view_rp")
         self.addCleanup(self.sql, RP_DB, "DROP FUNCTION IF EXISTS public.made_up_f()")
         result = self.run_script("role", "--check", "--app-ip", self.APP)
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn("FAIL owns nothing outside the schema ovb_stage (DDL on the Odoo tables fails) (it owns: "
-                      "public.made_up_f())\n", result.stdout)
-        self.assertNotIn("RESULT:", result.stdout)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("INFO owns 1 objects outside the schema ovb_stage (function public.made_up_f())\n", result.stdout)
+        self.assertEqual(len(re.findall(r"^OK   ", result.stdout, re.M)), 15, result.stdout)
+        self.assertIn("RESULT: OK", result.stdout)
         self.sql(RP_DB, "DROP FUNCTION public.made_up_f()")
         # drop-role stops before any change while ovb_stage holds tables, and names the choice.
         result = self.run_script("drop-role", "--confirm", "oracle_view_rp")
@@ -2028,9 +2197,10 @@ touch {started}
         result = self.make_role()
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("The schema ovb_stage of perodua_oracle2 belongs to another role: it stays as it is", result.stdout)
-        self.assertIn("FAIL owns one schema, ovb_stage (it owns: no schema; the owner of ovb_stage is odoo)\n", result.stdout)
-        self.assertIn("FAIL USAGE and CREATE on the schema ovb_stage\n", result.stdout)
-        self.assertEqual(len(re.findall(r"^OK   ", result.stdout, re.M)), 13, result.stdout)
+        self.assertIn("FAIL owns the schema ovb_stage (the owner of ovb_stage is odoo)\n", result.stdout)
+        # No grant there, but odoo owns that schema: the role has its USAGE and CREATE through the membership.
+        self.assertIn("OK   USAGE and CREATE on the schema ovb_stage\n", result.stdout)
+        self.assertEqual(len(re.findall(r"^OK   ", result.stdout, re.M)), 14, result.stdout)
         self.assertIn("find out who made it before you change its owner or drop it", result.stderr)
         self.assertNotIn("RESULT:", result.stdout)
         self.assertEqual(self.sql(RP_DB, "SELECT pg_get_userbyid(nspowner) || ' ' || coalesce(nspacl::text, 'default')"
@@ -2239,6 +2409,23 @@ class OracleViewDocsTest(unittest.TestCase):
         self.assertIn("in perodua_oracle2 and perodua_oracle.", words(usage))
         self.assertIn("It ends the sessions of the role in perodua_oracle (the database of the earlier releases) and "
                       "removes its rights there.", words(usage))
+
+    def test_the_readme_and_the_usage_describe_the_rights_of_the_owner(self):
+        # Owner decision of 2026-11-09: it replaces the one of 2026-11-06 for the rights of the role.
+        text = words(SECTION)
+        for sentence in ("The role is a member of the owner of `perodua_oracle2` (`odoo` on grey), granted "
+                         "`WITH INHERIT TRUE, SET FALSE`.",
+                         "stops before any change when the owner is a superuser",
+                         "A membership is for the whole server:",
+                         "The membership in the owner (`odoo`) is for the whole server."):
+            self.assertIn(sentence, text)
+        for old in ("no `CREATE` in `public`", "so DDL on them fails", "owns one schema, ovb_stage", "owns nothing outside"):
+            self.assertNotIn(old, text)
+        usage = words(subprocess.run(["bash", str(SCRIPT), "--help"], capture_output=True, text=True, timeout=60).stdout)
+        self.assertIn("It makes the role a member of the owner of perodua_oracle2 WITH INHERIT TRUE, SET FALSE (owner "
+                      "decision of 2026-11-09)", usage)
+        for old in ("no CREATE in public", "no DDL on the Odoo tables", "owns nothing"):
+            self.assertNotIn(old, usage)
 
     def test_the_readme_upgrade_names_the_change_of_the_database(self):
         upgrade = words(SECTION.split("\n### Upgrade\n", 1)[1].split("\n### ", 1)[0])

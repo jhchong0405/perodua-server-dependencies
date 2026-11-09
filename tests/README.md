@@ -716,9 +716,14 @@ standard input and the user. It checks:
   `log_min_error_statement`, `log_min_duration_sample`,
   `log_transaction_sample_rate`, `pg_stat_statements.track_utility`,
   `VERBOSITY terse` and `SHOW_CONTEXT never` come before each statement with the
-  verifier, also after `\connect postgres`; the grants of the owner decision are
-  there, and no `TRUNCATE`, `SUPERUSER`, `GRANT CREATE`, `ALTER SYSTEM`, `OWNER TO`
-  or reload; the schema `ovb_stage` of Copy to RP comes last, in
+  verifier, also after `\connect postgres`; before any change, the script reads
+  the owner of `perodua_oracle2` and stops for a superuser owner or the role
+  itself; the grants of the owner decision are there, with one membership in the
+  owner of `perodua_oracle2` (read again, never a superuser or the role, `WITH
+  INHERIT TRUE, SET FALSE`, without a `NOTICE` on a later run) after `CONNECT`
+  and before `\connect` to that database; no `TRUNCATE`, `SUPERUSER`, `GRANT
+  CREATE`, `GRANT ALL`, `SET TRUE`, `ADMIN`, `ALTER SYSTEM`, `OWNER TO` or reload;
+  the schema `ovb_stage` of Copy to RP comes last, in
   `perodua_oracle2` (`CREATE SCHEMA IF NOT EXISTS ovb_stage AUTHORIZATION
   oracle_view_rp`, `REVOKE ALL ... FROM PUBLIC`, `GRANT USAGE, CREATE`), and that
   `GRANT` and that `REVOKE` are the only `CREATE ... ON SCHEMA` and the only
@@ -726,10 +731,14 @@ standard input and the user. It checks:
   of the role there, one transaction holds `DROP OWNED BY oracle_view_rp` and `GRANT CONNECT,
   TEMPORARY ON DATABASE :"ovb_db"`, and only when that database exists;
   `oracle_view_ro` gets `DROP OWNED BY` in both databases before `DROP ROLE`;
-- a `FAIL` right, a right on another database (with the way to remove it), a
-  `FAIL` line of `ovb_stage` (with the hint for the schema, and only then), an
-  object outside `ovb_stage` or a short answer (11, 12 or 14 lines, not 15)
-  stops before the `pg_hba.conf` check;
+- a `FAIL` right (also `TRUNCATE on every table of public` and `CREATE in
+  public`), a `FAIL` line of the membership in the owner of the database (not a
+  member, `SET TRUE`, a superuser owner; with the hint for the membership, and
+  only then), a right on another database (with the way to remove it), a `FAIL`
+  line of `ovb_stage` (with the hint for the schema, and only then) or a short
+  answer (12, 13, 15 or 16 lines, not 17) stops before the `pg_hba.conf` check;
+  the two `INFO` lines (objects of the role outside `ovb_stage`, the other
+  databases of the owner) never stop it, also with objects there;
 - `role` and `role --check` list the staging tables of `ovb_stage` with their
   sizes and the total, after the rights and before TLS, and add the hint to free
   the disk; an answer that the script cannot read stops the command;
@@ -776,10 +785,13 @@ database `perodua_oracle2` (a table and a view) and the old database
 `perodua_oracle` (a table), both without the rights of `PUBLIC` as `deploy-db.sh`
 makes them, and the role `oracle_view_ro` of an earlier bundle with rights in
 both. `role` sets exactly the verifier of the file, drops `oracle_view_ro`, and
-keeps the verifier out of the server log and the output (15 `OK` lines). As the tool signs in (TCP, the made-up password), the
+keeps the verifier out of the server log and the output (15 `OK` lines, and the
+two `INFO` lines: no object outside `ovb_stage`, and `perodua_oracle` as the
+other database of `odoo`). As the tool signs in (TCP, the made-up password), the
 role reads, is read-only by default, writes in a `READ WRITE` transaction (also
-in a table that the owner makes later), and cannot `TRUNCATE`, `ALTER` or
-`CREATE`. The server also logs by sampling (`log_min_duration_sample = 0`,
+in a table that the owner makes later), and with the rights of `odoo` can
+`TRUNCATE`, `ALTER` and `CREATE` (rolled back), but cannot `SET ROLE odoo`.
+The server also logs by sampling (`log_min_duration_sample = 0`,
 `log_statement_sample_rate = 1`, `log_transaction_sample_rate = 1`), and the
 verifier stays out of that log too. Without `DELETE` on one table, `role --check`
 shows `FAIL` for INSERT, UPDATE and DELETE (14 `OK` lines) and exits 1: each
@@ -812,28 +824,36 @@ block gives exit 3, with the line number of `# BEGIN perodua-db-deploy
 perodua_oracle2` and the `NOTE`; the line moved above the block gives exit 0; the
 next run of the writer puts the block above it again (exit 3).
 
-The old database, on the same cluster:
+The old database, on the same cluster. `odoo` owns both databases (as
+`deploy-db.sh` makes them), so the membership in `odoo` gives the role the
+rights of `odoo` in `perodua_oracle` too; where a test checks the rights of the
+role itself, it revokes the membership for that check:
 - a role with the rights of the earlier releases in `perodua_oracle` only (a
   grant on the database, the schema, a table, a sequence and a default
   privilege) and a session there: `role` ends the session, leaves no right
-  there (the database ACL and `pg_shdepend`), the tool cannot connect there and
-  reads `perodua_oracle2`, and with the printed line the run ends with exit 0
-  and 15 `OK` lines; a later grant in another database (`postgres`) gives the
+  there (the database ACL and `pg_shdepend`), names `perodua_oracle` in the
+  `INFO` line of the other databases of `odoo` (the tool reads it through the
+  membership), and without the membership the tool cannot connect there and
+  still reads `perodua_oracle2` (its own `CONNECT` and `TEMPORARY`); with the
+  printed line the run ends with exit 0 and 15 `OK` lines; a later grant in
+  another database (`postgres`) gives the
   `FAIL` line with that name and exit 1 in `role --check`, and the hint prints
   the safe form `BEGIN; DROP OWNED BY oracle_view_rp; GRANT CONNECT, TEMPORARY
   ON DATABASE perodua_oracle2 TO oracle_view_rp; COMMIT;`;
-- one transaction, with two stops: a `psql` in front of the real one adds an
+- one transaction, with two stops (without the membership in `odoo`, so that
+  `CONNECT` on `perodua_oracle2` is the grant of the role itself): a `psql` in
+  front of the real one adds an
   error. The first stop is right after `DROP OWNED BY oracle_view_rp` in the old
   database: `role` exits 1, and the role keeps `CONNECT` on `perodua_oracle2`
   (the tool reads it) and its old rights. The second stop is right after
   `COMMIT;`: `role` exits 1, the old rights are gone, and the role keeps
   `CONNECT` on `perodua_oracle2` (the tool reads it). The next run without a
-  stop ends as usual;
+  stop ends as usual and grants the membership again;
 - a session that opens before the `COMMIT`: the `psql` in front adds a `\!`
   right after `BEGIN;`, which opens a session of `oracle_view_rp` in
   `perodua_oracle` and waits until it runs; after `role` the session has ended
-  (`terminating connection due to administrator command`), and the tool cannot
-  connect there;
+  (`terminating connection due to administrator command`), and without the
+  membership the tool cannot connect there;
 - `perodua_oracle` without connections (`ALLOW_CONNECTIONS false`, and
   `datconnlimit = -2`, a database half dropped): with rights of the role in it,
   `role` skips the step and check 12 gives the `FAIL` line with
@@ -858,12 +878,13 @@ The staging schema `ovb_stage` of Copy to RP, on the same cluster:
   the drop stops (exit 1), the role keeps `LOGIN` and the tool still connects,
   and the table stays;
 - as the tool signs in, a `READ WRITE` transaction makes a staging table with an
-  index in `ovb_stage`; `CREATE TABLE` in `public` (also without a schema
-  name), `TRUNCATE` of an Odoo table, `CREATE SCHEMA` and `ALTER TABLE` of an
-  Odoo table fail; the Odoo role cannot read the staging table; `role --check`
-  exits 0 with 15 `OK` lines and lists the table with its size and owner;
-- a function of the role in `public` gives the `FAIL` line `owns nothing
-  outside the schema ovb_stage` with its name (exit 1);
+  index in `ovb_stage`; with the rights of `odoo`, `CREATE TABLE` in `public`
+  (also without a schema name), `TRUNCATE` of an Odoo table, `CREATE SCHEMA`
+  and `ALTER TABLE` of an Odoo table succeed (rolled back); the Odoo role
+  cannot read the staging table; `role --check` exits 0 with 15 `OK` lines and
+  lists the table with its size and owner;
+- a function of the role in `public` gives the `INFO` line `owns 1 objects
+  outside the schema ovb_stage` with its name, and `role --check` exits 0;
 - `drop-role` without `--drop-staging` lists the table, stops (exit 1) and
   changes nothing; with it, the schema, its table and the role go, and the rows
   of the Odoo table stay;
@@ -875,10 +896,29 @@ The staging schema `ovb_stage` of Copy to RP, on the same cluster:
   nothing; without the dependency, `--drop-staging` drops the schema with the
   table and the materialized view, and the table in `public` keeps its row;
 - a schema `ovb_stage` of the Odoo role, with a table, made before the role:
-  `role` gives no right there and exits 1 with the `FAIL` lines `owns one
-  schema, ovb_stage` (with the owner `odoo`) and `USAGE and CREATE`, 13 `OK`
-  lines and the hint; `drop-role` drops the role and leaves that schema and its
-  table.
+  `role` gives no right there and exits 1 with the `FAIL` line `owns the schema
+  ovb_stage` (with the owner `odoo`), 14 `OK` lines (`USAGE and CREATE` there
+  come through the membership in `odoo`) and the hint; `drop-role` drops the
+  role and leaves that schema and its table.
+
+The rights of the owner of the database (owner decision of 2026-11-09), on the
+same cluster:
+- `role` makes one grant of `odoo` to the role (grantor `postgres`, `INHERIT`
+  true, `SET` and `ADMIN` false) and the `OK` line of the membership; a second
+  run keeps that one grant and prints no `NOTICE`;
+- as the tool signs in, a `READ WRITE` transaction makes a table of the role in
+  `public` (committed), and `ALTER TABLE` and `TRUNCATE` of an Odoo table
+  succeed (rolled back); `SET ROLE odoo` and `ALTER TABLE ... OWNER TO odoo`
+  fail; `role --check` exits 0 and names the table in the `INFO` line;
+- without the membership, and with a grant `WITH INHERIT TRUE, SET TRUE`,
+  `role --check` gives the `FAIL` line of the membership with what it has and
+  the hint, and exits 1; `role` sets `SET FALSE` again on its own grant;
+  `ADMIN` stays after `role` (exit 1) until `REVOKE ADMIN OPTION FOR` by hand;
+- with `postgres` (a superuser) as the owner of `perodua_oracle2`, `role` stops
+  with exit 1 before any change: no role is made, and `oracle_view_ro` stays;
+  with `oracle_view_rp` as the owner, `role` stops too (its `CONNECTION LIMIT`
+  stays as it was), and `role --check` names it in the `FAIL` line of the
+  membership.
 
 `StatementStatsOnPostgresTest` starts a second cluster (port 55433) with
 `pg_stat_statements` loaded and `track_utility` on: it records the utility

@@ -2118,7 +2118,7 @@ route of [https.sh](#https). Every page and every API call needs a login.
 | --- | --- |
 | Container `oracle-view` on `127.0.0.1:8797` only, run from `/opt/perodua-oracle-view` | App server |
 | Route `stgiss.perodua.com.my /dev/oracle-view/ 8797 strip,http` | App server, `/etc/perodua-https/routes.conf` |
-| Role `oracle_view_rp` on the database `perodua_oracle2`: read and write on the tables, read-only by default, and the schema `ovb_stage` for the staging tables of Copy to RP | DB server (PostgreSQL 16) |
+| Role `oracle_view_rp` on the database `perodua_oracle2`: read and write on the tables, read-only by default, every right of the owner of the database (DDL, `TRUNCATE`, `CREATE`), and the schema `ovb_stage` for the staging tables of Copy to RP | DB server (PostgreSQL 16) |
 | Image `perodua-deploy.novutal.com/oracle-view:grey-v1.0.4`, pulled by digest | Private registry |
 
 The Code section of the tool shows the mapping that the RP code writes. The
@@ -2175,10 +2175,24 @@ Do the steps in this order.
    own transaction), `statement_timeout = 30s` and
    `idle_in_transaction_session_timeout = 60s`. It also gets the schema
    `ovb_stage` for the staging tables of Copy to RP (see
-   [The staging schema ovb_stage](#the-staging-schema-ovb_stage)). It does not get
-   superuser, the ownership of a table of `public` (Odoo owns the tables, so DDL on
-   them fails), `TRUNCATE` on a table of `public` or `CREATE` in `public`. The
-   command drops the role `oracle_view_ro` of an earlier
+   [The staging schema ovb_stage](#the-staging-schema-ovb_stage)).
+
+   **The rights of the owner of the database** (owner decision of 2026-11-09; it
+   replaces the decision of 2026-11-06). The role is a member of the owner of
+   `perodua_oracle2` (`odoo` on grey), granted `WITH INHERIT TRUE, SET FALSE`. So
+   it has every right of that owner in the database: DDL, `DROP` and `TRUNCATE` on
+   the Odoo tables, `CREATE` in `public` and new schemas. It cannot `SET ROLE` to
+   the owner, so a table that it makes is its own. It does not get superuser or
+   another role attribute (`NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION
+   NOBYPASSRLS`). The command reads the owner from `pg_database` and stops before
+   any change when the owner is a superuser (the rights of a superuser are every
+   right on the server) or `oracle_view_rp` itself. A membership is for the whole
+   server: the role has the same rights on each other database of that owner
+   (the `INFO` line `other databases of ...` of the rights check names them), and
+   `pg_hba.conf` decides where it can log in. See
+   [Risks of the owner decisions](#risks-of-the-owner-decisions).
+
+   The command drops the role `oracle_view_ro` of an earlier
    bundle, after it ends its sessions and removes its rights in `perodua_oracle2`
    and `perodua_oracle`. To run it again is safe: it sets the same verifier and
    grants.
@@ -2214,7 +2228,7 @@ Do the steps in this order.
 
    | Part | Expected |
    | --- | --- |
-   | `== Rights of oracle_view_rp` | Each line starts with `OK`, also `no right on a database other than perodua_oracle2` and the three lines of the schema `ovb_stage`. A `FAIL` line stops the command. |
+   | `== Rights of oracle_view_rp` | Each line starts with `OK`, also `TRUNCATE on every table of public`, `CREATE in public`, `member of odoo, the owner of perodua_oracle2, with INHERIT TRUE, SET FALSE, ADMIN FALSE`, `no right on a database other than perodua_oracle2` (a right of the role itself) and the three lines of the schema `ovb_stage`. A `FAIL` line stops the command. The two last lines start with `INFO` and never stop it: `owns N objects outside the schema ovb_stage` (what the SQL console made, for example a table in `public`) and `other databases of odoo, with its rights through the membership` (`none`, or their names). |
    | `== Staging tables of Copy to RP` | The tables and materialized views in `ovb_stage`, each with its size on disk, and the total. `none` on a new role. The list changes nothing. |
    | `== TLS: SHOW ssl` | `ssl = on`. With `off`, see [TLS to the RP database](#tls-to-the-rp-database). |
    | `== Extensions that can write in a Read run` | `none`. With `dblink` or `postgres_fdw` in `perodua_oracle2`, a Read run of the SQL console can write through them. The command changes no right: that is an owner decision. |
@@ -2293,18 +2307,19 @@ GRANT USAGE, CREATE ON SCHEMA ovb_stage TO oracle_view_rp;
 ```
 
 The role owns `ovb_stage` and the tables that it makes there, so it can create,
-fill, empty and drop them. It still has no `CREATE` in `public`, no `TRUNCATE`
-on a table of `public` and no ownership of an Odoo table. `PUBLIC`, and so the
-Odoo role, has no right on `ovb_stage`. The rights check has three lines for the
-schema: `owns one schema, ovb_stage`, `USAGE and CREATE on the schema ovb_stage`
-and `no right of PUBLIC on the schema ovb_stage`. The line `owns nothing outside
-the schema ovb_stage` fails for an object of the role in another schema (a
-table, a view, a sequence, a function or another schema), also for a temporary
+fill, empty and drop them. `PUBLIC`, and so the Odoo role, has no right on
+`ovb_stage`. The rights check has three lines for the schema: `owns the schema
+ovb_stage`, `USAGE and CREATE on the schema ovb_stage` and `no right of PUBLIC
+on the schema ovb_stage`. With the rights of the owner of the database (owner
+decision of 2026-11-09), the SQL console can also make tables in `public` and
+new schemas: the role owns them. They are not staging tables: the `INFO` line
+`owns N objects outside the schema ovb_stage` counts them and names the first
+five (a table, a view, a sequence, a function or a schema), also a temporary
 table of an open session of the tool. A role made by an earlier release of this
 script has no `ovb_stage`, so `role --check` shows three `FAIL` lines: run
 `role --verifier-file` again. When a schema `ovb_stage` of another owner is
 already there, `role` changes nothing in it and gives no right there, and the
-line `owns one schema, ovb_stage` fails with the name of its owner: find out who
+line `owns the schema ovb_stage` fails with the name of its owner: find out who
 made it before you change its owner or drop it, then run `role` again.
 
 **Disk use.** The staging tables are normal tables of `perodua_oracle2` on the
@@ -2543,8 +2558,8 @@ A release that changes the database of the image (as `grey-v1.0.2` did, to
    ([step 4](#1-the-rp-role-db-server)).
 
 A release of this repository that adds a right to the role (as the schema
-`ovb_stage` of Copy to RP) needs step 1 too: before it, `role --check` shows a
-`FAIL` line for each new right.
+`ovb_stage` of Copy to RP, or the membership in the owner of the database) needs
+step 1 too: before it, `role --check` shows a `FAIL` line for each new right.
 
 Without them the new image cannot connect and does not become healthy: then the
 last release runs again. After step 1 that release cannot connect, because
@@ -2617,8 +2632,9 @@ needs both when `ovb_stage` holds tables.
 ### Risks of the owner decisions
 
 The owner decided (2026-11-06) on the maximum rights for the SQL console and on
-the credentials in the image. `oracle-view.sh` changes none of these decisions.
-On the grey environment this means:
+the credentials in the image, and (2026-11-09) on every right of the owner of
+the database for the SQL console. `oracle-view.sh` changes none of these
+decisions. On the grey environment this means:
 
 - An editor (the `pm` user) can read every RP password hash
   (`res_users.password`), API key (`res_users_apikeys`) and mail server password
@@ -2627,6 +2643,16 @@ On the grey environment this means:
   console masks no value.
 - An editor can change the password of any RP user, also the admin, and so take
   over the grey App. A `DELETE` or an `UPDATE` can break the App.
+- An editor can change, empty and drop every table of `perodua_oracle2` (DDL,
+  `TRUNCATE`, `DROP TABLE`), and so stop the grey App. Only a backup gives a
+  dropped table back.
+- The membership in the owner (`odoo`) is for the whole server. The role has
+  every right of `odoo` on each other database that `odoo` owns, also on the
+  database itself (`ALTER DATABASE ... SET`, and `DROP DATABASE` of another such
+  database from a session outside a transaction block). It can also end the
+  sessions of `odoo`, so those of the grey App (`pg_terminate_backend`).
+  `pg_hba.conf` limits only where the role logs in. The `INFO` line
+  `other databases of odoo` of `role --check` names these databases.
 - The Oracle account of the image (ISSINTUSR) reaches 5 more databases through
   its DB links (ENTGP2, ENTJP2, ENTRP2, ENTCP2, CRMDB). The console can write
   where that account may write.
