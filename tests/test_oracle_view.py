@@ -5,10 +5,14 @@ them elsewhere. On the App side, a fake Docker CLI answers only the commands the
 script uses, fails on anything else, and records each call with its standard
 input, its DOCKER_CONFIG and whether the script's directory lock was held. Its
 `docker run` of make_user.py prints a users line made from the password it
-reads, so a test can match the line with initial-login.txt. Fake ss and curl
-answer from the same state; mv and tar run the real programs unless a test asks
-one to fail. On the DB side, fake runuser, id and psql record each psql call
-with its standard input and answer from a state file. RoleOnPostgresTest runs
+reads, so a test can match the line with initial-login.txt. For install
+--no-pull it also answers docker info (the image store) and the check of the
+pinned image by its digest reference. Fake ss and curl answer from the same
+state; mv and tar run the real programs unless a test asks one to fail.
+OracleViewStreamTest runs oracle-view-stream.sh (no root) against a fake docker
+of the Mac and a fake ssh that answers the commands of the server. On the DB
+side, fake runuser, id and psql record each psql call with its standard input
+and answer from a state file. RoleOnPostgresTest runs
 the role SQL on a throwaway PostgreSQL 16 cluster (the test image has it) on its
 own port and socket. Every password, key and verifier here is made up.
 """
@@ -41,6 +45,21 @@ RELEASE = re.search(r"^RELEASE=(\S+)$", TEXT, re.M).group(1)
 REGISTRY = "perodua-deploy.novutal.com"
 REPOSITORY = REGISTRY + "/oracle-view"
 OLD_IMAGE = REPOSITORY + ":grey-v0.9.0@sha256:" + "0" * 64
+TAGGED, DIGEST = IMAGE.split("@")
+PINNED = REPOSITORY + "@" + DIGEST  # the digest reference that install --no-pull checks
+# How install --no-pull reads the image store and the pinned image, and what Docker answers.
+STORE_FORMAT = "{{json .DriverStatus}}"
+FACTS = "{{.Id}}{{range .RepoDigests}} {{.}}{{end}}"
+INFO = ("info", "--format", STORE_FORMAT)
+INSPECT_PINNED = ("image", "inspect", "--format", FACTS, PINNED)
+DRIVER_STATUS = {"containerd": '[["driver-type","io.containerd.snapshotter.v1"]]',
+                 "classic": '[["Backing Filesystem","extfs"],["Supports d_type","true"],["Using metacopy","false"],'
+                            '["Native Overlay Diff","true"],["userxattr","false"]]'}
+CONFIG_ID = "sha256:" + "c" * 64  # the ID of an image on the classic image store: the digest of its config
+# The Mac command that install --no-pull prints when the image is missing: docker save names the tag, because an
+# archive of a digest reference has no image name, and docker load keeps it as a dangling image.
+STREAM_COMMAND = (f"docker pull --platform linux/amd64 {IMAGE} && docker tag {PINNED} {TAGGED} && "
+                  f"docker save {TAGGED} | ssh SSH_HOST 'sudo -n docker load'")
 PROJECT = "oracle-view"
 VOLUME = "oracle-view_oracle-view-state"
 UP = ["up", "--detach", "--wait", "--wait-timeout", "180", "--remove-orphans", "--pull", "never"]
@@ -88,6 +107,12 @@ VOLUME = ''' + repr(VOLUME) + r'''
 OWNER = ''' + repr(OWNER) + r'''
 UP = ''' + repr(UP) + r'''
 MAKE_USER = ''' + repr(MAKE_USER) + r'''
+PINNED = ''' + repr(PINNED) + r'''
+DIGEST = ''' + repr(DIGEST) + r'''
+INFO = ''' + repr(list(INFO)) + r'''
+INSPECT_PINNED = ''' + repr(list(INSPECT_PINNED)) + r'''
+DRIVER_STATUS = ''' + repr(DRIVER_STATUS) + r'''
+CONFIG_ID = ''' + repr(CONFIG_ID) + r'''
 args = sys.argv[1:]
 with open(os.environ["FAKE_DOCKER_STATE"]) as f:
     state = json.load(f)
@@ -126,6 +151,18 @@ elif args[:2] == ["network", "rm"]:
     pass
 elif args == ["image", "inspect", IMAGE]:
     status = 0 if IMAGE in state["images"] else 1
+elif args == INFO:
+    if state["store"] in DRIVER_STATUS:
+        out = DRIVER_STATUS[state["store"]] + "\n"
+    else:
+        err, status = "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?\n", 1
+elif args == INSPECT_PINNED:
+    if state["image_facts"]:
+        out = state["image_facts"] + "\n"
+    elif IMAGE in state["images"]:  # pulled, or loaded from a saved tag on the containerd image store
+        out = (DIGEST if state["store"] == "containerd" else CONFIG_ID) + " " + PINNED + "\n"
+    else:
+        err, status = f"Error response from daemon: No such image: {PINNED}\n", 1
 elif args == ["pull", IMAGE]:
     if state["registry_account"] and state["logged_in"] != state["registry_account"]:
         err, status = "Error response from daemon: unauthorized: authentication required\n", 1
@@ -148,6 +185,9 @@ elif args[:2] == ["run", "--rm"] and MAKE_USER in args:
     name, role = args[-1], args[args.index("--role") + 1]
     digest = base64.urlsafe_b64encode(hashlib.sha256(f"{name}:{password}".encode()).digest()).decode().rstrip("=")
     status = state["make_user_status"]
+    pull = args[args.index("--pull") + 1] if "--pull" in args else "missing"
+    if pull == "never" and IMAGE not in state["images"]:
+        err, status = f"docker: Error response from daemon: No such image: {IMAGE}\n", 125
     out = "" if status else f"{name}:{role}:scrypt:ln=15:r=8:p=1:{digest[:16]}:{digest[16:]}\n"
 elif compose and action == ["config", "--quiet"]:
     entry["compose_file"] = open(args[4]).read()
@@ -268,7 +308,8 @@ class OracleViewAppTest(unittest.TestCase):
         state = json.loads(self.state.read_text()) if self.state.exists() else {
             "images": [], "registry_account": None, "logged_in": None, "pull_error": "", "listening": False,
             "foreign_listener": False, "owner": "", "make_user_status": 0, "healthz": "ok", "volume": False,
-            "api_version": "1.51", "volume_rm_error": "", "image_rm_error": ""}
+            "api_version": "1.51", "volume_rm_error": "", "image_rm_error": "", "store": "containerd",
+            "image_facts": ""}
         state.update({"up_status": [], "config_status": 0})
         state.update(changes)
         self.state.write_text(json.dumps(state))
@@ -303,6 +344,13 @@ class OracleViewAppTest(unittest.TestCase):
     def assertNothingChanged(self):  # Docker was asked, at most, its versions and who owns the project
         self.assertLessEqual({tuple(call["args"]) for call in self.calls()},
                              {("compose", "version"), ENGINE_API, tuple(OWNER)})
+
+    def assertNoPullChangedNothing(self):  # also its image store and the pinned image, at most
+        self.assertLessEqual({tuple(call["args"]) for call in self.calls()},
+                             {("compose", "version"), ENGINE_API, tuple(OWNER), INFO, INSPECT_PINNED})
+
+    def pulls_and_logins(self):
+        return [call["args"] for call in self.calls() if call["args"][:1] in (["pull"], ["login"], ["context"])]
 
     def published(self):
         return {name: (self.dir / name).read_bytes() for name in PUBLISHED if (self.dir / name).exists()}
@@ -420,6 +468,168 @@ class OracleViewAppTest(unittest.TestCase):
         self.assertEqual([call["args"] for call in calls if call["args"][:1] == ["pull"]], [["pull", IMAGE]] * 2)
         for call in calls:
             self.assertNotIn(REGISTRY_ACCOUNT[1], " ".join(call["args"]))
+
+    # ------------------------------------------------------------------ install --no-pull
+    def test_without_no_pull_the_image_step_is_unchanged(self):
+        self.installed()
+        args = [call["args"] for call in self.calls()]
+        self.assertEqual(self.pulls_and_logins(), [["pull", IMAGE]])
+        self.assertIn(["image", "inspect", IMAGE], args)
+        self.assertNotIn(list(INFO), args)
+        self.assertNotIn(list(INSPECT_PINNED), args)
+        self.assertNotIn("not pulled", self.installed().stdout)
+
+    def test_no_pull_uses_the_image_on_the_server_and_never_pulls_or_logs_in(self):
+        # The registry wants a login that this server does not have: a pull would stop.
+        self.set_state(images=[IMAGE], registry_account=REGISTRY_ACCOUNT)
+        result = self.installed("--no-pull")
+        self.assertIn(f"Pinned image on this server (containerd image store), not pulled: {PINNED}\n", result.stdout)
+        self.assertIn(f"Installed: {RELEASE}", result.stdout)
+        self.assertEqual(self.pulls_and_logins(), [])
+        args = [call["args"] for call in self.calls()]
+        self.assertNotIn(["image", "inspect", IMAGE], args)  # the first step of a pull
+        self.assertEqual(args.count(list(INSPECT_PINNED)), 1)
+        self.assertLess(args.index(list(INSPECT_PINNED)), args.index(self.make_user_runs()[0]["args"]))
+        for call in self.calls():
+            self.assertEqual(call["docker_config"], "")  # no throwaway login config
+            if call["args"] in (list(INFO), list(INSPECT_PINNED)):
+                self.assertEqual(call["lock"], "held")
+        for run in self.make_user_runs():
+            self.assertIn("--pull never", " ".join(run["args"]))
+        self.assertIn(f"    image: {IMAGE}\n    pull_policy: never\n", (self.dir / "compose.yml").read_text())
+        self.assertEqual([up["args"][5:5 + len(UP)] for up in self.ups()], [UP])
+        # A later run keeps the users and still pulls nothing; status names the image on the server.
+        self.installed("--no-pull")
+        self.assertEqual(self.make_user_runs(), [])
+        self.assertEqual(self.pulls_and_logins(), [])
+        self.assertIn("Local:    the pinned image is on this server (containerd image store)\n",
+                      self.run_script("status").stdout)
+
+    def test_no_pull_never_reads_the_terminal(self):
+        # On a pseudo-terminal, without --non-interactive: no prompt, with the image and without it. A read
+        # would wait until the deadline of converse.
+        self.set_state(images=[IMAGE], registry_account=REGISTRY_ACCOUNT)
+        code, output = self.converse([], "install", "--no-pull", "--dir", str(self.dir))
+        self.assertEqual(code, 0, output)
+        self.assertIn(f"Installed: {RELEASE}", output)
+        self.set_state(images=[])
+        code, output = self.converse([], "install", "--no-pull", "--dir", str(self.dir))
+        self.assertEqual(code, 1, output)
+        self.assertIn("--no-pull does not pull it", output)
+        for prompt in ("Registry username", "Registry password", "confirm"):
+            self.assertNotIn(prompt, output)
+        self.assertEqual(self.pulls_and_logins(), [])
+
+    def test_no_pull_without_the_image_stops_before_any_change(self):
+        result = self.install("--no-pull")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertIn(f"ERROR: The pinned image is not on this server, and --no-pull does not pull it: {PINNED}\n"
+                      "Stream it from the Mac (it has the registry login and the containerd image store). There, SSH_HOST "
+                      f"is the ssh name of this server (host name {os.uname().nodename}):\n"
+                      "  bash scripts/oracle-view-stream.sh SSH_HOST\n"
+                      "or with Docker alone:\n"
+                      f"  {STREAM_COMMAND}\n"
+                      "Then run this install again. Nothing was changed.\n", result.stderr)
+        self.assertNoPullChangedNothing()
+        self.assertFalse(self.dir.exists())
+        # An installed release stays as it was.
+        self.installed()
+        before = self.published()
+        self.set_state(images=[])
+        result = self.install("--no-pull")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(STREAM_COMMAND, result.stderr)
+        self.assertNoPullChangedNothing()
+        self.assertEqual(self.published(), before)
+        self.assertFalse((self.dir / ".stage").exists())
+        self.assertIn("Local:    the pinned image is not on this server: install pulls it, install --no-pull needs it "
+                      "streamed first\n", self.run_script("status").stdout)
+
+    def test_no_pull_on_the_classic_image_store(self):
+        # There an image from docker load has no registry digest, so the digest reference does not find it.
+        self.set_state(store="classic")
+        result = self.install("--no-pull")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(f"The pinned image is not on this server, and --no-pull does not pull it: {PINNED}. The Docker "
+                      "engine of this server uses the classic image store: there an image from docker load has no "
+                      "registry digest, so install cannot check it against the pinned digest and does not use it. Switch "
+                      "the engine to the containerd image store first (README.md, Oracle Field Browser, Install from a "
+                      "streamed image), then stream the image. Nothing was changed.\n", result.stderr)
+        self.assertNotIn("docker save", result.stderr)
+        self.assertNoPullChangedNothing()
+        self.assertFalse(self.dir.exists())
+        # An image pulled before has the pinned digest as its registry digest; its ID is the digest of its config.
+        self.set_state(images=[IMAGE])
+        result = self.installed("--no-pull")
+        self.assertIn(f"Pinned image on this server (classic image store), not pulled: {PINNED}\n", result.stdout)
+        self.assertEqual(self.pulls_and_logins(), [])
+        self.assertIn("Local:    the pinned image is on this server (classic image store)\n", self.run_script("status").stdout)
+        # An engine that does not answer docker info.
+        self.set_state(store="")
+        before = self.published()
+        result = self.install("--no-pull")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("ERROR: The Docker engine does not answer docker info. Nothing was changed.\n", result.stderr)
+        self.assertNoPullChangedNothing()
+        self.assertEqual(self.published(), before)
+        self.assertIn("Local:    not checked (docker info does not answer)\n", self.run_script("status").stdout)
+
+    def test_no_pull_refuses_an_image_without_the_pinned_digest(self):
+        for facts in (f"sha256:{'e' * 64} {PINNED}",                # the ID is not the pinned digest
+                      f"{DIGEST} {REPOSITORY}@sha256:{'f' * 64}",   # the registry digest is not the pinned one
+                      DIGEST):                                       # no registry digest
+            with self.subTest(facts=facts):
+                self.set_state(images=[IMAGE], image_facts=facts)
+                result = self.install("--no-pull")
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(f"ERROR: The image that {PINNED} finds on this server does not have the pinned digest as "
+                              "its registry digest (and, on the containerd image store, as its ID). Remove it (sudo docker "
+                              f"image rm {PINNED}), stream the pinned image again, then run install again. Nothing was "
+                              "changed.\n", result.stderr)
+                self.assertNoPullChangedNothing()
+                self.assertFalse(self.dir.exists())
+        # On the classic image store the ID is the digest of the config: only the registry digest counts there.
+        self.set_state(store="classic", image_facts=f"{CONFIG_ID} {PINNED}")
+        self.assertIn("(classic image store), not pulled", self.installed("--no-pull").stdout)
+        self.set_state(image_facts=f"{CONFIG_ID} {REPOSITORY}@sha256:{'f' * 64}")
+        self.assertEqual(self.install("--no-pull").returncode, 1)
+        self.assertIn(f"Local:    the image that {PINNED} finds here does not have the pinned digest\n",
+                      self.run_script("status").stdout)
+
+    def test_the_environment_variable_works_like_the_flag(self):
+        self.set_state(images=[IMAGE], registry_account=REGISTRY_ACCOUNT)
+        result = self.install(OVB_NO_PULL="1")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn(f"not pulled: {PINNED}\n", result.stdout)
+        self.assertEqual(self.pulls_and_logins(), [])
+        self.set_state(images=[])
+        result = self.install(OVB_NO_PULL="1")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(STREAM_COMMAND, result.stderr)
+        self.assertNoPullChangedNothing()
+        # 0, or no value, is the default path: it pulls (and here the registry wants a login that is not there).
+        for value in ("0", ""):
+            with self.subTest(value=value):
+                result = self.install(OVB_NO_PULL=value)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("The registry needs a login: run docker login perodua-deploy.novutal.com first", result.stderr)
+                self.assertEqual(self.pulls_and_logins(), [["pull", IMAGE]])
+        for value in ("yes", "true", "2", " 1"):
+            with self.subTest(value=value):
+                result = self.install(OVB_NO_PULL=value)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn(f"ERROR: OVB_NO_PULL must be 1 or 0: {value} (see: bash oracle-view.sh --help)",
+                              result.stderr)
+                self.assertEqual(self.calls(), [])
+        # The mode belongs to install: the flag is a usage error for the other commands, and they do not read the
+        # variable.
+        for command in ("status", "uninstall"):
+            with self.subTest(command=command):
+                result = self.run_script(command, "--no-pull")
+                self.assertEqual(result.returncode, 2)
+                self.assertIn(f"--no-pull does not belong to {command}", result.stderr)
+        self.assertEqual(self.run_script("status", OVB_NO_PULL="yes").returncode, 0)
 
     # ------------------------------------------------------------------ the container
     def test_install_runs_the_container_locked_down(self):
@@ -3067,6 +3277,37 @@ class OracleViewDocsTest(unittest.TestCase):
         self.assertEqual(usage.returncode, 0, usage.stderr)
         self.assertIn(f"install    Pulls the pinned image ({RELEASE}) from the private registry", usage.stdout)
 
+    def test_the_readme_describes_the_install_from_a_streamed_image(self):
+        self.assertEqual(SECTION.count("\n### Install from a streamed image\n"), 1)  # the messages name it
+        streamed = SECTION.split("\n### Install from a streamed image\n", 1)[1].split("\n### ", 1)[0]
+        for line in ("   bash scripts/oracle-view-stream.sh --dry-run grey\n", "   bash scripts/oracle-view-stream.sh grey\n",
+                     "   docker pull --platform linux/amd64 IMAGE\n", "   docker tag REPOSITORY@DIGEST REPOSITORY:TAG\n",
+                     "   docker save REPOSITORY:TAG | ssh grey 'sudo -n docker load'\n",
+                     "   sudo bash oracle-view.sh install --no-pull --non-interactive\n"):
+            self.assertIn(line, streamed)
+        text = words(streamed)
+        for sentence in ("With `--no-pull`, `install` never pulls, never logs in to the registry and never asks a question.",
+                         "Save the tag, not the digest reference. An archive of a digest reference has no image name: "
+                         "`docker load` keeps it as a dangling image, and the digest reference does not find it.",
+                         "`sudo env OVB_NO_PULL=1 bash oracle-view.sh install --non-interactive` (`0` or no value: the pull "
+                         "as before; another value is a usage error).",
+                         "checks that its registry digest, and on the containerd image store also its ID, is the pinned "
+                         "digest.",
+                         "When the image is not there, `install` stops before any change (exit status 1) and prints the "
+                         "commands for the Mac.",
+                         "on that store it uses only an image that a pull brought before, and otherwise stops with a "
+                         "message, before any change.",
+                         "the containerd image store shows the line `driver-type: io.containerd.snapshotter.v1`"):
+            self.assertIn(sentence, text)
+        self.assertEqual(SECTION.count("](#install-from-a-streamed-image)"), 3)  # the table, step 2 and Upgrade
+        self.assertIn("On grey, nobody types the registry password on the server (owner rule of 2026-11-10): stream the "
+                      "image from the Mac and add `--no-pull`", words(SECTION))
+        usage = words(subprocess.run(["bash", str(SCRIPT), "--help"], capture_output=True, text=True, timeout=60).stdout)
+        for sentence in ("install [--config PATH] [--non-interactive] [--no-pull] [--dir PATH]",
+                         "--no-pull Or OVB_NO_PULL=1 in the environment (sudo env OVB_NO_PULL=1 bash ...).",
+                         "When it is missing, install stops before any change and prints the command for the Mac."):
+            self.assertIn(sentence, usage)
+
     def test_the_intro_names_the_tool(self):
         intro = README.split("\n## ", 1)[0]
         self.assertIn("**Oracle Field Browser** (separate)", intro)
@@ -3098,6 +3339,336 @@ class OracleViewDocsTest(unittest.TestCase):
                          "after every `deploy-db.sh` run, run `sudo bash oracle-view.sh role --check` and move the line "
                          "back above the block."):
             self.assertIn(sentence, text)
+
+
+def shell_function(name, text=TEXT):
+    """A function of a shell script, from its name to the closing brace at the start of a line, without comment lines."""
+    body = re.search(rf"^{name}\(\) \{{.*?^\}}$", text, re.M | re.S).group(0)
+    return "\n".join(line for line in body.splitlines() if not line.lstrip().startswith("#"))
+
+
+class OracleViewNoPullCodeTest(unittest.TestCase):
+    """The image step of install --no-pull, read from the script: no read, no pull and no login on that path."""
+
+    def test_the_no_pull_step_has_no_read_no_pull_and_no_login(self):
+        for name in ("image_store", "pinned_here", "check_pinned_image"):
+            with self.subTest(function=name):
+                code = shell_function(name)
+                self.assertIsNone(re.search(r"\bread\b", code))
+                # A command, not the text of the message for the Mac: at the start of a line or after ; & | ( or $(.
+                self.assertIsNone(re.search(r"(^|[;&|(]|\$\()\s*docker\s+(pull|login)\b", code, re.M))
+                for word in ("/dev/tty", "-t 0", "pull_image", "DOCKER_CONFIG", "AUTH_DIR", "confirm"):
+                    self.assertNotIn(word, code)
+        install = shell_function("cmd_install")
+        # pull_image, the only step with a terminal read in install, runs only without --no-pull.
+        self.assertEqual(TEXT.count("pull_image"), 2)  # its definition and this one call
+        self.assertIn("    ((NO_PULL)) || pull_image\n", install)
+        # The check comes before the first change: the directory, the identity and the stage.
+        self.assertLess(install.index("    claim_project\n    ((NO_PULL == 0)) || check_pinned_image\n"),
+                        install.index('    install -d -m 0700 "$DEPLOY_DIR"\n'))
+        # make_user.py never pulls an image that is missing (the default of docker run is --pull missing).
+        self.assertIn('docker run --rm -i --pull never --network none ', TEXT)
+        self.assertEqual(TEXT.count("docker run "), 1)
+
+    def test_no_command_that_is_forbidden_while_grey_runs_on_oracle(self):
+        # Owner rule C1: while the grey App runs on an Oracle DB, these kit commands must not run. oracle-view.sh
+        # and the Mac helper never call, source or print a command line of them.
+        for path in (SCRIPT, STREAM):
+            text = path.read_text()
+            for name in ("deploy-app", "service.sh", "rollback.sh", "restore.txt", "grey-oracle-sync-wayback"):
+                with self.subTest(script=path.name, name=name):
+                    self.assertNotIn(name, text)
+
+    def test_the_digest_reference_and_the_platform_come_from_the_pin(self):
+        self.assertIn('\nDIGEST=${IMAGE##*@}\nPINNED=$REPOSITORY@$DIGEST ', TEXT)
+        self.assertEqual(re.findall(r"^PLATFORM=(\S+)", TEXT, re.M), ["linux/amd64"])
+
+
+STREAM = SCRIPT.with_name("oracle-view-stream.sh")
+STREAM_TEXT = STREAM.read_text()
+SSH_OPTIONS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=20"]
+SERVER_VERSION = "sudo -n docker version --format '{{.Server.APIVersion}}'"
+SERVER_INFO = "sudo -n docker info --format '{{json .DriverStatus}}'"
+SERVER_INSPECT = f"sudo -n docker image inspect --format '{FACTS}' {PINNED}"
+SERVER_LOAD = "sudo -n docker load"
+ARCHIVE = f"archive of {TAGGED} -> {DIGEST}\n"  # what the fake docker save writes for the tag of the pin
+# docker of the Mac: docker save of a tag writes an archive with that name.
+FAKE_MAC_DOCKER = r'''#!/usr/bin/env python3
+import json, os, sys
+IMAGE = ''' + repr(IMAGE) + r'''
+TAGGED = ''' + repr(TAGGED) + r'''
+PINNED = ''' + repr(PINNED) + r'''
+DIGEST = ''' + repr(DIGEST) + r'''
+DRIVER_STATUS = ''' + repr(DRIVER_STATUS) + r'''
+args = sys.argv[1:]
+with open(os.environ["FAKE_STREAM_STATE"]) as f:
+    state = json.load(f)
+mac = state["mac"]
+entry = {"tool": "docker", "args": args}
+out, err, status = "", "", 0
+if args == ["info", "--format", "{{json .DriverStatus}}"]:
+    out = DRIVER_STATUS[mac["store"]] + "\n"
+elif args == ["image", "inspect", "--format", "{{.Id}}", PINNED]:
+    if mac["pinned"]:
+        out = DIGEST + "\n"
+    else:
+        err, status = f"Error response from daemon: No such image: {PINNED}\n", 1
+elif args == ["pull", "--platform", "linux/amd64", IMAGE]:
+    if mac["logged_in"]:
+        mac["pinned"] = True
+    else:
+        err, status = "Error response from daemon: unauthorized: authentication required\n", 1
+elif args == ["tag", PINNED, TAGGED] and mac["pinned"]:
+    mac["tag"] = DIGEST
+elif args == ["save", TAGGED] and mac["tag"]:
+    out = f"archive of {TAGGED} -> {mac['tag']}\n"
+else:
+    sys.exit(f"fake docker: unsupported command {args}")
+with open(os.environ["FAKE_STREAM_LOG"], "a") as log:
+    log.write(json.dumps(entry) + "\n")
+with open(os.environ["FAKE_STREAM_STATE"], "w") as f:
+    json.dump(state, f)
+sys.stdout.write(out)
+sys.stderr.write(err)
+sys.exit(status)
+'''
+# ssh to the App server: batch mode only, and the commands of the server answered from its state. docker load keeps
+# the name of the archive, so the digest reference finds the image on the containerd image store.
+FAKE_SSH = r'''#!/usr/bin/env python3
+import json, os, sys
+TAGGED = ''' + repr(TAGGED) + r'''
+PINNED = ''' + repr(PINNED) + r'''
+DIGEST = ''' + repr(DIGEST) + r'''
+DRIVER_STATUS = ''' + repr(DRIVER_STATUS) + r'''
+OPTIONS = ''' + repr(SSH_OPTIONS) + r'''
+VERSION, INFO, INSPECT, LOAD = ''' + repr((SERVER_VERSION, SERVER_INFO, SERVER_INSPECT, SERVER_LOAD)) + r'''
+ARCHIVE = ''' + repr(ARCHIVE) + r'''
+args = sys.argv[1:]
+if args[:4] != OPTIONS or len(args) != 6:
+    sys.exit(f"fake ssh: unexpected arguments {args}")
+with open(os.environ["FAKE_STREAM_STATE"]) as f:
+    state = json.load(f)
+server, command = state["server"], args[5]
+entry = {"tool": "ssh", "args": args}
+out, err, status = "", "", 0
+if not server["reachable"]:
+    err, status = f"ssh: connect to host {args[4]} port 22: Connection refused\n", 255
+elif not server["sudo"]:
+    err, status = "sudo: a password is required\n", 1
+elif command == VERSION:
+    out = "1.52\n"
+elif command == INFO:
+    out = DRIVER_STATUS[server["store"]] + "\n"
+elif command == INSPECT:
+    if server["image"]:
+        out = server["image"] + "\n"
+    else:
+        err, status = f"Error response from daemon: No such image: {PINNED}\n", 1
+elif command == LOAD:
+    entry["stdin"] = sys.stdin.read()
+    if entry["stdin"] == ARCHIVE and server["store"] == "containerd":
+        server["image"] = f"{DIGEST} {PINNED}"
+    out = f"Loaded image: {TAGGED}\n"
+else:
+    sys.exit(f"fake ssh: unsupported command {command!r}")
+with open(os.environ["FAKE_STREAM_LOG"], "a") as log:
+    log.write(json.dumps(entry) + "\n")
+with open(os.environ["FAKE_STREAM_STATE"], "w") as f:
+    json.dump(state, f)
+sys.stdout.write(out)
+sys.stderr.write(err)
+sys.exit(status)
+'''
+
+
+class OracleViewStreamTest(unittest.TestCase):
+    """oracle-view-stream.sh, run on the Mac, against a fake docker of the Mac and a fake ssh to the App server."""
+
+    def setUp(self):
+        self.tmp = Path(os.path.realpath(tempfile.mkdtemp()))
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.log = self.tmp / "calls.log"
+        self.state = self.tmp / "state.json"
+        bin_dir = self.tmp / "bin"
+        bin_dir.mkdir()
+        for name, text in (("docker", FAKE_MAC_DOCKER), ("ssh", FAKE_SSH)):
+            (bin_dir / name).write_text(text)
+            (bin_dir / name).chmod(0o755)
+        self.env = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}", TMPDIR=str(self.tmp),
+                        FAKE_STREAM_STATE=str(self.state), FAKE_STREAM_LOG=str(self.log))
+        self.state.write_text(json.dumps({
+            "mac": {"store": "containerd", "pinned": True, "logged_in": True, "tag": DIGEST},
+            "server": {"reachable": True, "sudo": True, "store": "containerd", "image": ""}}))
+
+    def set_state(self, mac=None, server=None):
+        state = json.loads(self.state.read_text())
+        state["mac"].update(mac or {})
+        state["server"].update(server or {})
+        self.state.write_text(json.dumps(state))
+
+    def stream(self, *args):
+        self.log.unlink(missing_ok=True)
+        return subprocess.run(["bash", str(STREAM), *args], env=self.env, stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True, timeout=60)
+
+    def calls(self, tool):
+        lines = self.log.read_text().splitlines() if self.log.exists() else []
+        return [call for call in map(json.loads, lines) if call["tool"] == tool]
+
+    def docker(self):
+        return [call["args"] for call in self.calls("docker")]
+
+    def server(self):  # the command lines that ssh ran on the server
+        return [call["args"][5] for call in self.calls("ssh")]
+
+    def locks(self):
+        return [path.name for path in self.tmp.iterdir() if path.name.endswith(".lock")]
+
+    def test_streams_the_tag_and_checks_the_pin_on_the_server(self):
+        result = self.stream("grey")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual(self.docker(), [["info", "--format", STORE_FORMAT],
+                                         ["image", "inspect", "--format", "{{.Id}}", PINNED],
+                                         ["tag", PINNED, TAGGED], ["save", TAGGED]])
+        self.assertEqual(self.server(), [SERVER_VERSION, SERVER_INFO, SERVER_INSPECT, SERVER_LOAD, SERVER_INSPECT])
+        self.assertEqual({tuple(call["args"][:5]) for call in self.calls("ssh")}, {(*SSH_OPTIONS, "grey")})
+        self.assertEqual(self.calls("ssh")[3]["stdin"], ARCHIVE)
+        self.assertIn(f"Streaming {TAGGED} to grey...\nLoaded image: {TAGGED}\nOn grey: {PINNED}, ID {DIGEST}\n"
+                      "Next, on grey: sudo bash oracle-view.sh install --no-pull --non-interactive\n", result.stdout)
+        self.assertEqual(self.locks(), [])
+        # The server has it now: a second run streams nothing.
+        result = self.stream("grey")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"The pinned image is already on grey: {PINNED}. Nothing to stream.\n", result.stdout)
+        self.assertEqual(self.server(), [SERVER_VERSION, SERVER_INFO, SERVER_INSPECT])
+        self.assertNotIn(["save", TAGGED], self.docker())
+
+    def test_pulls_on_this_computer_only_when_the_pin_is_missing(self):
+        self.set_state(mac={"pinned": False, "tag": "sha256:" + "a" * 64})  # the tag points at another image
+        result = self.stream("grey")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        docker = self.docker()
+        self.assertEqual(docker[2:], [["pull", "--platform", "linux/amd64", IMAGE],
+                                      ["image", "inspect", "--format", "{{.Id}}", PINNED],
+                                      ["tag", PINNED, TAGGED], ["save", TAGGED]])
+        self.assertEqual(self.calls("ssh")[3]["stdin"], ARCHIVE)  # the tag now points at the pinned digest
+        # Without the registry login of this computer, the pull fails and nothing reaches the server.
+        self.set_state(mac={"pinned": False, "logged_in": False}, server={"image": ""})
+        result = self.stream("grey")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("ERROR: The pull failed on this computer (above). When the registry wants a login, run docker "
+                      "login perodua-deploy.novutal.com on this computer first.\n", result.stderr)
+        self.assertNotIn(SERVER_LOAD, self.server())
+        self.assertNotIn(["save", TAGGED], self.docker())
+
+    def test_a_load_that_the_server_does_not_find_by_its_digest_fails(self):
+        # The tag points at another image when docker save runs (it moved after docker tag).
+        self.set_state(mac={"tag": "sha256:" + "a" * 64})
+        (self.tmp / "bin" / "docker").write_text(FAKE_MAC_DOCKER.replace('mac["tag"] = DIGEST', "pass"))
+        result = self.stream("grey")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(f"ERROR: After docker load, grey does not find {PINNED} with the pinned digest\n", result.stderr)
+        self.assertNotIn("Next, on grey", result.stdout)
+
+    def test_dry_run_changes_nothing(self):
+        self.set_state(mac={"pinned": False})
+        result = self.stream("--dry-run", "grey")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, f"Not on this computer: {PINNED}\n"
+                                        "Not on grey. Dry run: nothing was changed. The steps:\n"
+                                        f"  docker pull --platform linux/amd64 {IMAGE}\n"
+                                        f"  docker tag {PINNED} {TAGGED}\n"
+                                        f"  docker save {TAGGED} | ssh grey 'sudo -n docker load'\n"
+                                        f"  the check of {PINNED} on grey\n")
+        self.assertEqual(self.docker(), [["info", "--format", STORE_FORMAT],
+                                         ["image", "inspect", "--format", "{{.Id}}", PINNED]])
+        self.assertEqual(self.server(), [SERVER_VERSION, SERVER_INFO, SERVER_INSPECT])
+        self.set_state(mac={"pinned": True})
+        result = self.stream("--dry-run", "grey")
+        self.assertIn(f"On this computer: {PINNED}\n", result.stdout)
+        self.assertNotIn("docker pull", result.stdout)
+        self.assertEqual(self.locks(), [])
+
+    def test_a_classic_image_store_is_refused(self):
+        self.set_state(server={"store": "classic"})
+        result = self.stream("grey")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("ERROR: The Docker engine of grey uses the classic image store: there an image from docker load "
+                      "has no registry digest, and install --no-pull does not use it. Switch that engine to the "
+                      "containerd image store first (README.md, Oracle Field Browser, Install from a streamed image). "
+                      "Nothing was changed.\n", result.stderr)
+        self.assertEqual(self.server(), [SERVER_VERSION, SERVER_INFO])
+        self.assertNotIn(["save", TAGGED], self.docker())
+        # On this computer the classic store has no manifest of the registry to save: it stops before ssh.
+        self.set_state(mac={"store": "classic"}, server={"store": "containerd"})
+        result = self.stream("grey")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Docker on this computer does not use the containerd image store", result.stderr)
+        self.assertEqual(self.server(), [])
+
+    def test_ssh_and_sudo_never_ask(self):
+        for server, message in (({"sudo": False}, "sudo: a password is required"),
+                                ({"sudo": True, "reachable": False}, "ssh: connect to host grey port 22: Connection refused")):
+            with self.subTest(server=server):
+                self.set_state(server=server)
+                result = self.stream("grey")
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(f"ERROR: ssh grey (batch mode) with sudo -n docker failed: {message}. ssh must log in with "
+                              "a key and no question, and the user must run docker with sudo -n.\n", result.stderr)
+                self.assertEqual(self.docker(), [["info", "--format", STORE_FORMAT],
+                                                 ["image", "inspect", "--format", "{{.Id}}", PINNED]])
+        # No read anywhere, one ssh in batch mode, and every command on the server through sudo -n.
+        code = re.sub(r"cat <<'HELP'\n.*?\nHELP\n", "", STREAM_TEXT, flags=re.S)
+        code = "\n".join(line for line in code.splitlines() if not line.lstrip().startswith("#"))
+        self.assertIsNone(re.search(r"\bread\b", code))
+        ssh = [line.strip() for line in code.splitlines()
+               if re.search(r"\bssh\b", line) and not re.search(r"\b(printf|die|usage_error)\b", line)]
+        self.assertEqual(len(ssh), 1)
+        self.assertTrue(ssh[0].startswith('remote() { ssh -o BatchMode=yes -o ConnectTimeout=20 "$HOST" "$1"; }'))
+        remote = re.findall(r"\bremote ([\"'])(.*?)\1", code)
+        self.assertEqual(len(remote), 4)  # version, info, the check of the pin, load
+        for _, command in remote:
+            self.assertTrue(command.startswith("sudo -n docker "), command)
+        # The pin stays in oracle-view.sh.
+        self.assertNotRegex(STREAM_TEXT, r"sha256:[0-9a-f]{64}|grey-v\d")
+        self.assertIn("IMAGE=$(sed -n 's/^IMAGE=\\([^ ]*\\).*/\\1/p' \"$HERE/oracle-view.sh\")", STREAM_TEXT)
+
+    def test_one_run_at_a_time_for_each_server(self):
+        lock = self.tmp / "oracle-view-stream-grey.lock"
+        os.symlink(str(os.getpid()), lock)  # a running process holds it
+        result = self.stream("grey")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(f"ERROR: Another oracle-view-stream.sh run (process {os.getpid()}) streams to grey. If there is "
+                      f"none, remove {lock}\n", result.stderr)
+        self.assertEqual(self.docker() + self.server(), [])
+        self.assertEqual(os.readlink(lock), str(os.getpid()))
+        # Another server has a lock of its own.
+        result = self.stream("--dry-run", "deploy@grey2")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.locks(), [lock.name])
+        # The lock of a run that stopped is taken over, and removed at the end.
+        lock.unlink()
+        ended = subprocess.Popen(["true"])
+        ended.wait()
+        os.symlink(str(ended.pid), lock)
+        result = self.stream("grey")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.locks(), [])
+
+    def test_usage(self):
+        for args, message in (([], "Missing SSH_HOST"), (["-oProxyCommand=id"], "Unknown option: -oProxyCommand=id"),
+                              (["grey", "grey2"], "Give one SSH_HOST only: grey2"),
+                              (["grey;id"], "SSH_HOST may hold only letters, digits, ., _, - and @"),
+                              (["grey host"], "SSH_HOST may hold only"), ([".grey"], "SSH_HOST may hold only")):
+            with self.subTest(args=args):
+                result = self.stream(*args)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn(f"ERROR: {message}", result.stderr)
+                self.assertEqual(self.docker() + self.server(), [])
+        result = self.stream("--help")
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("bash scripts/oracle-view-stream.sh [--dry-run] SSH_HOST\n", result.stdout)
+        self.assertEqual(self.locks(), [])
 
 
 if __name__ == "__main__":

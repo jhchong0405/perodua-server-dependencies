@@ -653,6 +653,44 @@ checks:
   pseudo-terminal the username and the hidden password go to `docker login
   --password-stdin` with a throwaway `DOCKER_CONFIG` that is gone afterwards, and
   the password is in no argument and no output;
+- `install --no-pull` (and `OVB_NO_PULL=1`, the same): with the pinned image on
+  the server it installs with no `docker pull`, no `docker login` and no
+  throwaway `DOCKER_CONFIG`, also when the registry wants a login; the check of
+  the image (`docker info` for the image store, `docker image inspect` of
+  `REPOSITORY@DIGEST`) holds the lock and comes before `make_user.py`, which runs
+  with `--pull never`; on a pseudo-terminal it asks nothing, with the image and
+  without it; without the image it exits 1 before any change (no directory, an
+  installed release untouched) and prints the stream command for the Mac
+  (`docker pull --platform linux/amd64 IMAGE && docker tag REPOSITORY@DIGEST
+  REPOSITORY:TAG && docker save REPOSITORY:TAG | ssh SSH_HOST 'sudo -n docker
+  load'`); an image whose ID or registry digest is not the pinned digest, and an
+  engine that does not answer `docker info`, also stop it before any change; on
+  the classic image store it stops when the image is missing (a loaded image
+  has no registry digest) and accepts an image that a pull brought (its ID is
+  the digest of its config); `OVB_NO_PULL=0` or empty is the pull as before,
+  another value is a usage error (exit 2), and `--no-pull` belongs to `install`
+  only; without `--no-pull` the image step is unchanged (no `docker info`);
+  `status` names the result of the same check in its `Local:` line;
+  `OracleViewNoPullCodeTest` (no root) reads the image step of `--no-pull` from
+  the script: no `read`, no `docker pull` or `docker login` command, no
+  `pull_image`, the check before the first change, and neither `oracle-view.sh`
+  nor `oracle-view-stream.sh` names `deploy-app`, `service.sh`, `rollback.sh`,
+  `restore.txt` or `grey-oracle-sync-wayback` (owner rule C1: forbidden while
+  the grey App runs on an Oracle DB);
+- `oracle-view-stream.sh` (`OracleViewStreamTest`, no root, a fake `docker` of
+  the Mac and a fake `ssh` that refuses any call without `BatchMode=yes` and
+  answers the commands of the server): it tags the pin and streams `docker save`
+  of the tag to `sudo -n docker load`, then checks the server by the digest
+  reference; it pulls on the Mac (`--platform linux/amd64`) only when the pin is
+  missing there, and a failed pull (no login on the Mac) reaches no server; a
+  server with the pin gets nothing; a load that the server does not find by the
+  digest exits 1; `--dry-run` runs only the checks; a classic image store on the
+  server or on the Mac stops it before the stream; a `sudo` that wants a
+  password and a refused connection stop it with the message of the server; one
+  run at a time for each server (a lock of a live process stops it, a lock of an
+  ended one is taken over); usage errors exit 2; the script has no `read`, one
+  `ssh` (batch mode), each command on the server through `sudo -n docker`, and
+  it reads the pin from `oracle-view.sh`;
 - the container of `deploy/grey/compose.yml`: read-only root file system, tmpfs
   `/tmp`, the state volume, the users file bound read-only without
   `create_host_path`, `127.0.0.1:8797` only, no capabilities, `no-new-privileges`,
