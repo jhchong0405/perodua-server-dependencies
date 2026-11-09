@@ -317,7 +317,7 @@ class ServiceAppTests(unittest.TestCase):
 
     def test_reset_changes_nothing_without_a_matching_confirmation(self):
         self.assert_nothing_changed(self.run_script("reset", "--confirm", "other"), "--confirm must be exactly perodua")
-        self.assert_nothing_changed(self.run_script("reset"), "No terminal to confirm on: pass --confirm perodua")
+        self.assert_nothing_changed(self.run_script("reset"), "A non-interactive run, or a run without a terminal, asks nothing: pass --confirm perodua")
         (self.app / "app.env").unlink()
         self.assert_nothing_changed(self.run_script("reset", "--confirm", "perodua"), "app.env is missing")
 

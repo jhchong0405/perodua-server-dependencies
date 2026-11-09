@@ -568,7 +568,7 @@ read_terminal() {  # [-s hidden] [-k keep spaces] VAR PROMPT HOW
         if [[ $1 == -s ]]; then read_options+=(-s); else read_ifs=''; fi
         shift
     done
-    ((NON_INTERACTIVE == 0)) && [[ -t 0 ]] || fail "$3"
+    { ((NON_INTERACTIVE == 0)) && [[ -t 0 ]]; } || fail "$3"
     IFS=$read_ifs read -r "${read_options[@]}" -p "$2" "$1"
 }
 # The way to give the outgoing email settings without the questions of ask_mail.
@@ -1015,6 +1015,14 @@ docker compose version >/dev/null 2>&1 || fail 'Docker Compose v2 is required'
 docker info >/dev/null 2>&1 || fail 'Cannot reach Docker. Start the engine and check your account permissions'
 engine=$(docker info --format '{{.OSType}}/{{.Architecture}}')
 [[ $engine == linux/x86_64 || $engine == linux/amd64 ]] || fail 'The Docker engine must run Linux amd64 containers'
+# A non-interactive run without a password stops before the directory is made:
+# the password comes from its file or from the secret of an earlier run.
+if ((NON_INTERACTIVE)); then
+    [[ -n $DB_PASSWORD_FILE || -r $DEPLOY_DIR/secrets/db_password ]] \
+        || fail 'DB_PASSWORD_FILE is required for the first non-interactive deployment'
+    [[ -z $SMTP_USER || -n $smtp_password || -n $SMTP_PASSWORD_FILE || -r $DEPLOY_DIR/secrets/smtp_password ]] \
+        || fail 'SMTP_USER needs SMTP_PASSWORD_FILE for a non-interactive deployment'
+fi
 mkdir -p -- "$DEPLOY_DIR"
 DEPLOY_DIR=$(cd -- "$DEPLOY_DIR" && pwd -P)
 [[ $DEPLOY_DIR != / && $DEPLOY_DIR != *$'\n'* ]] || fail 'Unsupported directory path'
@@ -2641,8 +2649,10 @@ mv -f -- "$TEMP_DIR/identity" "$DEPLOY_DIR/.deployment-identity"
 chmod 0600 "$DEPLOY_DIR/app.env"
 compose() { docker compose --project-name "$PROJECT_NAME" --file "$DEPLOY_DIR/compose.yml" "$@"; }
 compose config --quiet
-preflight() { compose run --rm --no-deps -T odoo python3 /opt/deploy/preflight.py "$@"; }
-uat_helper() { compose run --rm --no-deps -T odoo python3 /opt/deploy/uat_guard.py "$@"; }
+# </dev/null: else Compose passes the standard input of this script to the
+# container, a terminal or the rest of a script that ssh gives on stdin.
+preflight() { compose run --rm --no-deps -T odoo python3 /opt/deploy/preflight.py "$@" </dev/null; }
+uat_helper() { compose run --rm --no-deps -T odoo python3 /opt/deploy/uat_guard.py "$@" </dev/null; }
 uat_setup() {
     # Reached only from a fresh initialization or its interrupted resumption,
     # never from an ordinary redeploy, so UAT passwords are not reset later.
@@ -2655,7 +2665,7 @@ uat_setup() {
     # shellcheck disable=SC2016
     timeout --foreground "$INIT_TIMEOUT" docker compose --project-name "$PROJECT_NAME" --file "$DEPLOY_DIR/compose.yml" run --rm --no-deps -T odoo \
         bash -c 'PGPASSWORD="$DB_PASSWORD" exec odoo shell -c /etc/odoo/odoo.conf -d "$DB_NAME" --db_host="$DB_HOST" --db_port="$DB_PORT" --db_user="$DB_USER" < /opt/deploy/uat_admins.py' \
-        > "$DEPLOY_DIR/uat-setup.log" 2>&1 || fail "UAT administrator setup failed; see $DEPLOY_DIR/uat-setup.log. Rerun with --init-db to retry it; modules are not reinstalled"
+        </dev/null > "$DEPLOY_DIR/uat-setup.log" 2>&1 || fail "UAT administrator setup failed; see $DEPLOY_DIR/uat-setup.log. Rerun with --init-db to retry it; modules are not reinstalled"
     grep -F 'UAT admins: ready:' "$DEPLOY_DIR/uat-setup.log" || fail "UAT administrator setup did not confirm completion; see $DEPLOY_DIR/uat-setup.log"
     [[ $LINE != demo-uiux ]] || uat_demo install
     state=$(preflight verify-fresh)
@@ -2830,7 +2840,7 @@ case $state in
         STARTED=1
         timeout --foreground "$INIT_TIMEOUT" docker compose --project-name "$PROJECT_NAME" --file "$DEPLOY_DIR/compose.yml" run --rm --no-deps -T odoo \
             odoo -c /etc/odoo/odoo.conf -d "$DB_NAME" -i "$INIT_MODULES" "$demo_flag" --stop-after-init \
-            > "$DEPLOY_DIR/initialization.log" 2>&1 || fail 'Initialization failed or timed out; inspect initialization.log. Rerun with --init-db: it finishes the setup if every module was installed, and otherwise stops with the recovery steps in docs/DEPLOYMENT.md'
+            </dev/null > "$DEPLOY_DIR/initialization.log" 2>&1 || fail 'Initialization failed or timed out; inspect initialization.log. Rerun with --init-db: it finishes the setup if every module was installed, and otherwise stops with the recovery steps in docs/DEPLOYMENT.md'
         [[ $(preflight mark-pending) == PENDING ]] || fail 'Initialized database failed the fresh UAT checks'
         uat_setup
         FRESH=1 ;;
@@ -2901,7 +2911,7 @@ if missing:
   pass
  print("Database folders in the volume: %s." % (", ".join(folders) or "none"), file=sys.stderr)
  sys.exit(3)
-' || status=$?
+' </dev/null || status=$?
     ((status != 3)) || fail "Filestore incomplete: the attachments volume $FILESTORE_VOLUME does not hold every attachment of database $DB_NAME (above). An App uninstall keeps the volume for the same database; this database's attachments must come from where the database came from (see From a backup in the README). Restore them into the volume, then run deploy-app.sh again"
     ((status == 0)) || fail "Could not check the attachments volume $FILESTORE_VOLUME against database $DB_NAME (above)"
 fi
