@@ -19,6 +19,7 @@ REGISTRY=${IMAGE%%/*}
 REPOSITORY=${IMAGE%%[:@]*}
 DIGEST=${IMAGE##*@}
 PINNED=$REPOSITORY@$DIGEST   # finds the pinned image by its digest, whatever its tag (install --no-pull)
+STREAM_TAG=$REPOSITORY:${DIGEST/:/-}   # the tag the Mac streams the pin under: one for each digest, never moved
 PLATFORM=linux/amd64      # the platform of the image and of the App server, for the pull on the Mac
 IMAGE_UID=10001           # the image's unprivileged user: it reads the users file
 PROJECT=oracle-view       # the Compose project, its service and the container name
@@ -86,8 +87,9 @@ install    Pulls the pinned image ($RELEASE) from the private registry
            the pinned image must already be on this server, streamed from the
            Mac (bash oracle-view-stream.sh SSH_HOST there). install finds it by
            its digest reference and checks that its registry digest, and on the
-           containerd image store its ID, is the pinned digest. When it is
-           missing, install stops before any change and prints the command for
+           containerd image store its ID, is the pinned digest; then it starts
+           the image once, with no network. When it is missing, or does not
+           start, install stops before any change and prints the command for
            the Mac. On the classic image store an image from docker load has no
            registry digest: install stops there too.
 status     The image, whether the pinned image is on this server, the settings,
@@ -296,24 +298,31 @@ pinned_here() {   # $1 store; 0: the pinned image is here, 1: no image has its d
     [[ " $facts " == *" $PINNED "* ]] || return 2
     [[ $1 != containerd || ${facts%% *} == "$DIGEST" ]] || return 2
 }
+starts() {   # the pinned image starts a process, with no pull and no network: its layers are complete
+    docker run --rm --pull never --network none --read-only --cap-drop ALL --security-opt no-new-privileges:true \
+        --user "$IMAGE_UID:$IMAGE_UID" --entrypoint python "$IMAGE" -c ''
+}
 check_pinned_image() {   # --no-pull, before any change: no pull, no login and no question
-    local store found=0 tag=${IMAGE%@*}
+    local store found=0 out
     store=$(image_store)
     [[ -n $store ]] || die 'The Docker engine does not answer docker info. Nothing was changed.'
     pinned_here "$store" || found=$?
     case $found in
-        0) printf 'Pinned image on this server (%s image store), not pulled: %s\n' "$store" "$PINNED"
+        0) out=$(starts 2>&1) \
+               || die "The pinned image on this server does not start: $(printf '%s\n' "$out" | tail -n 1). Remove it (sudo docker image rm $PINNED $STREAM_TAG), stream the pinned image again, then run install again. Nothing was changed."
+           printf 'Pinned image on this server (%s image store), not pulled: %s\n' "$store" "$PINNED"
            return 0 ;;
         2) die "The image that $PINNED finds on this server does not have the pinned digest as its registry digest (and, on the containerd image store, as its ID). Remove it (sudo docker image rm $PINNED), stream the pinned image again, then run install again. Nothing was changed." ;;
     esac
     [[ $store == containerd ]] || die "The pinned image is not on this server, and --no-pull does not pull it: $PINNED. The Docker engine of this server uses the classic image store: there an image from docker load has no registry digest, so install cannot check it against the pinned digest and does not use it. Switch the engine to the containerd image store first (README.md, Oracle Field Browser, Install from a streamed image), then stream the image. Nothing was changed."
     # docker save of a digest reference writes no image name, and docker load then keeps a
-    # dangling image that the digest reference does not find: the Mac saves the tag.
+    # dangling image that the digest reference does not find; a release tag moves to a later
+    # pin: the Mac saves the stream tag, one for each digest.
     die "$(printf '%s\n' "The pinned image is not on this server, and --no-pull does not pull it: $PINNED" \
         "Stream it from the Mac (it has the registry login and the containerd image store). There, SSH_HOST is the ssh name of this server (host name $(uname -n)):" \
         "  bash scripts/oracle-view-stream.sh SSH_HOST" \
         'or with Docker alone:' \
-        "  docker pull --platform $PLATFORM $IMAGE && docker tag $PINNED $tag && docker save $tag | ssh SSH_HOST 'sudo -n docker load'" \
+        "  docker pull --platform $PLATFORM $IMAGE && docker tag $PINNED $STREAM_TAG && docker save $STREAM_TAG | ssh SSH_HOST 'sudo -n docker load'" \
         'Then run this install again. Nothing was changed.')"
 }
 

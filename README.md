@@ -2637,25 +2637,39 @@ settings, Compose and the health checks are the same as without it.
 
    `grey` is the ssh name of the App server. The script reads the pin from
    `oracle-view.sh`. When the pinned image is not on the Mac, it pulls it there.
-   It points the tag of the pin at the pinned digest on the Mac, streams
-   `docker save` of that tag to `sudo -n docker load` on the server, and then
-   checks the image there as `install --no-pull` does. A server that has the
-   pinned image gets nothing. `--dry-run` does the checks and prints the steps:
-   it pulls, tags and loads nothing. ssh runs in batch mode and sudo with `-n`,
-   so the script never asks. It runs one stream at a time for each server.
+   It gives the pinned image on the Mac its stream tag, `REPOSITORY:sha256-HEX`
+   (HEX: the 64 digits of the pinned digest), streams `docker save` of that tag
+   to `sudo -n docker load` on the server, and then checks the image there as
+   `install --no-pull` does. It stops when the stream tag names another image on
+   the Mac, and when `docker load` on the server prints `Error unpacking`. A
+   server that has the pinned image gets nothing. `--dry-run` does the checks
+   and prints the steps: it pulls, tags and loads nothing. ssh runs in batch
+   mode (also `-T -a -x`, no forwarding, no local command, `-n` on each check)
+   and sudo with `-n`, so the script never asks. It runs one stream at a time for
+   each server: the host name and port that `ssh -G` gives for the ssh name.
 
    With Docker alone, the stream is these commands; `install --no-pull` prints
    them with the values of the pin:
 
    ```bash
    docker pull --platform linux/amd64 IMAGE
-   docker tag REPOSITORY@DIGEST REPOSITORY:TAG
-   docker save REPOSITORY:TAG | ssh grey 'sudo -n docker load'
+   docker tag REPOSITORY@DIGEST REPOSITORY:sha256-HEX
+   docker save REPOSITORY:sha256-HEX | ssh grey 'sudo -n docker load'
    ```
 
-   Save the tag, not the digest reference. An archive of a digest reference has
-   no image name: `docker load` keeps it as a dangling image, and the digest
-   reference does not find it.
+   Save the stream tag, not the digest reference and not the release tag. An
+   archive of a digest reference has no image name: `docker load` keeps it as a
+   dangling image, and the digest reference does not find it. A release tag
+   (`grey-v1.0.5`) can move to a later image: then the release before it becomes
+   a dangling image, and the switch back to the last good release (`--pull
+   never`) does not find it. Each digest has its own stream tag, so no later
+   pin moves it.
+
+   The pin must be one image manifest for linux/amd64, not a multi-platform
+   index: the pull on the Mac brings only the linux/amd64 part of an index, and
+   `docker save` stops for the missing parts (Docker 29.8). The pin of
+   grey-v1.0.5 is one manifest (`docker buildx imagetools inspect`,
+   2026-11-10). The script stops before the stream for an index.
 
 2. On the App server:
 
@@ -2672,22 +2686,30 @@ settings, Compose and the health checks are the same as without it.
 checks that its registry digest, and on the containerd image store also its ID,
 is the pinned digest. On the containerd image store the ID of an image is the
 digest of its manifest, and Docker checks the content against it when it loads
-the image. When the image is not there, `install` stops before any change (exit
-status 1) and prints the commands for the Mac. `status` shows the result of the
-same check in its `Local:` line.
+the image. Then it starts the image once, with no pull and no network
+(`docker run --rm --pull never --network none`), so that an image whose layers
+did not unpack stops the install. When the image is not there, or does not
+start, `install` stops before any change (exit status 1) and prints what to do.
+`status` shows the result of the check of the digest in its `Local:` line.
 
 The classic image store (Docker without the containerd snapshotter) keeps no
 registry digest for an image from `docker load`. So `install --no-pull` cannot
 check such an image against the pin: on that store it uses only an image that a
 pull brought before, and otherwise stops with a message, before any change.
-`oracle-view-stream.sh` stops before the stream when the server, or the Mac,
-uses the classic store. In `docker info`, the containerd image store shows the
+`oracle-view-stream.sh` agrees: on a server with the classic store it streams
+nothing, and stops when that pulled image is not there; it also stops when the
+Mac uses the classic store. In `docker info`, the containerd image store shows the
 line `driver-type: io.containerd.snapshotter.v1`; grey has it (Docker 29.8.1,
 2026-11-10). To switch an engine, add `"features": {"containerd-snapshotter":
 true}` to `/etc/docker/daemon.json` and restart Docker. After the switch, Docker
 does not show the images and the containers of the classic store (they stay on
 the disk and come back when you switch back): make the containers of the server
 again.
+
+Do not switch the image store of the grey App server while owner rule C1
+applies: while the grey App runs on an Oracle DB, nobody runs `deploy-app.sh`,
+`service.sh`, `rollback.sh`, `restore.txt` or `grey-oracle-sync-wayback.sh`
+there, and a switch needs the containers of the App made again.
 
 ### Upgrade
 

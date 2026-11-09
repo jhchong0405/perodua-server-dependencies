@@ -657,40 +657,60 @@ checks:
   the server it installs with no `docker pull`, no `docker login` and no
   throwaway `DOCKER_CONFIG`, also when the registry wants a login; the check of
   the image (`docker info` for the image store, `docker image inspect` of
-  `REPOSITORY@DIGEST`) holds the lock and comes before `make_user.py`, which runs
+  `REPOSITORY@DIGEST`) and one start of the image (`docker run --rm --pull never
+  --network none`) hold the lock and come before `make_user.py`, which runs
   with `--pull never`; on a pseudo-terminal it asks nothing, with the image and
   without it; without the image it exits 1 before any change (no directory, an
   installed release untouched) and prints the stream command for the Mac
   (`docker pull --platform linux/amd64 IMAGE && docker tag REPOSITORY@DIGEST
-  REPOSITORY:TAG && docker save REPOSITORY:TAG | ssh SSH_HOST 'sudo -n docker
-  load'`); an image whose ID or registry digest is not the pinned digest, and an
+  REPOSITORY:sha256-HEX && docker save REPOSITORY:sha256-HEX | ssh SSH_HOST
+  'sudo -n docker load'`); an image that does not start (a layer that did not
+  unpack), an image whose ID or registry digest is not the pinned digest, and an
   engine that does not answer `docker info`, also stop it before any change; on
   the classic image store it stops when the image is missing (a loaded image
   has no registry digest) and accepts an image that a pull brought (its ID is
   the digest of its config); `OVB_NO_PULL=0` or empty is the pull as before,
   another value is a usage error (exit 2), and `--no-pull` belongs to `install`
   only; without `--no-pull` the image step is unchanged (no `docker info`);
-  `status` names the result of the same check in its `Local:` line;
+  `status` names the result of the same check in its `Local:` line; a release
+  that does not become healthy under `--no-pull` brings the last good release
+  back with `up --pull never` and no pull or login;
   `OracleViewNoPullCodeTest` (no root) reads the image step of `--no-pull` from
   the script: no `read`, no `docker pull` or `docker login` command, no
-  `pull_image`, the check before the first change, and neither `oracle-view.sh`
+  `pull_image`, the check and the start before the first change, both
+  `docker run` calls with `--pull never --network none`, the stream tag
+  `REPOSITORY:sha256-HEX` made from the pin, and neither `oracle-view.sh`
   nor `oracle-view-stream.sh` names `deploy-app`, `service.sh`, `rollback.sh`,
   `restore.txt` or `grey-oracle-sync-wayback` (owner rule C1: forbidden while
   the grey App runs on an Oracle DB);
-- `oracle-view-stream.sh` (`OracleViewStreamTest`, no root, a fake `docker` of
-  the Mac and a fake `ssh` that refuses any call without `BatchMode=yes` and
-  answers the commands of the server): it tags the pin and streams `docker save`
-  of the tag to `sudo -n docker load`, then checks the server by the digest
-  reference; it pulls on the Mac (`--platform linux/amd64`) only when the pin is
-  missing there, and a failed pull (no login on the Mac) reaches no server; a
-  server with the pin gets nothing; a load that the server does not find by the
-  digest exits 1; `--dry-run` runs only the checks; a classic image store on the
-  server or on the Mac stops it before the stream; a `sudo` that wants a
-  password and a refused connection stop it with the message of the server; one
-  run at a time for each server (a lock of a live process stops it, a lock of an
-  ended one is taken over); usage errors exit 2; the script has no `read`, one
-  `ssh` (batch mode), each command on the server through `sudo -n docker`, and
-  it reads the pin from `oracle-view.sh`;
+- `oracle-view-stream.sh` (`OracleViewStreamTest`, no root, run with
+  `/bin/bash`, which is bash 3.2 on the Mac; a fake `docker` of the Mac and a
+  fake `ssh` that refuses any call without the options of the helper, reads the
+  standard input like ssh unless `-n` is given, answers `ssh -G` and the
+  commands of the server): it gives the pin its stream tag
+  `REPOSITORY:sha256-HEX` and streams `docker save` of that tag to `sudo -n
+  docker load`, then checks the server by the digest reference; each check on
+  the server runs with `ssh -n` and reads nothing of the standard input, the
+  load reads the archive; a stream tag that already names the pin is not tagged
+  again, and one that names another image stops it before the server; an index
+  (not one manifest) stops it before the stream; it pulls on the Mac
+  (`--platform linux/amd64`) only when the pin is missing there, and a failed
+  pull (no login on the Mac) or a pull that brings another ID reaches no
+  server; a failed `docker info`, `docker tag` (with its message) or `docker
+  save` on the Mac, a failed `docker info` or `docker load` on the server, and a
+  load that prints `Error unpacking` stop it with exit 1; a server with the pin
+  gets nothing; a load that the server does not find by the digest exits 1;
+  `--dry-run` runs only the checks; a classic image store on the server stops
+  it before the stream, unless a pull brought the pin there (as `install
+  --no-pull` accepts it), and a classic store on the Mac stops it before ssh; a
+  `sudo` that wants a password and a refused connection stop it with the
+  message of the server; one run at a time for each server, whatever name
+  `ssh -G` resolves to it (a lock directory of a live process, or one with no
+  process number yet, stops it; one of an ended process is taken over; a file or
+  a link there stops it); usage errors exit 2; the script has no `read`, ssh
+  only with `-T -a -x`, batch mode, no forwarding and no local command, each
+  command on the server through `sudo -n docker`, and it reads the pin from
+  `oracle-view.sh`;
 - the container of `deploy/grey/compose.yml`: read-only root file system, tmpfs
   `/tmp`, the state volume, the users file bound read-only without
   `create_host_path`, `127.0.0.1:8797` only, no capabilities, `no-new-privileges`,
