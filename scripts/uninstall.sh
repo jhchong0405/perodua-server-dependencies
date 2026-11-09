@@ -61,7 +61,7 @@ while (($#)); do
                 --confirm) CONFIRM=$2 ;;
                 --confirm-purge) CONFIRM_PURGE=$2 ;;
                 --delete-old-containers)
-                    [[ $2 == - || $2 =~ ^[a-z0-9][a-z0-9_-]*$ ]] || die '--delete-old-containers needs a Compose project name, or - for the containers without one.'
+                    [[ $2 == - || $2 =~ ^[a-z0-9][a-z0-9_-]*$ ]] || die '--delete-old-containers needs a Compose project name, or - for the containers without one. Nothing was changed.'
                     DELETE_OLD+=("$2") ;;
             esac
             shift 2 ;;
