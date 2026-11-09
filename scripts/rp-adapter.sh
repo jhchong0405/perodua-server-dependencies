@@ -63,6 +63,9 @@ status      The settings (no secrets), the image and the output folders.
 uninstall   Removes the settings and the secrets install created in --dir; the
             output folder stays unless --purge, which also removes the image.
             Type the directory to confirm, or pass it with --confirm.
+--non-interactive, or KIT_NON_INTERACTIVE=1 in the environment: no command
+            asks (README.md, "Run the kit without a person"). install needs
+            --config or rp-adapter.env and the *_FILE settings, uninstall --confirm.
 Every command runs the adapter read-only: it runs only its own reviewed
 queries, in read-only transactions, never SQL typed at run time. Needs Docker
 (install-dependencies.sh --role app) and a network path from this server to the
@@ -75,6 +78,18 @@ HELP
 }
 
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 3; }   # 3: UNKNOWN to a monitoring system
+# The only place that reads an answer from a person: stdin, and only when it is
+# a terminal and the run is not non-interactive. Never /dev/tty, which an agent
+# under ssh -t still has. $3 says how to give the answer without a person.
+read_terminal() {  # [-s hidden] [-k keep spaces] VAR PROMPT HOW
+    local read_options=() read_ifs=$' \t\n'
+    while [[ $1 == -[sk] ]]; do
+        if [[ $1 == -s ]]; then read_options+=(-s); else read_ifs=''; fi
+        shift
+    done
+    ((NON_INTERACTIVE == 0)) && [[ -t 0 ]] || die "$3"
+    IFS=$read_ifs read -r "${read_options[@]}" -p "$2" "$1"
+}
 # Any other local step that fails (a full disk, a directory that cannot be made)
 # is this script's error too, not the adapter's WARNING or CRITICAL.
 trap '[[ $BASHPID != "$$" ]] || { printf "ERROR: rp-adapter.sh failed at line %s.\n" "$LINENO" >&2; exit 3; }' ERR
@@ -174,9 +189,10 @@ check_settings() {
 }
 
 ask() {   # $1 key, $2 question, $3 "optional" to accept a blank answer
-    local answer reason
+    local answer='' reason
     while :; do
-        read -r -p "$2${!1:+ [${!1}]}: " answer || die 'Cancelled'
+        read_terminal answer "$2${!1:+ [${!1}]}: " 'No settings yet: run it on a terminal to answer the setup questions, or pass --config' \
+            || die 'Cancelled'
         answer=${answer:-${!1}}
         reason=$(problem "$1" "$answer")
         if [[ -z $reason ]] && [[ -n $answer || ${3:-} == optional ]]; then break; fi
@@ -212,7 +228,7 @@ stage_secret() {   # $1 file name in secrets/, $2 *_FILE setting, $3 prompt; not
         die "The first install without a terminal needs $2 in --config"
     else
         while [[ -z $value ]]; do
-            IFS= read -r -s -p "$prompt (hidden): " value || die 'Cancelled'
+            read_terminal -s -k value "$prompt (hidden): " "The first install without a terminal needs $2 in --config" || die 'Cancelled'
             printf '\n'
         done
     fi
@@ -311,7 +327,7 @@ publish() {   # every staged file into place; on any failure, the previous files
 # ---------------------------------------------------------------- image
 auth_error() { grep -Eiq 'unauthorized|authentication required|denied|forbidden|403|401|no basic auth' "$1"; }
 pull_image() {   # asks for the registry account only when the registry wants one
-    local username token attempts=0 endpoint name='^[A-Za-z0-9][A-Za-z0-9._@-]{0,127}$'
+    local username='' token='' attempts=0 endpoint name='^[A-Za-z0-9][A-Za-z0-9._@-]{0,127}$'
     if docker image inspect "$IMAGE" > /dev/null 2>&1; then
         return 0
     fi
@@ -326,10 +342,12 @@ pull_image() {   # asks for the registry account only when the registry wants on
         ((attempts < 3)) || die 'The registry login failed three times'
         [[ -t 0 ]] || die "The registry login needs a terminal (or run docker login $REGISTRY first)"
         printf 'The registry %s requires a login. Use the deployment account issued for it.\n' "$REGISTRY" >&2
-        read -r -p 'Registry username (blank cancels): ' username || die 'Cancelled'
+        read_terminal username 'Registry username (blank cancels): ' \
+            "The registry login needs a terminal (or run docker login $REGISTRY first)" || die 'Cancelled'
         [[ -n $username ]] || die 'Cancelled'
         [[ $username =~ $name ]] || die 'Invalid registry username'
-        IFS= read -r -s -p 'Registry password (hidden; blank cancels): ' token || die 'Cancelled'
+        read_terminal -s -k token 'Registry password (hidden; blank cancels): ' \
+            "The registry login needs a terminal (or run docker login $REGISTRY first)" || die 'Cancelled'
         printf '\n' >&2
         [[ -n $token ]] || die 'Cancelled'
         if [[ -z $AUTH_DIR ]]; then
@@ -484,8 +502,8 @@ cmd_uninstall() {
         "$( ((PURGE)) && printf ', the output folder with its reports and exports, and the image' \
             || printf '; the output folder stays')"
     if [[ -z $CONFIRM ]]; then
-        [[ -t 0 ]] || die "No terminal to confirm on: pass --confirm $DEPLOY_DIR. Nothing was changed."
-        read -r -p "Type the directory ($DEPLOY_DIR) to confirm: " CONFIRM || die 'Cancelled'
+        read_terminal CONFIRM "Type the directory ($DEPLOY_DIR) to confirm: " \
+            "No terminal to confirm on: pass --confirm $DEPLOY_DIR. Nothing was changed." || die 'Cancelled'
     fi
     [[ $CONFIRM == "$DEPLOY_DIR" ]] || die 'Not confirmed. Nothing was changed.'
     # exactly the files install creates, with the staged and kept copies a crash
@@ -523,13 +541,22 @@ while (($#)); do
             (($# >= 2)) || die "Missing value for $1"
             case $1 in --config) CONFIG=$2 ;; --confirm) CONFIRM=$2 ;; esac
             shift 2 ;;
-        --non-interactive) [[ $COMMAND == install ]] || die '--non-interactive belongs to install'; NON_INTERACTIVE=1; shift ;;
+        --non-interactive) NON_INTERACTIVE=1; shift ;;
         --purge) [[ $COMMAND == uninstall ]] || die '--purge belongs to uninstall'; PURGE=1; shift ;;
         *) ARGS+=("$1"); shift ;;
     esac
 done
 [[ -z $CONFIG || $COMMAND == install ]] || die '--config belongs to install'
 [[ -z $CONFIRM || $COMMAND == uninstall ]] || die '--confirm belongs to uninstall'
+# --non-interactive, or KIT_NON_INTERACTIVE=1 in the environment: no question
+# at all (README.md, "Run the kit without a person"). Each answer comes from an
+# option or a setting; a missing one stops the run before it changes anything.
+case ${KIT_NON_INTERACTIVE:-} in
+    ''|0) ;;
+    1) NON_INTERACTIVE=1 ;;
+    *) die 'KIT_NON_INTERACTIVE must be 1 (never ask) or 0 (ask on a terminal).' ;;
+esac
+((NON_INTERACTIVE == 0)) || export KIT_NON_INTERACTIVE=1
 case $COMMAND in
     install|status|uninstall) ((${#ARGS[@]} == 0)) || die "Unknown argument for $COMMAND: ${ARGS[0]} (see: bash rp-adapter.sh --help)" ;;
 esac
