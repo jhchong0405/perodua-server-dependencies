@@ -10,7 +10,8 @@ usage() {
 Usage: sudo bash uninstall.sh --role db  [--config FILE | --database NAME] [--confirm NAME]
                                 [--purge [--confirm-purge PURGE]] [--non-interactive]
        sudo bash uninstall.sh --role app [--dir PATH] [--confirm PROJECT] [--purge]
-                                [--delete-old-containers PROJECT]... [--delete-old-volumes]
+                                [--delete-old-containers PROJECT | -:ID[,ID]...]...
+                                [--delete-old-volumes]
                                 [--non-interactive]
 
 --role db removes what deploy-db.sh created for one database: the database and
@@ -29,10 +30,12 @@ including its copies of the database password and the SMTP password. The
 attachments volume and the images are kept; --purge removes them too. Other
 containers with "perodua" in their name or image, such as the App of the earlier
 perodua-odoo package, are listed afterwards, or when there is no deployment, and
-deleted after a "y" on a terminal. --delete-old-containers PROJECT (- for the
-containers without a Compose project; once per project) deletes the containers
-of that project without a question and keeps the others; --delete-old-volumes
-deletes the volumes they used too.
+deleted after a "y" on a terminal. --delete-old-containers PROJECT (once per
+project) deletes the containers of that Compose project without a question and
+keeps the others; -:ID,ID names containers without a Compose project by the IDs
+that a run without the option lists, so that a container that starts later is
+never deleted; --delete-old-volumes deletes the volumes they used too. Containers
+of the kit's own runs (the label com.perodua.rp-adapter) are never listed.
 
 The plan is shown first. Type the database or project name to confirm, or pass
 it with --confirm for unattended use.
@@ -47,8 +50,9 @@ die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 ROLE='' CONFIG='' DATABASE='' DEPLOY_DIR=/opt/perodua-app CONFIRM='' PURGE=0 NON_INTERACTIVE=0 CONFIRM_PURGE=''
 # The other containers with "perodua" (other_perodua_containers) to delete
-# without a question: Compose projects, - for those without one.
-DELETE_OLD=() DELETE_OLD_VOLUMES=0
+# without a question: Compose projects, - for those without one, and then only
+# the IDs in OLD_IDS (-:ID,ID).
+DELETE_OLD=() OLD_IDS=() DELETE_OLD_VOLUMES=0
 while (($#)); do
     case $1 in
         --role|--config|--database|--dir|--confirm|--confirm-purge|--delete-old-containers)
@@ -61,8 +65,18 @@ while (($#)); do
                 --confirm) CONFIRM=$2 ;;
                 --confirm-purge) CONFIRM_PURGE=$2 ;;
                 --delete-old-containers)
-                    [[ $2 == - || $2 =~ ^[a-z0-9][a-z0-9_-]*$ ]] || die '--delete-old-containers needs a Compose project name, or - for the containers without one. Nothing was changed.'
-                    DELETE_OLD+=("$2") ;;
+                    if [[ $2 =~ ^-:([A-Za-z0-9][A-Za-z0-9_.-]*(,[A-Za-z0-9][A-Za-z0-9_.-]*)*)$ ]]; then
+                        IFS=, read -r -a old_ids <<< "${BASH_REMATCH[1]}"
+                        OLD_IDS+=("${old_ids[@]}")
+                        [[ " ${DELETE_OLD[*]} " == *' - '* ]] || DELETE_OLD+=(-)
+                    elif [[ $2 == - ]]; then
+                        # Read at run time, a plain - would also delete a container that started
+                        # after the list was read, such as the cron run of rp-adapter.sh export.
+                        die '--delete-old-containers - needs the IDs of the containers without a Compose project, as a run without the option lists them: -:ID,ID. Nothing was changed.'
+                    else
+                        [[ $2 =~ ^[a-z0-9][a-z0-9_-]*$ ]] || die '--delete-old-containers needs a Compose project name, or -:ID,ID for containers without one. Nothing was changed.'
+                        DELETE_OLD+=("$2")
+                    fi ;;
             esac
             shift 2 ;;
         --purge) PURGE=1; shift ;;
@@ -107,7 +121,7 @@ read_terminal() {  # [-s hidden] [-k keep spaces] VAR PROMPT HOW
         if [[ $1 == -s ]]; then read_options+=(-s); else read_ifs=''; fi
         shift
     done
-    ((NON_INTERACTIVE == 0)) && [[ -t 0 ]] || die "$3"
+    { ((NON_INTERACTIVE == 0)) && [[ -t 0 ]]; } || die "$3"
     IFS=$read_ifs read -r "${read_options[@]}" -p "$2" "$1"
 }
 confirm() {
@@ -116,7 +130,7 @@ confirm() {
         [[ $CONFIRM == "$expected" ]] || die "--confirm must be exactly $expected. Nothing was changed."
         return
     fi
-    read_terminal -k answer "Type $expected to confirm: " "No terminal to confirm on: pass --confirm $expected. Nothing was changed." \
+    read_terminal -k answer "Type $expected to confirm: " "A non-interactive run, or a run without a terminal, asks nothing: pass --confirm $expected. Nothing was changed." \
         || die 'Cancelled. Nothing was changed.'
     [[ $answer == "$expected" ]] || die 'The confirmation did not match. Nothing was changed.'
 }
@@ -143,13 +157,15 @@ confirm_purge() {
 OTHERS_DELETED=0
 other_perodua_containers() {
     local skip=$1 intro=$2 rows=() groups=() ids=() lines=() images=() volumes=() listed ask=0 named
-    local row id project dir name image status ports group from answer volume error remove
+    local row id project dir name image status ports group from answer volume error remove line found
+    local kept=() kept_lines=()
     local format='{{.ID}}|{{.Label "com.docker.compose.project"}}|{{.Label "com.docker.compose.project.working_dir"}}'
-    format+='|{{.Names}}|{{.Image}}|{{.Status}}|{{.Ports}}'
+    format+='|{{.Names}}|{{.Image}}|{{.Status}}|{{.Ports}}|{{.Label "com.perodua.rp-adapter"}}'
     # Questions only from a person: no option given, not non-interactive, a terminal.
     if ((${#DELETE_OLD[@]} == 0 && NON_INTERACTIVE == 0)) && [[ -t 0 ]]; then ask=1; fi
+    # Never a run of a kit script (rp-adapter.sh labels its containers): it is not an old deployment.
     mapfile -t rows < <(docker ps -a --format "$format" 2>/dev/null \
-        | awk -F'|' -v skip="$skip" 'tolower($4 "|" $5) ~ /perodua/ && (skip == "" || $2 != skip)')
+        | awk -F'|' -v skip="$skip" 'tolower($4 "|" $5) ~ /perodua/ && $8 == "" && (skip == "" || $2 != skip)')
     if ((${#rows[@]} == 0)); then
         for named in "${DELETE_OLD[@]}"; do
             [[ $named == "$skip" ]] \
@@ -161,22 +177,42 @@ other_perodua_containers() {
     printf '\nOther containers with "perodua" in their name or image are on this server. The earlier\n'
     printf 'perodua-odoo package deployed its App as the Compose project perodua-odoo.\n'
     for row in "${rows[@]}"; do
-        IFS='|' read -r id project dir name image status ports <<< "$row"
+        IFS='|' read -r id project dir name image status ports _ <<< "$row"
         [[ " ${groups[*]} " == *" ${project:--} "* ]] || groups+=("${project:--}")
     done
     for named in "${DELETE_OLD[@]}"; do
-        [[ " ${groups[*]} " == *" $named "* || $named == "$skip" ]] \
+        [[ " ${groups[*]} " == *" $named "* || $named == "$skip" || $named == - ]] \
             || printf 'No other container of %s has "perodua" in its name or image: --delete-old-containers %s deletes nothing.\n' "$named" "$named"
     done
+    for named in "${OLD_IDS[@]}"; do
+        found=0
+        for row in "${rows[@]}"; do
+            IFS='|' read -r id project dir name image status ports _ <<< "$row"
+            [[ $id != "$named" || -n $project ]] || found=1
+        done
+        ((found)) || printf 'No other container without a Compose project and with "perodua" in its name or image has the ID %s: it is not deleted.\n' "$named"
+    done
     for group in "${groups[@]}"; do
-        ids=() lines=() images=() volumes=() from='' remove=''
+        ids=() lines=() images=() volumes=() from='' remove='' kept=() kept_lines=()
         [[ " ${DELETE_OLD[*]} " != *" $group "* ]] || remove=1
         for row in "${rows[@]}"; do
-            IFS='|' read -r id project dir name image status ports <<< "$row"
+            IFS='|' read -r id project dir name image status ports _ <<< "$row"
             [[ ${project:--} == "$group" ]] || continue
-            ids+=("$id") lines+=("  $name  $image  $status${ports:+  $ports}") from=${from:-$dir}
+            line="  $name  $image  $status${ports:+  $ports}"
+            if [[ $group == - && -n $remove && " ${OLD_IDS[*]} " != *" $id "* ]]; then
+                kept+=("$id") kept_lines+=("$line")   # -:ID,ID does not name it
+                continue
+            fi
+            ids+=("$id") lines+=("$line") from=${from:-$dir}
             [[ " ${images[*]} " == *" $image "* ]] || images+=("$image")
         done
+        if ((${#kept[@]})); then
+            printf '\nContainers without a Compose project that -:ID,ID does not name:\n'
+            printf '%s\n' "${kept_lines[@]}"
+            printf 'Not deleted. To delete them: sudo docker rm -f %s\n' "${kept[*]}"
+            printf 'Or run this again with --delete-old-containers -:%s.\n' "$(IFS=,; printf '%s' "${kept[*]}")"
+        fi
+        ((${#ids[@]})) || continue
         if [[ $group == - ]]; then
             group=''
             printf '\nContainers without a Compose project:\n'
@@ -192,16 +228,17 @@ other_perodua_containers() {
             fi
             if [[ -n $group ]]; then
                 printf ' To delete them: sudo docker compose --project-name %s down\n' "$group"
+                printf 'Or run this again with --delete-old-containers %s.\n' "$group"
             else
                 printf ' To delete them: sudo docker rm -f %s\n' "${ids[*]}"
+                printf 'Or run this again with --delete-old-containers -:%s.\n' "$(IFS=,; printf '%s' "${ids[*]}")"
             fi
-            printf 'Or run this again with --delete-old-containers %s.\n' "${group:--}"
             continue
         fi
         answer=y
         if ((ask)); then
             read_terminal -k answer 'Is this an old deployment? Delete these containers [y/N]: ' \
-                "Pass --delete-old-containers ${group:--} to delete them." || answer=''
+                "Pass --delete-old-containers ${group:--:$(IFS=,; printf '%s' "${ids[*]}")} to delete them." || answer=''
         fi
         if [[ $answer != [Yy]* ]]; then
             printf 'Kept them.\n'
