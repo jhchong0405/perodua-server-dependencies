@@ -3227,10 +3227,10 @@ class OracleViewDocsTest(unittest.TestCase):
     """The README and the usage text name the pinned release and the steps that the script expects."""
 
     def test_the_pin_is_the_release_of_2026_11_11(self):
-        self.assertEqual(IMAGE, REPOSITORY + ":grey-v1.0.8@sha256:"
-                         "0b842a9a78c5e73913ed2394270efd3eac5f8121555a6979a7afd4155ef2abc0")
-        self.assertEqual(RELEASE, "oracle-view-grey-v1.0.8")
-        for old in ("grey-v1.0.1", "8e82b47f", "a5b48111", "ed104afa", "cf9a9170", "9d3883e8", "317f9423", "f40f832a"):
+        self.assertEqual(IMAGE, REPOSITORY + ":grey-v1.0.9@sha256:"
+                         "b84b67c413f9137d99c181434abbefbdb9eef3fc3fdfeaaa1a7026f77de1b989")
+        self.assertEqual(RELEASE, "oracle-view-grey-v1.0.9")
+        for old in ("grey-v1.0.1", "8e82b47f", "a5b48111", "ed104afa", "cf9a9170", "9d3883e8", "317f9423", "f40f832a", "0b842a9a"):
             self.assertNotIn(old, TEXT)
             self.assertNotIn(old, README)
 
@@ -3388,7 +3388,7 @@ class OracleViewDocsTest(unittest.TestCase):
         for sentence in ("With `--no-pull`, `install` never pulls, never logs in to the registry and never asks a question.",
                          "Save the stream tag, not the digest reference and not the release tag. An archive of a digest "
                          "reference has no image name: `docker load` keeps it as a dangling image, and the digest "
-                         "reference does not find it. A release tag (`grey-v1.0.8`) can move to a later image: then the "
+                         "reference does not find it. A release tag (`grey-v1.0.9`) can move to a later image: then the "
                          "release before it becomes a dangling image, and the switch back to the last good release "
                          "(`--pull never`) does not find it. Each digest has its own stream tag, so no later pin moves it.",
                          "It stops when the stream tag names another image on the Mac, and when `docker load` on the server "
