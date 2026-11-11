@@ -3227,10 +3227,10 @@ class OracleViewDocsTest(unittest.TestCase):
     """The README and the usage text name the pinned release and the steps that the script expects."""
 
     def test_the_pin_is_the_release_of_2026_11_11(self):
-        self.assertEqual(IMAGE, REPOSITORY + ":grey-v1.0.6@sha256:"
-                         "317f94236da7c3233b8047c0c5c22066e5c0fdb6e6e27dd506982d2b66050e4a")
-        self.assertEqual(RELEASE, "oracle-view-grey-v1.0.6")
-        for old in ("grey-v1.0.1", "8e82b47f", "a5b48111", "ed104afa", "cf9a9170", "9d3883e8"):
+        self.assertEqual(IMAGE, REPOSITORY + ":grey-v1.0.7@sha256:"
+                         "f40f832a80fd1eb5b7ba9d821fc61ad403870a5846b187f32e9d43dcfb009507")
+        self.assertEqual(RELEASE, "oracle-view-grey-v1.0.7")
+        for old in ("grey-v1.0.1", "8e82b47f", "a5b48111", "ed104afa", "cf9a9170", "9d3883e8", "317f9423"):
             self.assertNotIn(old, TEXT)
             self.assertNotIn(old, README)
 
@@ -3388,7 +3388,7 @@ class OracleViewDocsTest(unittest.TestCase):
         for sentence in ("With `--no-pull`, `install` never pulls, never logs in to the registry and never asks a question.",
                          "Save the stream tag, not the digest reference and not the release tag. An archive of a digest "
                          "reference has no image name: `docker load` keeps it as a dangling image, and the digest "
-                         "reference does not find it. A release tag (`grey-v1.0.6`) can move to a later image: then the "
+                         "reference does not find it. A release tag (`grey-v1.0.7`) can move to a later image: then the "
                          "release before it becomes a dangling image, and the switch back to the last good release "
                          "(`--pull never`) does not find it. Each digest has its own stream tag, so no later pin moves it.",
                          "It stops when the stream tag names another image on the Mac, and when `docker load` on the server "
