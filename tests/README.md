@@ -816,10 +816,10 @@ checks:
   `sha256` digest, the release name from its tag; `install` pulls exactly it
   (once), `compose.yml` names it with `pull_policy: never` and `up` never pulls;
   the usage text and every `oracle-view:grey-v...` tag of the README name that
-  release; the pin is exactly `grey-v1.0.11@sha256:a991556e...` (linux/amd64,
-  label `org.opencontainers.image.version` `grey-v1.0.11`, revision `41151bd`)
-  and neither the script nor the README names the tag `grey-v1.0.1` (the full tag, not the start of `grey-v1.0.11`), `8e82b47f`,
-  `a5b48111`, `ed104afa`, `cf9a9170`, `9d3883e8`, `317f9423`, `f40f832a`, `0b842a9a`, `b84b67c4` or `30d14c39`
+  release; the pin is exactly `grey-v1.0.12@sha256:a938bd2d...` (linux/amd64,
+  label `org.opencontainers.image.version` `grey-v1.0.12`, revision `d9f8618`)
+  and neither the script nor the README names the tag `grey-v1.0.1` (the full tag, not the start of `grey-v1.0.12`), `8e82b47f`,
+  `a5b48111`, `ed104afa`, `cf9a9170`, `9d3883e8`, `317f9423`, `f40f832a`, `0b842a9a`, `b84b67c4`, `30d14c39` or `a991556e`
   (`OracleViewDocsTest`,
   which needs no root, also checks the README sentences of the tests below and
   that only the lines `RP_DATABASE=perodua_oracle2` and
