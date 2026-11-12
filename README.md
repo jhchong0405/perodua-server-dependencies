@@ -2418,7 +2418,7 @@ The Oracle Field Browser is a web tool for the integration work. It shows the
 Oracle EBS objects, the RP database (`perodua_oracle2` on the DB server, the
 database of the grey App: owner decision of 2026-11-07) and the RP-to-Oracle
 mapping, and it has a SQL console. `oracle-view.sh` runs the pinned
-image `perodua-deploy.novutal.com/oracle-view:grey-v1.0.10` with Docker Compose on
+image `perodua-deploy.novutal.com/oracle-view:grey-v1.0.11` with Docker Compose on
 the App server, and on the DB server it makes the role that the tool signs in
 with. The tool is at `https://stgiss.perodua.com.my/dev/oracle-view/` through a
 route of [https.sh](#https). Every page and every API call needs a login.
@@ -2428,7 +2428,7 @@ route of [https.sh](#https). Every page and every API call needs a login.
 | Container `oracle-view` on `127.0.0.1:8797` only, run from `/opt/perodua-oracle-view` | App server |
 | Route `stgiss.perodua.com.my /dev/oracle-view/ 8797 strip,http` | App server, `/etc/perodua-https/routes.conf` |
 | Role `oracle_view_rp` on the database `perodua_oracle2`: read and write on the tables, read-only by default, every right of the owner of the database (DDL, `TRUNCATE`, `CREATE`), and the schema `ovb_stage` for the staging tables of Copy to RP | DB server (PostgreSQL 16) |
-| Image `perodua-deploy.novutal.com/oracle-view:grey-v1.0.10`, pulled by digest, or streamed from the Mac ([Install from a streamed image](#install-from-a-streamed-image)) | Private registry |
+| Image `perodua-deploy.novutal.com/oracle-view:grey-v1.0.11`, pulled by digest, or streamed from the Mac ([Install from a streamed image](#install-from-a-streamed-image)) | Private registry |
 
 The Code section of the tool shows the mapping that the RP code writes. The
 tool reads it from the RP database: `perodua_master_feed` stores it in the
@@ -2461,9 +2461,10 @@ of RP `46233c9c77de`. `grey-v1.0.7` added the rule "a class without pairs has th
 direction none" of the Mapping editor and the mapping file of 2026-11-11 with the
 client edits of 2026-11-10 (oracle-view PR #34, #33). `grey-v1.0.8` added the field
 screens of RP `6dec5e5d0dc8` (grey v0.67.0, oracle-view PR #35). `grey-v1.0.9` added the
-field screens of RP `d162ee0b3a41` (grey v0.68.0, oracle-view PR #37). `grey-v1.0.10` adds the
+field screens of RP `d162ee0b3a41` (grey v0.68.0, oracle-view PR #37). `grey-v1.0.10` added the
 T-SQL dialect of the SQL console, Copy to RP, the stop after a refused Oracle login (oracle-view
-PR #39 with #38) and the RP Rows and Filter tabs without the 10,000-row cap (PR #40).
+PR #39 with #38) and the RP Rows and Filter tabs without the 10,000-row cap (PR #40). `grey-v1.0.11` adds the field screens of
+RP `87aaf23a4aaa` (grey v0.69.0, oracle-view PR #41).
 
 The image holds the Oracle settings file and the password of the role
 `oracle_view_rp` (owner decision of 2026-11-06). This repository holds no secret of
@@ -2810,7 +2811,7 @@ stream the image from the Mac and add `--no-pull`
   container again: the tool reads the users file at its start only;
 - checks `http://127.0.0.1:8797/healthz` on the server.
 
-Wait for `Installed: oracle-view-grey-v1.0.10`. Then read the first passwords:
+Wait for `Installed: oracle-view-grey-v1.0.11`. Then read the first passwords:
 
 ```bash
 sudo cat /opt/perodua-oracle-view/initial-login.txt
@@ -2982,7 +2983,7 @@ oracle-view.sh`).
    Save the stream tag, not the digest reference and not the release tag. An
    archive of a digest reference has no image name: `docker load` keeps it as a
    dangling image, and the digest reference does not find it. A release tag
-   (`grey-v1.0.10`) can move to a later image: then the release before it becomes
+   (`grey-v1.0.11`) can move to a later image: then the release before it becomes
    a dangling image, and the switch back to the last good release (`--pull
    never`) does not find it. Each digest has its own stream tag, so no later
    pin moves it.
@@ -2992,7 +2993,7 @@ oracle-view.sh`).
    images](#install-from-streamed-images) tells: the script runs
    `stream-image.sh` (`bash scripts/stream-image.sh grey oracle-view.sh`), with
    its checks, its lock for each server and its messages. The pin of
-   grey-v1.0.10 is one manifest (`docker buildx imagetools inspect`,
+   grey-v1.0.11 is one manifest (`docker buildx imagetools inspect`,
    2026-11-11).
 
 2. On the App server:
@@ -3122,7 +3123,7 @@ Do the steps in this order.
 | Container (App server) | `sudo bash oracle-view.sh uninstall`, then type `oracle-view`. It removes the container, `initial-login.txt` and the files `install` made. The state volume, the users file and the image stay; `install` uses them again. `--purge` also removes the state volume (the mapping edits and the SQL audit), the users file and every local image of `perodua-deploy.novutal.com/oracle-view`. It lists what it removed. When a step fails, it also lists what it did not remove, keeps the deployment and exits 1: correct the cause, then run it again |
 | Role (DB server) | `sudo bash oracle-view.sh drop-role`, then type `oracle_view_rp`. It ends the sessions of the role, removes its rights in `perodua_oracle2` and in `perodua_oracle` (when it exists, so that an old grant cannot make the drop fail) and drops it (also `oracle_view_ro` of an earlier bundle). It skips a `perodua_oracle` that does not accept connections. It also drops the schema `ovb_stage` with the staging tables of Copy to RP and their data: when `ovb_stage` holds tables, it lists them and stops before any change; run it again with `--drop-staging` when they can go. It also stops when an object outside `ovb_stage` depends on an object in it ([The staging schema ovb_stage](#the-staging-schema-ovb_stage)). The other objects of the role in `perodua_oracle2` and `perodua_oracle` (what the SQL console made, for example a table in `public`) stay: it gives them to the owner of that database and names them. It stops before any change when `oracle_view_rp` owns one of these databases: a different owner is needed first. Rows that the SQL console changed stay changed |
 | `pg_hba.conf` line (DB server), if you added one | `sudo cp -p HBA_FILE.before-oracle-view HBA_FILE`, then `sudo -u postgres psql -X -d postgres -c 'SELECT pg_reload_conf()'` |
-| Registry | Delete the tag `oracle-view:grey-v1.0.10` and the tags of earlier releases when nobody needs them: each image holds the secrets |
+| Registry | Delete the tag `oracle-view:grey-v1.0.11` and the tags of earlier releases when nobody needs them: each image holds the secrets |
 
 `uninstall` and `drop-role` without a terminal, or in a non-interactive run
 (`--non-interactive` or `KIT_NON_INTERACTIVE=1`), need `--confirm oracle-view`
