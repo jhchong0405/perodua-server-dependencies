@@ -816,10 +816,10 @@ checks:
   `sha256` digest, the release name from its tag; `install` pulls exactly it
   (once), `compose.yml` names it with `pull_policy: never` and `up` never pulls;
   the usage text and every `oracle-view:grey-v...` tag of the README name that
-  release; the pin is exactly `grey-v1.0.29@sha256:a902bf5c...` (linux/amd64,
-  label `org.opencontainers.image.version` `grey-v1.0.29`, revision `2d45cad`)
-  and neither the script nor the README names the tag `grey-v1.0.1` (the full tag, not the start of `grey-v1.0.29`), `8e82b47f`,
-  `a5b48111`, `ed104afa`, `cf9a9170`, `9d3883e8`, `317f9423`, `f40f832a`, `0b842a9a`, `b84b67c4`, `30d14c39`, `a991556e`, `a938bd2d`, `6609b96e`, `b4399dde`, `011d6087`, `d23ecb4a`, `5d8ac026`, `4cbfeb89`, `bdac2366`, `21a69ee7`, `7147376a`, `d1c6bfab`, `bfe2e6e0`, `56f9d0ff`, `12d83c30`, `45fd3120` or `7dd11896`
+  release; the pin is exactly `grey-v1.0.30@sha256:06eddf83...` (linux/amd64,
+  label `org.opencontainers.image.version` `grey-v1.0.30`, revision `25b8068`)
+  and neither the script nor the README names the tag `grey-v1.0.1` (the full tag, not the start of `grey-v1.0.30`), `8e82b47f`,
+  `a5b48111`, `ed104afa`, `cf9a9170`, `9d3883e8`, `317f9423`, `f40f832a`, `0b842a9a`, `b84b67c4`, `30d14c39`, `a991556e`, `a938bd2d`, `6609b96e`, `b4399dde`, `011d6087`, `d23ecb4a`, `5d8ac026`, `4cbfeb89`, `bdac2366`, `21a69ee7`, `7147376a`, `d1c6bfab`, `bfe2e6e0`, `56f9d0ff`, `12d83c30`, `45fd3120`, `7dd11896` or `a902bf5c`
   (`OracleViewDocsTest`,
   which needs no root, also checks the README sentences of the tests below and
   that only the lines `RP_DATABASE=perodua_oracle2` and
