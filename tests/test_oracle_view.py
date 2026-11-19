@@ -3227,10 +3227,10 @@ class OracleViewDocsTest(unittest.TestCase):
     """The README and the usage text name the pinned release and the steps that the script expects."""
 
     def test_the_pin_is_the_release_of_2026_11_11(self):
-        self.assertEqual(IMAGE, REPOSITORY + ":grey-v1.0.39@sha256:"
-                         "76f9eba034f6547ff08cc2910aae9f27fb86c63664bf162068acb45b7dc9f21d")
-        self.assertEqual(RELEASE, "oracle-view-grey-v1.0.39")
-        for old in ("8e82b47f", "a5b48111", "ed104afa", "cf9a9170", "9d3883e8", "317f9423", "f40f832a", "0b842a9a", "b84b67c4", "30d14c39", "a991556e", "a938bd2d", "6609b96e", "b4399dde", "011d6087", "d23ecb4a", "5d8ac026", "4cbfeb89", "bdac2366", "21a69ee7", "7147376a", "d1c6bfab", "bfe2e6e0", "56f9d0ff", "12d83c30", "45fd3120", "7dd11896", "a902bf5c", "06eddf83", "3a5b2ed7", "9523dc64", "936b8d60", "1f71e940", "cd2499b8", "6c3acd37", "9726c376", "1119c97f"):
+        self.assertEqual(IMAGE, REPOSITORY + ":grey-v1.0.40@sha256:"
+                         "4bce4a6b8295fbf2ec2218bde4e6741cd421c3b8953aa5f815e206cd4e6ba3dd")
+        self.assertEqual(RELEASE, "oracle-view-grey-v1.0.40")
+        for old in ("8e82b47f", "a5b48111", "ed104afa", "cf9a9170", "9d3883e8", "317f9423", "f40f832a", "0b842a9a", "b84b67c4", "30d14c39", "a991556e", "a938bd2d", "6609b96e", "b4399dde", "011d6087", "d23ecb4a", "5d8ac026", "4cbfeb89", "bdac2366", "21a69ee7", "7147376a", "d1c6bfab", "bfe2e6e0", "56f9d0ff", "12d83c30", "45fd3120", "7dd11896", "a902bf5c", "06eddf83", "3a5b2ed7", "9523dc64", "936b8d60", "1f71e940", "cd2499b8", "6c3acd37", "9726c376", "1119c97f", "76f9eba0"):
             self.assertNotIn(old, TEXT)
             self.assertNotIn(old, README)
         for text in (TEXT, README):
@@ -3390,7 +3390,7 @@ class OracleViewDocsTest(unittest.TestCase):
         for sentence in ("With `--no-pull`, `install` never pulls, never logs in to the registry and never asks a question.",
                          "Save the stream tag, not the digest reference and not the release tag. An archive of a digest "
                          "reference has no image name: `docker load` keeps it as a dangling image, and the digest "
-                         "reference does not find it. A release tag (`grey-v1.0.39`) can move to a later image: then the "
+                         "reference does not find it. A release tag (`grey-v1.0.40`) can move to a later image: then the "
                          "release before it becomes a dangling image, and the switch back to the last good release "
                          "(`--pull never`) does not find it. Each digest has its own stream tag, so no later pin moves it.",
                          "It stops when the stream tag names another image on the Mac, and when `docker load` on the server "
