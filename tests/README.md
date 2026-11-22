@@ -816,10 +816,10 @@ checks:
   `sha256` digest, the release name from its tag; `install` pulls exactly it
   (once), `compose.yml` names it with `pull_policy: never` and `up` never pulls;
   the usage text and every `oracle-view:grey-v...` tag of the README name that
-  release; the pin is exactly `grey-v1.0.47@sha256:17ae0894...` (linux/amd64,
-  label `org.opencontainers.image.version` `grey-v1.0.47`, revision `f937ee7`)
-  and neither the script nor the README names the tag `grey-v1.0.1` (the full tag, not the start of `grey-v1.0.47`), `8e82b47f`,
-  `a5b48111`, `ed104afa`, `cf9a9170`, `9d3883e8`, `317f9423`, `f40f832a`, `0b842a9a`, `b84b67c4`, `30d14c39`, `a991556e`, `a938bd2d`, `6609b96e`, `b4399dde`, `011d6087`, `d23ecb4a`, `5d8ac026`, `4cbfeb89`, `bdac2366`, `21a69ee7`, `7147376a`, `d1c6bfab`, `bfe2e6e0`, `56f9d0ff`, `12d83c30`, `45fd3120`, `7dd11896`, `a902bf5c`, `06eddf83`, `3a5b2ed7`, `9523dc64`, `936b8d60`, `1f71e940`, `cd2499b8`, `6c3acd37`, `9726c376`, `1119c97f`, `76f9eba0`, `4bce4a6b`, `b34d7be8`, `6f26344b`, `3bee743c`, `8ff26e00`, `9cbca6e5` or `0a17b38e`
+  release; the pin is exactly `grey-v1.0.48@sha256:daf41374...` (linux/amd64,
+  label `org.opencontainers.image.version` `grey-v1.0.48`, revision `d95f286`)
+  and neither the script nor the README names the tag `grey-v1.0.1` (the full tag, not the start of `grey-v1.0.48`), `8e82b47f`,
+  `a5b48111`, `ed104afa`, `cf9a9170`, `9d3883e8`, `317f9423`, `f40f832a`, `0b842a9a`, `b84b67c4`, `30d14c39`, `a991556e`, `a938bd2d`, `6609b96e`, `b4399dde`, `011d6087`, `d23ecb4a`, `5d8ac026`, `4cbfeb89`, `bdac2366`, `21a69ee7`, `7147376a`, `d1c6bfab`, `bfe2e6e0`, `56f9d0ff`, `12d83c30`, `45fd3120`, `7dd11896`, `a902bf5c`, `06eddf83`, `3a5b2ed7`, `9523dc64`, `936b8d60`, `1f71e940`, `cd2499b8`, `6c3acd37`, `9726c376`, `1119c97f`, `76f9eba0`, `4bce4a6b`, `b34d7be8`, `6f26344b`, `3bee743c`, `8ff26e00`, `9cbca6e5`, `0a17b38e` or `17ae0894`
   (`OracleViewDocsTest`,
   which needs no root, also checks the README sentences of the tests below and
   that only the lines `RP_DATABASE=perodua_oracle2` and
