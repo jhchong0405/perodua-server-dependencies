@@ -12,9 +12,9 @@ umask 077
 unset PGPASSWORD PGPASSFILE PGHOST PGHOSTADDR PGPORT PGUSER PGDATABASE PGOPTIONS \
     PGSERVICE PGSERVICEFILE PGSSLMODE || true
 
-RELEASE=oracle-view-grey-v1.0.56
+RELEASE=oracle-view-grey-v1.0.57
 # Published to the private registry only: every account that can pull it can read the secrets in it.
-IMAGE=perodua-deploy.novutal.com/oracle-view:grey-v1.0.56@sha256:2d36926747a36ab7d7931dc38c406871bf80eb21ee4a3a53aac3694c1e703b79
+IMAGE=perodua-deploy.novutal.com/oracle-view:grey-v1.0.57@sha256:2844bc4ac628660dd77810bee94512b7183bc0b741799204185fd143f0d034c3
 REGISTRY=${IMAGE%%/*}
 REPOSITORY=${IMAGE%%[:@]*}
 DIGEST=${IMAGE##*@}
