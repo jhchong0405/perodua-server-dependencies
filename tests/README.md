@@ -816,10 +816,10 @@ checks:
   `sha256` digest, the release name from its tag; `install` pulls exactly it
   (once), `compose.yml` names it with `pull_policy: never` and `up` never pulls;
   the usage text and every `oracle-view:grey-v...` tag of the README name that
-  release; the pin is exactly `grey-v1.0.69@sha256:c3abfcc5...` (linux/amd64,
-  label `org.opencontainers.image.version` `grey-v1.0.69`, revision `9f2c4d9`)
-  and neither the script nor the README names the tag `grey-v1.0.1` (the full tag, not the start of `grey-v1.0.69`), `8e82b47f`,
-  `a5b48111`, `ed104afa`, `cf9a9170`, `9d3883e8`, `317f9423`, `f40f832a`, `0b842a9a`, `b84b67c4`, `30d14c39`, `a991556e`, `a938bd2d`, `6609b96e`, `b4399dde`, `011d6087`, `d23ecb4a`, `5d8ac026`, `4cbfeb89`, `bdac2366`, `21a69ee7`, `7147376a`, `d1c6bfab`, `bfe2e6e0`, `56f9d0ff`, `12d83c30`, `45fd3120`, `7dd11896`, `a902bf5c`, `06eddf83`, `3a5b2ed7`, `9523dc64`, `936b8d60`, `1f71e940`, `cd2499b8`, `6c3acd37`, `9726c376`, `1119c97f`, `76f9eba0`, `4bce4a6b`, `b34d7be8`, `6f26344b`, `3bee743c`, `8ff26e00`, `9cbca6e5`, `0a17b38e`, `17ae0894`, `daf41374`, `a7297ad6`, `702d51d9`, `1d2c40f1`, `08283801`, `a4e8897b`, `511a2216`, `b2467452`, `2d369267`, `2844bc4a`, `ba03a8f4`, `5a8d7f65`, `4eb3bb07`, `078fb6b7`, `64eb9162`, `95d482fe`, `64ceb9c6`, `b92c2069`, `620c3cba`, `e79536fd` or `1b7ed600`
+  release; the pin is exactly `grey-v1.0.70@sha256:49dae090...` (linux/amd64,
+  label `org.opencontainers.image.version` `grey-v1.0.70`, revision `f190da1`)
+  and neither the script nor the README names the tag `grey-v1.0.1` (the full tag, not the start of `grey-v1.0.70`), `8e82b47f`,
+  `a5b48111`, `ed104afa`, `cf9a9170`, `9d3883e8`, `317f9423`, `f40f832a`, `0b842a9a`, `b84b67c4`, `30d14c39`, `a991556e`, `a938bd2d`, `6609b96e`, `b4399dde`, `011d6087`, `d23ecb4a`, `5d8ac026`, `4cbfeb89`, `bdac2366`, `21a69ee7`, `7147376a`, `d1c6bfab`, `bfe2e6e0`, `56f9d0ff`, `12d83c30`, `45fd3120`, `7dd11896`, `a902bf5c`, `06eddf83`, `3a5b2ed7`, `9523dc64`, `936b8d60`, `1f71e940`, `cd2499b8`, `6c3acd37`, `9726c376`, `1119c97f`, `76f9eba0`, `4bce4a6b`, `b34d7be8`, `6f26344b`, `3bee743c`, `8ff26e00`, `9cbca6e5`, `0a17b38e`, `17ae0894`, `daf41374`, `a7297ad6`, `702d51d9`, `1d2c40f1`, `08283801`, `a4e8897b`, `511a2216`, `b2467452`, `2d369267`, `2844bc4a`, `ba03a8f4`, `5a8d7f65`, `4eb3bb07`, `078fb6b7`, `64eb9162`, `95d482fe`, `64ceb9c6`, `b92c2069`, `620c3cba`, `e79536fd`, `1b7ed600` or `c3abfcc5`
   (`OracleViewDocsTest`,
   which needs no root, also checks the README sentences of the tests below and
   that only the lines `RP_DATABASE=perodua_oracle2` and
